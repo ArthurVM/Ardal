@@ -27,8 +27,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pybind11
-          pip install pytest pytest-cov
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pybind11
 
       - name: Install Ardal (editable mode)
         run: pip install -e .
