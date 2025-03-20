@@ -4,7 +4,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <limits>
-#include <immintrin.h> 
+#include <map>
+#include <immintrin.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -12,7 +13,7 @@
 namespace _ardal {
 
 class AlleleMatrix {
-public:
+ public:
 
     // Constructor
     AlleleMatrix(pybind11::array_t<uint8_t> matrix) : _matrix(matrix) {
@@ -64,8 +65,11 @@ public:
     // SNP algebra methods
     std::vector<int> gatherSNPs( const pybind11::array_t<int> guid_indices ) const;
 
+    // cache management
+    void flushCache( void );
 
-private:
+
+ private:
     pybind11::array_t<uint8_t> _matrix;  // the matrix data
     size_t _n;                           // number of rows
     size_t _m;                           // number of columns
@@ -78,9 +82,9 @@ private:
     std::vector<int> _mass( void ) const;
 
 
-}; // class AlleleMatrix
+};  // class AlleleMatrix
 
-} // namespace _ardal
+}  // namespace _ardal
 
-#endif // ALLELE_MATRIX_HPP
+#endif  // SRC_ALLELEMATRIX_HPP_
 

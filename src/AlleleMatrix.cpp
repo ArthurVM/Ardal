@@ -2,7 +2,7 @@
 Copyright 2025 Arthur V. Morris
 */
 
-#include "AlleleMatrix.hpp"
+#include "src/AlleleMatrix.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
@@ -270,13 +270,13 @@ py::array_t<int> AlleleMatrix::neighbourhood( size_t row_coord, int epsilon ) co
         throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
         }
 
-    std::vector<int> ep_n;
+    py::list ep_n;
     auto matrix_acc = _matrix.unchecked<2>();
 
     int q_mass = _rmass[row_coord];  // access pre-calculated row mass
 
     for (size_t i = 0; i < _n; ++i) {
-        if (i != row_coord) { 
+        if (i != row_coord) {
             // row mass filter
             int mass_d = std::abs(q_mass - _rmass[i]);
             if (mass_d > epsilon) {
@@ -284,32 +284,47 @@ py::array_t<int> AlleleMatrix::neighbourhood( size_t row_coord, int epsilon ) co
             }
 
             // hamming dist calculation
-            int distance = 0;
-            for (size_t j = 0; j < _m; ++j) {
-                if (matrix_acc(row_coord, j) != matrix_acc(i, j)) {
-                    distance++;
-                    if (distance > epsilon) {
-                        break;  // early break where epsilon is exceeded
+            int distance;                 // initialise distance
+            bool ep_exceeded = false;     // flag which stores whether the epsilon neighbourhood was exceeded for early exit
+
+
+            // check _hamming_cache
+            // since (row, col) will be identical to (col, row), use min and max to construct a single key for cache recovery
+            auto key = std::make_pair(std::min(row_coord, i), std::max(row_coord, i));
+            auto cached_dist = _hamming_cache.find(key);  // access cache
+
+            // check if cached_dist exists
+            // if it does then dont bother with distance calculation
+            if (cached_dist != _hamming_cache.end()) {
+                distance = cached_dist->second;
+            } else {
+                distance = 0;
+                for (size_t j = 0; j < _m; ++j) {
+                    if (matrix_acc(row_coord, j) != matrix_acc(i, j)) {
+                        distance++;
+                        if (distance > epsilon) {
+                            ep_exceeded = true;
+                            break;  // early break where epsilon is exceeded
+                        }
                     }
                 }
             }
-            
+
+            if (ep_exceeded) {
+                continue;  // don't check against epsilon again
+            }
+
             // DEBUGGING
             // std::cout << "qmass: " << q_mass << " " << i << " (" << _rmass[i] << ") : " << distance << std::endl;
 
             if (distance <= epsilon) {
-                ep_n.push_back(i);
+                _hamming_cache[key] = distance;  // cache results
+                ep_n.append(py::make_tuple(i, distance));   // Append tuple
             }
         }
     }
 
-    // check the neighbourhood isnt empty
-    if (ep_n.empty()) {
-        // return an np array of size 0 if no neighbors are found
-        return py::array_t<int>(0);
-    } else {
-        return py::array(py::cast(ep_n));
-    }
+    return ep_n;
 }
 
 
@@ -358,8 +373,9 @@ py::list AlleleMatrix::neighbourhoodSIMD( size_t row_coord, int epsilon ) const 
                 continue;  // skip hamming dist calculation
             }
 
-            int distance;
-            bool cached = false;
+            int distance;                 // initialise distance
+            bool ep_exceeded = false;     // flag which stores whether the epsilon neighbourhood was exceeded for early exit
+            bool cached = false;          // flag which stores whether a cached distance is being used
 
             // check _hamming_cache
             // since (row, col) will be identical to (col, row), use min and max to construct a single key for cache recovery
@@ -369,12 +385,9 @@ py::list AlleleMatrix::neighbourhoodSIMD( size_t row_coord, int epsilon ) const 
             if (cached_dist != _hamming_cache.end()) {
                 distance = cached_dist->second;
                 cached = true;
-            }
-
-            bool simd_complete = false;
-            if (!cached) {
-                // hamming distance using SIMD (AVX2)
+            } else {
                 distance = 0;
+                // hamming distance using SIMD (AVX2)
                 size_t j = 0;
                 for (; j + 31 < _m; j += 32) {  // process in chunks of 32
                     // NOTE: assumes uint8_t. This assumption *should* be correct, but it will break spectacularly if it isnt
@@ -394,35 +407,36 @@ py::list AlleleMatrix::neighbourhoodSIMD( size_t row_coord, int epsilon ) const 
 
                     // early break if epsilon is exceeded
                     if (distance > epsilon) {
-                        _hamming_cache[key] = distance;  // <--- CACHE PARTIAL RESULTS
-                        break;
+                        ep_exceeded = true;
+                        break;  // early break where epsilon is exceeded
                     }
                 }
 
-                // ensure the final distance is cached
-                if (j >= _m - (_m % 32)) { simd_complete = true; }
-                if (!simd_complete) { _hamming_cache[key] = distance; }
-            }
-
-            // calculate hamming distance for any remaining elements:
-            if (!simd_complete) {
-                for (size_t j = j; j < _m; ++j) {
-                    if (matrix_acc(row_coord, j) != matrix_acc(i, j)) {
-                        distance++;
-                    }
-                    // early break if epsilon is exceeded
-                    if (distance > epsilon) {
-                        break;
+                // calculate hamming distance for any remaining elements:
+                if(j < _m && !ep_exceeded) {
+                    for (; j < _m; ++j) {
+                        if (matrix_acc(row_coord, j) != matrix_acc(i, j)) {
+                            distance++;
+                        }
+                        // early break if epsilon is exceeded
+                        if (distance > epsilon) {
+                            ep_exceeded = true;
+                            break;
+                        }
                     }
                 }
             }
-            if (!cached) { _hamming_cache[key] = distance; }
+
+            if (ep_exceeded) {
+                continue;  // don't check against epsilon again
+            }
 
             // DEBUGGING
             // std::cout << "qmass: " << q_mass << " " << i << " (" << _rmass[i] << ") : " << distance << std::endl;
 
             if (distance <= epsilon) {
-                ep_n.append(py::make_tuple(i, distance)); // Append tuple
+                if (!cached) { _hamming_cache[key] = distance; }  // cache result
+                ep_n.append(py::make_tuple(i, distance));         // append results tuple
             }
         }
     }
@@ -524,6 +538,23 @@ std::vector<int> AlleleMatrix::getMass( void ) {
     return _rmass;
 }
 
+
+/****************************************************************************************************
+ * ardal::AlleleMatrix::flushCache
+ *
+ * Clear (flush) the Hamming distance cache.
+ *
+ * This function removes all entries from the _hamming_cache, forcing the recomputation of
+ * Hamming distances the next time they are requested.
+ *
+ * INPUT: None (operates on the private member _hamming_cache)
+ *
+ * OUTPUT: None (void)
+ ****************************************************************************************************/
+void AlleleMatrix::flushCache( void ) {
+    _hamming_cache.clear();
+}
+
 } // namespace _ardal
 
 
@@ -539,5 +570,6 @@ PYBIND11_MODULE(_ardal, m) {  // _ardal module and method bindings
         .def("jaccard", &_ardal::AlleleMatrix::jaccard)
         .def("neighbourhood", &_ardal::AlleleMatrix::neighbourhood, py::arg("row_coord"), py::arg("epsilon"))
         .def("neighbourhoodSIMD", &_ardal::AlleleMatrix::neighbourhoodSIMD, py::arg("row_coord"), py::arg("epsilon"))
-        .def("gatherSNPs", &_ardal::AlleleMatrix::gatherSNPs, py::arg("guid_indices"));
+        .def("gatherSNPs", &_ardal::AlleleMatrix::gatherSNPs, py::arg("guid_indices"))
+        .def("flushCache", &_ardal::AlleleMatrix::flushCache);
 }
