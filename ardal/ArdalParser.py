@@ -1,3 +1,4 @@
+import sys
 import pandas as pd
 import numpy as np
 import json
@@ -20,7 +21,7 @@ class ArdalParser:
         self._parse()  ## Parse the data upon object creation
 
 
-    def _parse(self):
+    def _parse(self) -> int:
         """ Parses the data based on the specified file format.
         """
         
@@ -29,9 +30,25 @@ class ArdalParser:
 
             if isinstance(self.input_file, list):
                 if len(self.input_file) == 2:
-                    formats = [i.split(".")[-1] for i in self.input_file]
-                    if all(x in ["json", "npy"] for x in formats):
-                        self.file_format = formats[0]
+
+                    if isinstance(self.input_file[0], str) and isinstance(self.input_file[1], str):
+                        formats = [i.split(".")[-1] for i in self.input_file]
+                        if all(x in ["json", "npy"] for x in formats):
+                            self.file_format = formats[0]
+                    
+                    ## handle data passed as variables
+                    elif isinstance(self.input_file[0], np.ndarray) and isinstance(self.input_file[1], dict):
+                        self.matrix = np.ascontiguousarray(self.input_file[0])
+                        self.headers = self.input_file[1]
+                        return 0
+                    elif isinstance(self.input_file[0], dict) and isinstance(self.input_file[1], np.ndarray):
+                        self.headers = self.input_file[0]
+                        self.matrix = np.ascontiguousarray(self.input_file[1])
+                        return 0
+                    
+                    else:
+                        raise ValueError("List must contain json and npy file paths.")
+
                 else:
                     raise ValueError("List must contain json and npy file paths.")
             
@@ -51,6 +68,8 @@ class ArdalParser:
         ## handle NPY/JSON pair
         elif self.file_format == "npy" or self.file_format == "json":
             self._npyLoader()
+
+        return 0
 
 
     def _csvLoader(self, delimiter=","):
@@ -80,7 +99,7 @@ class ArdalParser:
     def _npyLoader(self):
         """ Parse npy JSON pairs.
         """
-        print(f"Loading '{self.input_file}' as a npy/JSON pair.")
+        print(f"Loading '{self.input_file}' as a npy/JSON pair. GOT HERE")
         if self.file_format == "npy":
                 matrix_npy, headers_json = self.input_file
         elif self.file_format == "json":
@@ -91,9 +110,15 @@ class ArdalParser:
 
         except FileNotFoundError:  ## handle missing matrix file
             print(f"Error: Matrix file '{matrix_npy}' not found.")
+            sys.exit(101)
+            
+        except ValueError:  ## handle value errors
+            print(f"Error: Invalid data in matrix file '{matrix_npy}'.")
+            sys.exit(101)
         
         except Exception as e:  ## catch generic exceptions
             print(e)
+            sys.exit(101)
         
         try:
             with open(headers_json, "r") as f:
@@ -101,12 +126,19 @@ class ArdalParser:
         
         except FileNotFoundError:  ## handle missing headers file
             print(f"Error: Header file '{headers_json}' not found.")
+            sys.exit(101)
+
+        except TypeError:  ## handle type errors
+            print(f"Error: Invalid data type in headers file '{headers_json}'.")
+            sys.exit(101)
 
         except json.JSONDecodeError:  ## handle JSON errors
             print(f"Error: Invalid JSON in headers file '{headers_json}'.")
+            sys.exit(101)
         
         except Exception as e:  ## catch generic exceptions
             print(e)
+            
 
         if len(self.matrix) != len(self.headers["guids"]) or len(self.matrix[0]) != len(self.headers["alleles"]):
             raise ValueError(f"Dimension mismatch between matrix array {self.matrix.shape} and headers (rows (guids): {len(self.headers['guids'])}, cols (alleles): {len(self.headers['alleles'])}).")
