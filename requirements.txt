@@ -1,0 +1,8 @@
+pytest
+pytest-cov
+pybind11
+numpy
+pandas
+scipy
+pyjson
+humanize
