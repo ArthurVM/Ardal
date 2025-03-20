@@ -1,7 +1,7 @@
 # Ardal: A Package for Allele Matrix Analysis
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI Build Status](https://github.com/ArthurVM/Ardal/tree/main/.github/workflows/conda.yml/badge.svg)](https://github.com/ArthurVM/Ardal/tree/main/.github/workflows/conda.yml/)
+[![CI Build Status](https://github.com/ArthurVM/Ardal/actions/conda.yml/badge.svg)](https://github.com/ArthurVM/Ardal/actions/conda.yml/)
 
 **Ardal** is a Python package designed for efficient analysis of allele matrices, particularly in the context of genomics and population genetics. It provides tools for calculating distances between samples, identifying core and accessory alleles, and performing other common operations on allele data. Ardal leverages a C++ backend for performance-critical operations, using `pybind11` to create seamless Python bindings.
 
