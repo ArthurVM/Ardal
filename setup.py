@@ -25,10 +25,10 @@ setup(
     install_requires=[
         "numpy",
         "pandas",
-        "pybind11",
         "scipy",
         "pyjson",
         "humanize"
     ],
+    setup_requires=['pybind11'],
     ext_modules=ext_modules,
 )
