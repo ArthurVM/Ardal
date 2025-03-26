@@ -1,6 +1,5 @@
 # setup.py
 from setuptools import setup, Extension, find_packages
-import pybind11
 import sys
 import os
 
