@@ -42,4 +42,5 @@ setup(
         "humanize"
     ],
     ext_modules=ext_modules,
+    python_requires='>=3.8'
 )
