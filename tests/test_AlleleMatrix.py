@@ -1,6 +1,6 @@
+import sys
 import pytest
 import numpy as np
-import _ardal
 from ardal import Ardal, ArdalParser
 
 

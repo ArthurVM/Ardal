@@ -6,19 +6,13 @@ import os
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
-
-class get_pybind_include:
-    def __init__(self, user=False):
-        self.user = user
-    def __str__(self):
-        return os.path.abspath("pybind11/include")
     
 ext_modules = [
     Extension(
         '_ardal',
         sources=['src/AlleleMatrix.cpp'],
         include_dirs=[
-            get_pybind_include(),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "pybind11/include/")),
             os.path.abspath(os.path.dirname(__file__))
         ],
         language='c++',

@@ -1,7 +1,8 @@
+import sys
+print(sys.path)
 import pytest
 import numpy as np
 import json
-import _ardal
 from ardal import Ardal, ArdalParser
 
 
