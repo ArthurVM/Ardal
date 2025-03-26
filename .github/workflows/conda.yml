@@ -34,8 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-cov
-          conda install -c conda-forge pybind11
-
+          
       - name: Install Ardal (editable mode)
         run: pip install -e .
 
