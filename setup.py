@@ -12,7 +12,7 @@ ext_modules = [
         '_ardal',
         sources=['src/AlleleMatrix.cpp'],
         include_dirs=[
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "pybind11/include/")),
+            os.path.abspath("pybind11/include/"),
             os.path.abspath(os.path.dirname(__file__))
         ],
         language='c++',
