@@ -34,11 +34,11 @@ PYBIND11_MODULE(_ardal, m) {
         .def("hamming", &Distance::hamming)
         .def("jaccard", &Distance::jaccard);
 
-    // Neighborhood
-    py::class_<Neighborhood>(m, "Neighborhood")
+    // Neighbourhood
+    py::class_<Neighbourhood>(m, "Neighbourhood")
         .def(py::init<const AlleleMatrix&, DistanceCache&>())
-        .def("neighbourhood", &Neighborhood::neighbourhood, py::arg("row_coord"), py::arg("epsilon"))
-        .def("neighbourhoodSIMD", &Neighborhood::neighbourhoodSIMD, py::arg("row_coord"), py::arg("epsilon"));
+        .def("neighbourhood", &Neighbourhood::neighbourhood, py::arg("row_coord"), py::arg("epsilon"))
+        .def("neighbourhoodSIMD", &Neighbourhood::neighbourhoodSIMD, py::arg("row_coord"), py::arg("epsilon"));
 }
 
 } // namespace _ardal

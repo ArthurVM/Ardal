@@ -12,7 +12,7 @@ class Distance {
  public:
 
     // Constructor
-    Distance(AlleleMatrix& allele_matrix, DistanceCache& cache)
+    Distance(const AlleleMatrix& allele_matrix, DistanceCache& cache)
     : _allele_matrix(allele_matrix), _cache(cache) {}
     ~Distance() { /* Distance class destructor */ }
 
@@ -22,7 +22,7 @@ class Distance {
 
 
  private:
-    AlleleMatrix& _allele_matrix;
+    const AlleleMatrix& _allele_matrix;
     DistanceCache& _cache;
 
 };  // class Distance
