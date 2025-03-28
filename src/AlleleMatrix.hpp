@@ -1,4 +1,4 @@
-#ifndef ALLELE_MATRIX_HPP  // Include guard
+#ifndef ALLELE_MATRIX_HPP
 #define ALLELE_MATRIX_HPP
 
 #include <iostream>
@@ -52,21 +52,10 @@ class AlleleMatrix {
     pybind11::array_t<uint8_t> access( pybind11::array_t<size_t> coords );
     std::set<int> accessGUID( int guid_index ) const;
     pybind11::array_t<uint8_t> getMatrix( void ) const;
-    std::vector<int> getMass( void );
-
-    // distance methods
-    pybind11::array_t<int> hamming( void ) const;
-    pybind11::array_t<double> jaccard( void ) const;
-
-    // neighbourhood methods
-    pybind11::array_t<int> neighbourhood( size_t row_coord, int epsilon ) const;
-    pybind11::list neighbourhoodSIMD( size_t row_coord, int epsilon ) const;
-
-    // SNP algebra methods
+    size_t getNumRows( void ) const;
+    size_t getNumCols( void ) const;
+    int getMass( int ) const;
     std::vector<int> gatherSNPs( const pybind11::array_t<int> guid_indices ) const;
-
-    // cache management
-    void flushCache( void );
 
 
  private:
@@ -80,7 +69,6 @@ class AlleleMatrix {
 
     // row mass function
     std::vector<int> _mass( void ) const;
-
 
 };  // class AlleleMatrix
 

@@ -13,7 +13,7 @@ namespace _ardal {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::_mass
+ * _ardal::AlleleMatrix::_mass
  *
  * Calculate the row masses of the matrix.
  *
@@ -45,7 +45,7 @@ std::vector<int> AlleleMatrix::_mass( void ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::access
+ * _ardal::AlleleMatrix::access
  *
  * Access elements in a 2D matrix at specified coordinates.
  *
@@ -108,7 +108,7 @@ py::array_t<uint8_t> AlleleMatrix::access( py::array_t<size_t> coords ) {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::getMatrix
+ * _ardal::AlleleMatrix::getMatrix
  * 
  * Return the allele matrix.
  *
@@ -122,338 +122,35 @@ py::array_t<uint8_t> AlleleMatrix::getMatrix( void ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::hamming
+ * _ardal::AlleleMatrix::getNumRows
  * 
- * Calculate the Hamming distances between all pairs of rows.
- *
- * This function calculates the pairwise Hamming distances between all rows of the allele matrix.
- * The Hamming distance between two rows is the number of positions at which the corresponding
- * elements differ.  The results are returned as a condensed distance matrix.
- *
- * INPUT: None (operates on the private member _matrix)
+ * Return the number of rows in the allele matrix.
  *
  * OUTPUT:
- *  py::array_t<int> : A 1D NumPy array representing the condensed distance matrix containing
- *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
- *                      where 'n' is the number of rows in the matrix.
+ *  size_t : The number of rows in the allele matrix
  ****************************************************************************************************/
-py::array_t<int> AlleleMatrix::hamming( void ) const {
-    // access matrix (read only)
-    auto matrix_acc = _matrix.unchecked<2>();
-
-    // calculate dist matrix size
-    size_t n = _matrix.shape(0);
-    size_t dk = (n * (n - 1)) / 2;
-
-    // initialise with mutable access
-    py::array_t<int> dist_matrix(dk);
-    auto dist_matrix_acc = dist_matrix.mutable_unchecked<1>();
-
-    size_t k = 0;  // index for dist_matrix
-
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {  // iterate over rows
-            int dist;
-
-            // _hamming_cache lookup
-            auto key = std::make_pair(std::min(i, j), std::max(i, j));
-            auto cached_dist = _hamming_cache.find(key);
-
-            if (cached_dist != _hamming_cache.end()) {
-                dist = cached_dist->second;  // dist found and assigned
-            } else {
-                dist = 0;  // dist not found so initialised as 0
-
-                // hamming distance calculation
-                for (size_t l = 0; l < _m; ++l) {
-                    if (matrix_acc(i, l) != matrix_acc(j, l)) {
-                        dist++;
-                    }
-                }
-                // store in cache
-                _hamming_cache[key] = dist;
-            }
-            dist_matrix_acc(k++) = dist;
-        }
-    }
-    return dist_matrix;
+size_t AlleleMatrix::getNumRows( void ) const {
+    return _n;
 }
 
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::jaccard
+ * _ardal::AlleleMatrix::getNumCols
  * 
- * Calculate the Jaccard distances between all pairs of rows.
- *
- * This function calculates the pairwise Jaccard distances between all rows of the allele matrix.
- * The Jaccard distance between two rows is defined as 1 - (Intersection / Union), where
- * Intersection is the number of alleles present in both rows, and Union is the number of alleles
- * present in either row.  The result is returned as a condensed distance matrix.
- *
- * INPUT: None (operates on the private member _matrix)
+ * Return the number of columns in the allele matrix.
  *
  * OUTPUT:
- *  py::array_t<double> : A 1D NumPy array representing the condensed distance matrix containing the 
- *                        pairwise Jaccard distances. The length of the array is n*(n-1)/2, where 'n' 
- *                        is the number of rows in the matrix.
+ *  size_t : The number of columns in the allele matrix
  ****************************************************************************************************/
-py::array_t<double> AlleleMatrix::jaccard( void ) const {
-    // access matrix (read only)
-    auto matrix_acc = _matrix.unchecked<2>();
-
-    // calculate dist matrix size
-    size_t n = _matrix.shape(0);
-    size_t dk = (n * (n - 1)) / 2;
-
-    // initialise with mutable access
-    py::array_t<double> dist_matrix(dk);  // Use double for Jaccard distance
-    auto dist_matrix_acc = dist_matrix.mutable_unchecked<1>();
-
-    size_t k = 0;  // index for dist_matrix
-
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {  // iterate over rows
-            // initialise variables
-            int union_n = 0;
-            int intersection_n = 0;
-
-            for (size_t l = 0; l < _m; ++l) {  // iterate over columns
-                // calculate union and intersection
-                if (matrix_acc(i, l) == 1 || matrix_acc(j, l) == 1) {
-                    union_n++;
-                    if (matrix_acc(i, l) == 1 && matrix_acc(j, l) == 1) {
-                        intersection_n++;
-                    }
-                }
-            }
-
-            // calculate the Jaccard distance and update the distance matrix
-            double dist = (union_n == 0) ? 0.0 : 1 - (static_cast<double>(intersection_n) / union_n);
-            dist_matrix_acc(k++) = dist;  // store and increment k
-        }
-    }
-
-    return dist_matrix;
+size_t AlleleMatrix::getNumCols( void ) const {
+    return _m;
 }
 
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::neighbourhood
- * 
- * Find the epsilon-neighborhood of a row using Hamming distance.
- *
- * This function identifies the rows in the matrix that are within a specified Hamming distance
- * (epsilon) of a given row.
- *
- * INPUT:
- *   row_coord (size_t) : The index of the target row.
- *   epsilon (int)   : The maximum Hamming distance threshold.
- *
- * OUTPUT:
- *   py::array_t<int> : A 1D NumPy array containing the indices of the rows that are within the 
- *                       epsilon-neighborhood of the target row.
- *
- * EXCEPTIONS:
- *   std::runtime_error : If row_coord is out of range.
- ****************************************************************************************************/
-py::array_t<int> AlleleMatrix::neighbourhood( size_t row_coord, int epsilon ) const {
-    // do some data cleanliness
-    if (epsilon < 0) {
-        throw std::runtime_error("epsilon must be non-negative.");
-        }
-    if (row_coord < 0) {
-        throw std::runtime_error("row_coord must be non-negative.");
-        }
-    if (row_coord >= _n) {
-        throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
-        }
-
-    py::list ep_n;
-    auto matrix_acc = _matrix.unchecked<2>();
-
-    int q_mass = _rmass[row_coord];  // access pre-calculated row mass
-
-    for (size_t i = 0; i < _n; ++i) {
-        if (i != row_coord) {
-            // row mass filter
-            int mass_d = std::abs(q_mass - _rmass[i]);
-            if (mass_d > epsilon) {
-                continue;  // skip hamming dist calculation
-            }
-
-            // hamming dist calculation
-            int distance;                 // initialise distance
-            bool ep_exceeded = false;     // flag which stores whether the epsilon neighbourhood was exceeded for early exit
-
-
-            // check _hamming_cache
-            // since (row, col) will be identical to (col, row), use min and max to construct a single key for cache recovery
-            auto key = std::make_pair(std::min(row_coord, i), std::max(row_coord, i));
-            auto cached_dist = _hamming_cache.find(key);  // access cache
-
-            // check if cached_dist exists
-            // if it does then dont bother with distance calculation
-            if (cached_dist != _hamming_cache.end()) {
-                distance = cached_dist->second;
-            } else {
-                distance = 0;
-                for (size_t j = 0; j < _m; ++j) {
-                    if (matrix_acc(row_coord, j) != matrix_acc(i, j)) {
-                        distance++;
-                        if (distance > epsilon) {
-                            ep_exceeded = true;
-                            break;  // early break where epsilon is exceeded
-                        }
-                    }
-                }
-            }
-
-            if (ep_exceeded) {
-                continue;  // don't check against epsilon again
-            }
-
-            // DEBUGGING
-            // std::cout << "qmass: " << q_mass << " " << i << " (" << _rmass[i] << ") : " << distance << std::endl;
-
-            if (distance <= epsilon) {
-                _hamming_cache[key] = distance;  // cache results
-                ep_n.append(py::make_tuple(i, distance));   // Append tuple
-            }
-        }
-    }
-
-    return ep_n;
-}
-
-
-
-/****************************************************************************************************
- * ardal::AlleleMatrix::neighbourhoodSIMD
- * 
- * Find the epsilon-neighborhood of a row using Hamming distance (SIMD optimized).
- *
- * This function identifies the rows in the matrix that are within a specified Hamming distance
- * (epsilon) of a given row, using SIMD (AVX2) intrinsics for optimized performance.
- *
- * INPUT:
- *   row_coord (size_t) : The index of the target row.
- *   epsilon (int)   : The maximum Hamming distance threshold.
- *
- * OUTPUT:
- *   py::array_t<int> : A 1D NumPy array containing the indices of the rows that are within the
- *                       epsilon-neighborhood of the target row.
- *
- * EXCEPTIONS:
- *   std::runtime_error : If row_coord is out of range.
- ****************************************************************************************************/
-py::list AlleleMatrix::neighbourhoodSIMD( size_t row_coord, int epsilon ) const {
-    // do some data cleanliness
-    if (epsilon < 0) {
-        throw std::runtime_error("epsilon must be non-negative.");
-        }
-    if (row_coord < 0) {
-        throw std::runtime_error("row_coord must be non-negative.");
-        }
-    if (row_coord >= _n) {
-        throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
-        }
-
-    py::list ep_n;
-    auto matrix_acc = _matrix.unchecked<2>();
-
-    int q_mass = _rmass[row_coord];  // access pre-calculated row mass
-
-    for (size_t i = 0; i < _n; ++i) {
-        if (i != row_coord) {
-            // row mass filter
-            int mass_d = std::abs(q_mass - _rmass[i]);
-            if (mass_d > epsilon) {
-                continue;  // skip hamming dist calculation
-            }
-
-            int distance;                 // initialise distance
-            bool ep_exceeded = false;     // flag which stores whether the epsilon neighbourhood was exceeded for early exit
-            bool cached = false;          // flag which stores whether a cached distance is being used
-
-            // check _hamming_cache
-            // since (row, col) will be identical to (col, row), use min and max to construct a single key for cache recovery
-            auto key = std::make_pair(std::min(row_coord, i), std::max(row_coord, i));
-            auto cached_dist = _hamming_cache.find(key);  // access cache
-
-            if (cached_dist != _hamming_cache.end()) {
-                distance = cached_dist->second;
-                cached = true;
-            } else {
-                distance = 0;
-                // hamming distance using SIMD (AVX2)
-                size_t j = 0;
-                for (; j + 31 < _m; j += 32) {  // process in chunks of 32
-                    // NOTE: assumes uint8_t. This assumption *should* be correct, but it will break spectacularly if it isnt
-                    __m256i a = _mm256_loadu_si256((__m256i*)&matrix_acc(row_coord, j));
-                    __m256i b = _mm256_loadu_si256((__m256i*)&matrix_acc(i, j));
-                    __m256i xor_result = _mm256_xor_si256(a, b);
-
-                    // set bit count
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 0));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 1));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 2));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 3));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 4));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 5));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 6));
-                    distance += _mm_popcnt_u32(_mm256_extract_epi32(xor_result, 7));
-
-                    // early break if epsilon is exceeded
-                    if (distance > epsilon) {
-                        ep_exceeded = true;
-                        break;  // early break where epsilon is exceeded
-                    }
-                }
-
-                // calculate hamming distance for any remaining elements:
-                if(j < _m && !ep_exceeded) {
-                    for (; j < _m; ++j) {
-                        if (matrix_acc(row_coord, j) != matrix_acc(i, j)) {
-                            distance++;
-                        }
-                        // early break if epsilon is exceeded
-                        if (distance > epsilon) {
-                            ep_exceeded = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (ep_exceeded) {
-                continue;  // don't check against epsilon again
-            }
-
-            // DEBUGGING
-            // std::cout << "qmass: " << q_mass << " " << i << " (" << _rmass[i] << ") : " << distance << std::endl;
-
-            if (distance <= epsilon) {
-                if (!cached) { _hamming_cache[key] = distance; }  // cache result
-                ep_n.append(py::make_tuple(i, distance));         // append results tuple
-            }
-        }
-    }
-
-    // check the neighbourhood isnt empty
-    // if (ep_n.empty()) {
-    //     // return an np array of size 0 if no neighbors are found
-    //     return py::array_t<int>(0);
-    // } else {
-    //     return py::array(py::cast(ep_n));
-    // }
-
-    return ep_n;
-}
-
-/****************************************************************************************************
- * ardal::AlleleMatrix::accessGUID
+ * _ardal::AlleleMatrix::accessGUID
  *
  * Access the set of SNPs for a given GUID.
  *
@@ -482,8 +179,9 @@ std::set<int> AlleleMatrix::accessGUID( int guid_index ) const {
 }
 
 
+
 /****************************************************************************************************
- * ardal::AlleleMatrix::gatherSNPs
+ * _ardal::AlleleMatrix::gatherSNPs
  *
  * Gather SNPs from multiple GUIDs.
  *
@@ -521,55 +219,31 @@ std::vector<int> AlleleMatrix::gatherSNPs( const py::array_t<int> guid_indices )
 }
 
 
+
 /****************************************************************************************************
- * ardal::AlleleMatrix::getMass
+ * _ardal::AlleleMatrix::getMass
  *
- * Get the mass of each row in the matrix.
+ * Get the mass of a row in the matrix.
  *
- * This function returns the pre-calculated mass of each row in the matrix. The mass of a row
+ * This function returns the pre-calculated mass of a row in the matrix. The mass of a row
  * represents the number of alleles (1s) present in that row.
  *
- * INPUT: None (operates on the private member _rmass)
+ * INPUT: 
+ *   guid_index (int) : The index for the query guid.
  *
  * OUTPUT:
- *   std::vector<int> : A vector containing the mass of each row in the matrix.
+ *   int : The mass of the row defined by the guid index in the matrix.
+ * 
+ * EXCEPTIONS:
+ *   std::runtime_error : If the guid index is out of range.
  ****************************************************************************************************/
-std::vector<int> AlleleMatrix::getMass( void ) {
-    return _rmass;
-}
-
-
-/****************************************************************************************************
- * ardal::AlleleMatrix::flushCache
- *
- * Clear (flush) the Hamming distance cache.
- *
- * This function removes all entries from the _hamming_cache, forcing the recomputation of
- * Hamming distances the next time they are requested.
- *
- * INPUT: None (operates on the private member _hamming_cache)
- *
- * OUTPUT: None (void)
- ****************************************************************************************************/
-void AlleleMatrix::flushCache( void ) {
-    _hamming_cache.clear();
+int AlleleMatrix::getMass( int guid_index ) const {
+    if (guid_index >= 0 && guid_index < _n) {
+        return _rmass[guid_index];
+    }
+    else {
+        throw std::runtime_error("guid_index out of range.");
+    }
 }
 
 } // namespace _ardal
-
-
-// Pybind methods
-PYBIND11_MODULE(_ardal, m) {  // _ardal module and method bindings
-    py::class_<_ardal::AlleleMatrix>(m, "AlleleMatrix")
-        .def(py::init<py::array_t<uint8_t>&>())
-        .def("access", &_ardal::AlleleMatrix::access, py::arg("coords"))
-        .def("accessGUID", &_ardal::AlleleMatrix::accessGUID, py::arg("guid_index"))
-        .def("getMatrix", &_ardal::AlleleMatrix::getMatrix)
-        .def("getMass", &_ardal::AlleleMatrix::getMass)
-        .def("hamming", &_ardal::AlleleMatrix::hamming)
-        .def("jaccard", &_ardal::AlleleMatrix::jaccard)
-        .def("neighbourhood", &_ardal::AlleleMatrix::neighbourhood, py::arg("row_coord"), py::arg("epsilon"))
-        .def("neighbourhoodSIMD", &_ardal::AlleleMatrix::neighbourhoodSIMD, py::arg("row_coord"), py::arg("epsilon"))
-        .def("gatherSNPs", &_ardal::AlleleMatrix::gatherSNPs, py::arg("guid_indices"))
-        .def("flushCache", &_ardal::AlleleMatrix::flushCache);
-}
