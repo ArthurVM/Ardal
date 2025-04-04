@@ -20,6 +20,7 @@ namespace _ardal {
  * INPUT:
  *   row_coord (size_t) : The index of the target row.
  *   epsilon (int)   : The maximum Hamming distance threshold.
+ *   nocache (bool)  : Specify whether to not cache results.
  *
  * OUTPUT:
  *   py::array_t<int> : A 1D NumPy array containing the indices of the rows that are within the 
@@ -28,7 +29,7 @@ namespace _ardal {
  * EXCEPTIONS:
  *   std::runtime_error : If row_coord is out of range.
  ****************************************************************************************************/
-py::array_t<int> Neighbourhood::neighbourhood( size_t row_coord, int epsilon ) const {
+py::array_t<int> Neighbourhood::neighbourhood( size_t row_coord, int epsilon, bool nocache ) const {
     // get matrix dimensions
     size_t n = _allele_matrix.getNumRows();
     size_t m = _allele_matrix.getNumCols();
@@ -64,10 +65,12 @@ py::array_t<int> Neighbourhood::neighbourhood( size_t row_coord, int epsilon ) c
             // hamming dist calculation
             int distance;                 // initialise distance
             bool ep_exceeded = false;     // flag which stores whether the epsilon neighbourhood was exceeded for early exit
-
+            auto cached_dist = -1;        // initialise default cached distance
 
             // check _cache
-            auto cached_dist = _cache.get(row_coord, i);  // access cache
+            if (!nocache) {
+                auto cached_dist = _cache.get(row_coord, i);  // access cache
+            }
 
             // check if cached_dist exists
             // if it does then dont bother with distance calculation
@@ -94,7 +97,10 @@ py::array_t<int> Neighbourhood::neighbourhood( size_t row_coord, int epsilon ) c
             // std::cout << "qmass: " << q_mass << " " << i << " (" << i_mass << ") : " << distance << std::endl;
 
             if (distance <= epsilon) {
-                _cache.put(row_coord, i, distance);  // cache results
+                // cache results
+                if (!nocache) {
+                    _cache.put(row_coord, i, distance);
+                }
                 ep_n.append(py::make_tuple(row_coord, i, distance));   // Append tuple
             }
         }
@@ -116,6 +122,7 @@ py::array_t<int> Neighbourhood::neighbourhood( size_t row_coord, int epsilon ) c
  * INPUT:
  *   row_coord (size_t) : The index of the target row.
  *   epsilon (int)   : The maximum Hamming distance threshold.
+ *   nocache (bool)  : Specify whether to not cache results.
  *
  * OUTPUT:
  *   py::array_t<int> : A 1D NumPy array containing the indices of the rows that are within the
@@ -124,7 +131,7 @@ py::array_t<int> Neighbourhood::neighbourhood( size_t row_coord, int epsilon ) c
  * EXCEPTIONS:
  *   std::runtime_error : If row_coord is out of range.
  ****************************************************************************************************/
-py::list Neighbourhood::neighbourhoodSIMD( size_t row_coord, int epsilon ) const {
+py::list Neighbourhood::neighbourhoodSIMD( size_t row_coord, int epsilon, bool nocache ) const {
     // get matrix dimensions
     size_t n = _allele_matrix.getNumRows();
     size_t m = _allele_matrix.getNumCols();
@@ -160,9 +167,12 @@ py::list Neighbourhood::neighbourhoodSIMD( size_t row_coord, int epsilon ) const
             int distance;                 // initialise distance
             bool ep_exceeded = false;     // flag which stores whether the epsilon neighbourhood was exceeded for early exit
             bool cached = false;          // flag which stores whether a cached distance is being used
+            auto cached_dist = -1;        // initialise default cached distance
 
             // check _cache
-            auto cached_dist = _cache.get(row_coord, i);  // access cache
+            if (!nocache) {
+                auto cached_dist = _cache.get(row_coord, i);  // access cache
+            }
 
             if (cached_dist != -1) {
                 distance = cached_dist;
@@ -217,7 +227,10 @@ py::list Neighbourhood::neighbourhoodSIMD( size_t row_coord, int epsilon ) const
             // std::cout << "qmass: " << q_mass << " " << i << " (" << _rmass[i] << ") : " << distance << std::endl;
 
             if (distance <= epsilon) {
-                if (!cached) { _cache.put(row_coord, i, distance); }  // cache result
+                // cache results
+                if (!nocache) {
+                    _cache.put(row_coord, i, distance);
+                }
                 ep_n.append(py::make_tuple(i, distance));         // append results tuple
             }
         }

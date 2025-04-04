@@ -17,7 +17,7 @@ class Distance {
     ~Distance() { /* Distance class destructor */ }
 
     // distance methods
-    pybind11::array_t<int> hamming( void ) const;
+    pybind11::array_t<int> hamming( bool nocache = false ) const;
     pybind11::array_t<double> jaccard( void ) const;
 
 

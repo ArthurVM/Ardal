@@ -28,7 +28,7 @@ namespace _ardal {
  *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
  *                      where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<int> Distance::hamming( void ) const {
+py::array_t<int> Distance::hamming( bool nocache ) const {    
     // access matrix (read only)
     auto matrix_acc = _allele_matrix.getMatrix().unchecked<2>();
 
@@ -46,9 +46,12 @@ py::array_t<int> Distance::hamming( void ) const {
     for (size_t i = 0; i < n; ++i) {
         for (size_t j = i + 1; j < n; ++j) {  // iterate over rows
             int distance;
+            auto cached_dist = -1;   // initialise default cached distance
 
             // _cache lookup
-            auto cached_dist = _cache.get(i, j);
+            if (!nocache) {
+                auto cached_dist = _cache.get(i, j);
+            }
 
             if (cached_dist != -1) {
                 distance = cached_dist;  // dist found and assigned
@@ -61,8 +64,11 @@ py::array_t<int> Distance::hamming( void ) const {
                         distance++;
                     }
                 }
+
                 // store in cache
-                _cache.put(i, j, distance);
+                if (!nocache) {
+                    _cache.put(i, j, distance);
+                }
             }
             dist_matrix_acc(k++) = distance;
         }

@@ -15,8 +15,8 @@ class Neighbourhood {
     : _allele_matrix(allele_matrix), _cache(cache) {}
     ~Neighbourhood() { /* Neighbourhood class destructor */ }
 
-    pybind11::array_t<int> neighbourhood(size_t row_coord, int epsilon) const;
-    pybind11::list neighbourhoodSIMD(size_t row_coord, int epsilon) const;
+    pybind11::array_t<int> neighbourhood(size_t row_coord, int epsilon, bool no_cache = false) const;
+    pybind11::list neighbourhoodSIMD(size_t row_coord, int epsilon, bool no_cache = false) const;
 
  private:
     const AlleleMatrix& _allele_matrix;

@@ -31,14 +31,14 @@ PYBIND11_MODULE(_ardal, m) {
     // Distance
     py::class_<Distance>(m, "Distance")
         .def(py::init<const AlleleMatrix&, DistanceCache&>())
-        .def("hamming", &Distance::hamming)
+        .def("hamming", &Distance::hamming, py::arg("nocache"))
         .def("jaccard", &Distance::jaccard);
 
     // Neighbourhood
     py::class_<Neighbourhood>(m, "Neighbourhood")
         .def(py::init<const AlleleMatrix&, DistanceCache&>())
-        .def("neighbourhood", &Neighbourhood::neighbourhood, py::arg("row_coord"), py::arg("epsilon"))
-        .def("neighbourhoodSIMD", &Neighbourhood::neighbourhoodSIMD, py::arg("row_coord"), py::arg("epsilon"));
+        .def("neighbourhood", &Neighbourhood::neighbourhood, py::arg("row_coord"), py::arg("epsilon"), py::arg("nocache"))
+        .def("neighbourhoodSIMD", &Neighbourhood::neighbourhoodSIMD, py::arg("row_coord"), py::arg("epsilon"), py::arg("nocache"));
 }
 
 } // namespace _ardal
