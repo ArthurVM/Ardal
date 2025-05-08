@@ -11,7 +11,7 @@
 *   **Distance Calculations:**
     *   Hamming distance: Calculates the number of differing alleles between samples.
     *   Jaccard distance: Measures the dissimilarity between samples based on shared alleles.
-*   **Neighborhood Analysis:** Identifies samples within a specified Hamming distance of a target sample, with SIMD acceleration.
+*   **Neighborhood Analysis:** Identifies samples within a specified Hamming distance of a target sample, with or without SIMD acceleration.
 *   **Core and Accessory Allele Identification:** Determines the core (present in all samples) and accessory (present in some samples) alleles within a group of samples.
 *   **Unique Allele Identification:** Identifies alleles that are unique to a specific set of samples.
 *   **Data Input:** Supports various data formats, including:
