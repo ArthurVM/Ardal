@@ -72,16 +72,4 @@ def test_data():
 def allele_matrix(test_data):
     return _ardal.AlleleMatrix(test_data[0])
 
-@pytest.fixture(scope="session")
-def distance_cache():
-    return _ardal.DistanceCache()
-
-@pytest.fixture(scope="session")
-def distance(allele_matrix, distance_cache):
-    return _ardal.Distance(allele_matrix, distance_cache)
-
-@pytest.fixture(scope="session")
-def neighbourhood(allele_matrix, distance_cache):
-    return _ardal.Neighbourhood(allele_matrix, distance_cache)
-
 

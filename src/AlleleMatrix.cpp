@@ -248,12 +248,12 @@ py::array_t<double> AlleleMatrix::jaccard( void ) const {
  * (epsilon) of a given row.
  *
  * INPUT:
- *   row_coord (size_t) : The index of the target row.
- *   epsilon (int)   : The maximum Hamming distance threshold.
+ *   row_coord (size_t) : The index of the query GUID, representing the centroid of the neighbourhood.
+ *   epsilon (int)      : The maximum Hamming distance threshold.
  *
  * OUTPUT:
- *   py::array_t<int> : A 1D NumPy array containing the indices of the rows that are within the 
- *                       epsilon-neighborhood of the target row.
+ *   py::array_t<int>   : A 1D NumPy array containing the indices of the rows that are within the 
+ *                        epsilon-neighborhood of the target row.
  *
  * EXCEPTIONS:
  *   std::runtime_error : If row_coord is out of range.
@@ -338,12 +338,12 @@ py::array_t<int> AlleleMatrix::neighbourhood( size_t row_coord, int epsilon ) co
  * (epsilon) of a given row, using SIMD (AVX2) intrinsics for optimized performance.
  *
  * INPUT:
- *   row_coord (size_t) : The index of the target row.
- *   epsilon (int)   : The maximum Hamming distance threshold.
+ *   row_coord (size_t) : The index of the query GUID, representing the centroid of the neighbourhood.
+ *   epsilon (int)      : The maximum Hamming distance threshold.
  *
  * OUTPUT:
- *   py::array_t<int> : A 1D NumPy array containing the indices of the rows that are within the
- *                       epsilon-neighborhood of the target row.
+ *   py::array_t<int>   : A 1D NumPy array containing the indices of the rows that are within the
+ *                        epsilon-neighborhood of the target row.
  *
  * EXCEPTIONS:
  *   std::runtime_error : If row_coord is out of range.
@@ -451,6 +451,69 @@ py::list AlleleMatrix::neighbourhoodSIMD( size_t row_coord, int epsilon ) const 
 
     return ep_n;
 }
+
+
+// /****************************************************************************************************
+//  * ardal::AlleleMatrix::findSharedSNPGUIDs
+//  *
+//  * Find all GUIDs that share at least k SNPs with a given query GUID.
+//  *
+//  * This function identifies GUIDs (rows) in the allele matrix that have a specified minimum
+//  * number of SNPs in common with a target query GUID.
+//  *
+//  * INPUT:
+//  *   row_coord        (size_t) : The index of the query GUID.
+//  *   k_snps (int)              : The minimum number of shared SNPs required.
+//  *
+//  * OUTPUT:
+//  *   py::list : A Python list containing the indices of the GUIDs that meet the criteria.
+//  *
+//  * EXCEPTIONS:
+//  *   std::runtime_error : If query_guid_index is out of range or k_snps is negative.
+//  ****************************************************************************************************/
+// py::list AlleleMatrix::findSharedSNPGUIDs( size_t row_coord, int k_snps ) const {
+//     if (row_coord >= _n) {
+//         throw std::runtime_error("Query GUID index out of range.");
+//     }
+//     if (k_snps < 0) {
+//         throw std::runtime_error("k_snps must be non-negative.");
+//     }
+
+//     py::list result;
+
+//     // handle k_snps == 0 edge case: all other GUIDs would qualify
+//     if (k_snps == 0) {
+//         for (size_t i = 0; i < _n; ++i) {
+//             if (i != row_coord) {
+//                 result.append(i);
+//             }
+//         }
+//         return result;
+//     }
+    
+//     // get query SNPs
+//     std::set<int> query_snps = accesGUID(static_cast<int>(row_coord));
+    
+//     // check the query has SNPs
+//     if (query_snps.empty()) {
+//         return result;   // return empty list
+//     }
+
+//     // iterate through other GUIDs
+//     for (size_t i = 0; int _n; ++i) {
+//         if (i == row_coord) {
+//             continue;   // skip self
+//         }
+
+//         int shared_snps = 0;
+        
+//     }
+
+
+
+//     return result;
+// }
+
 
 /****************************************************************************************************
  * ardal::AlleleMatrix::accessGUID
