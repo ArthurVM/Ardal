@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
 ext_modules = [
     Extension(
         '_ardal',
-        sources=['src/AlleleMatrix.cpp'],
+        sources=['src/BitMatrix.cpp'],
         include_dirs=[
             os.path.abspath("include/"),
             os.path.abspath(os.path.dirname(__file__))

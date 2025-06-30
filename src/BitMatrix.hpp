@@ -1,4 +1,4 @@
-// AlleleMatrix.hpp (Adjusted to Original Code Structure)
+// BitMatrix.hpp
 #pragma once
 
 #include <vector>
@@ -13,7 +13,7 @@
 namespace py = pybind11;
 namespace _ardal {
 
-// Custom hash function for std::pair
+// custom hash function for std::pair
 struct pair_hash {
     template <class T1, class T2>
     std::size_t operator() (const std::pair<T1, T2>& p) const {
@@ -24,10 +24,10 @@ struct pair_hash {
 };
 
 
-class AlleleMatrix {
+class BitMatrix {
 public:
     // constructor: takes a NumPy matrix
-    AlleleMatrix( py::array_t<uint8_t> input_matrix );
+    BitMatrix( py::array_t<uint8_t> input_matrix );
 
     // distance methods
     py::array_t<int> hamming( bool fill_cache = false, bool use_simd = true ) const;
@@ -37,8 +37,9 @@ public:
     py::list innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd = true ) const;
 
     // get methods
-    py::array_t<size_t> getAlleles( size_t row_idx ) const;
-    py::array_t<int> getMass( void );
+    py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
+    py::array_t<int> getRowMasses( void );
+    py::array_t<int> getColumnMasses( void );
     py::array_t<uint8_t> getMatrix( void ) const;
 
 private:
@@ -49,10 +50,11 @@ private:
     size_t _n_rows;            // the number of rows (guids)
     size_t _n_cols;            // the number of columns (alleles)
     size_t _packed_cols;       // the number of packed columns
-    std::vector<int> _rmass;   // the mass of each row
+    std::vector<int> _row_masses;   // the mass of each row
+    std::vector<int> _col_masses;   // the mass of each column
 
     // access methods
-    std::vector<size_t> accessGUID( size_t row_idx ) const;
+    std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
 
     // distance methods
     int hammingDistanceScalar( size_t i, size_t j ) const;
@@ -64,15 +66,11 @@ private:
     int innerProductScalar( size_t i, size_t j ) const;
     int innerProductSIMD( size_t i, size_t j ) const;
 
-    // row mass methods
-    std::vector<int> mass( void ) const;
-    int rowMass( size_t row_idx ) const;
-
     // hamming distance cache
     std::unordered_map<std::pair<size_t, size_t>, int, pair_hash> _hamming_cache;
 
     // internal helper: bit unpacking
-    inline bool get_allele( size_t row, size_t col ) const {
+    inline bool getBit( size_t row, size_t col ) const {
         uint8_t byte = _packed_matrix[row][col / 8];
         return (byte >> (col % 8)) & 1;
     }

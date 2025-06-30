@@ -99,7 +99,7 @@ class ArdalParser:
     def _npyLoader(self):
         """ Parse npy JSON pairs.
         """
-        print(f"Loading '{self.input_file}' as a npy/JSON pair. GOT HERE")
+        print(f"Loading '{self.input_file}' as a npy/JSON pair.")
         if self.file_format == "npy":
                 matrix_npy, headers_json = self.input_file
         elif self.file_format == "json":

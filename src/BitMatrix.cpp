@@ -1,7 +1,7 @@
 /*
 Copyright 2025 Arthur V. Morris
 */
-#include "AlleleMatrix.hpp"
+#include "BitMatrix.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <cstring>
@@ -11,21 +11,19 @@ namespace _ardal {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::AlleleMatrix
+ * ardal::BitMatrix::BitMatrix
  *
- * Constructor for the AlleleMatrix class.
+ * Constructor for the BitMatrix class.
  *
- * This constructor initializes the AlleleMatrix object by taking a 2D NumPy array of uint8_t
- * (representing a binary allele matrix) and converting it into two internal representations:
- * 1. A direct copy of the input NumPy array (`_matrix`).
- * 2. A memory-efficient bit-packed representation (`_packed_matrix`), where each allele (0 or 1)
- *    is stored as a single bit.
+ * This constructor initializes the BitMatrix object by taking a 2D NumPy array of uint8_t
+ * (representing a binary matrix) and converting it into a memory-efficient bit-packed
+ * representation (`_packed_matrix`), where each element (0 or 1) is stored as a single bit.
  * It also performs input validation and captures matrix dimensions.
  *
  * INPUT:
  *  input_matrix (py::array_t<uint8_t>): A 2D NumPy array containing only binary values (0 or 1).
  *
- * OUTPUT: 
+ * OUTPUT:
  *  None (constructor)
  *
  * EXCEPTIONS:
@@ -34,7 +32,7 @@ namespace _ardal {
  *   - If the matrix dimensions are too large, potentially causing an overflow.
  *   - If the input matrix contains values other than 0 or 1.
  ****************************************************************************************************/
-AlleleMatrix::AlleleMatrix(py::array_t<uint8_t> input_matrix) {
+BitMatrix::BitMatrix(py::array_t<uint8_t> input_matrix) {
     auto buf = input_matrix.request();
 
     if (buf.ndim != 2) {
@@ -56,62 +54,68 @@ AlleleMatrix::AlleleMatrix(py::array_t<uint8_t> input_matrix) {
     // allocate memory for packed matrix
     auto ptr = static_cast<uint8_t*>(buf.ptr);
     _packed_matrix.resize(_n_rows, std::vector<uint8_t>(_packed_cols, 0));
+    
+    // get the mass (popcount) of each row and column
+    _row_masses.resize(_n_rows, 0);
+    _col_masses.resize(_n_cols, 0);
 
     // do some packing
     for (size_t i = 0; i < _n_rows; ++i) {
         for (size_t j = 0; j < _n_cols; ++j) {
             uint8_t val = ptr[i * _n_cols + j];
-            if (val != 0 && val != 1)
+            if (val != 0 && val != 1) {
                 throw std::runtime_error("Input matrix must only contain binary values (0 or 1)");
-            if (val)
+            }
+            if (val) {
                 _packed_matrix[i][j / 8] |= (1 << (j % 8));
+                // populate mass counters
+                _row_masses[i]++;
+                _col_masses[j]++;
+            }
         }
     }
-
-    // get the mass of each row, referring to the number of alleles each guid exhibits
-    _rmass = mass();
 }
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::accessGUID
+ * ardal::BitMatrix::getRowSetBitIndices
  *
- * Access the set of alleles for a given GUID.
+ * Get the indices of set bits for a given row.
  *
- * This function retrieves the set of alleles that are present in a specified GUID (row) of the 
- * allele matrix.
+ * This function retrieves the set of column indices that are present (i.e., have a value of 1)
+ * in a specified row of the matrix.
  *
  * INPUT:
- *  row_idx (int) : The index of the GUID (row) in the matrix.
+ *  row_idx (int) : The index of the row in the matrix.
  *
  * OUTPUT:
- *  std::vector<size_t> : A set containing the indices of the alleles present in the specified GUID.
+ *  std::vector<size_t> : A vector containing the indices of the set bits in the specified row.
  *
  * EXCEPTIONS:
  *  std::out_of_range : If the row index is not between 0 and _n_rows
  ****************************************************************************************************/
-std::vector<size_t> AlleleMatrix::accessGUID( size_t row_idx ) const {
+std::vector<size_t> BitMatrix::getRowSetBitIndices( size_t row_idx ) const {
     // input validation
     if (row_idx >= _n_rows || row_idx < 0) {
-        throw std::out_of_range("Row index out of bounds in accessGUID.");
+        throw std::out_of_range("Row index out of bounds in getRowSetBitIndices.");
     }
-    std::vector<size_t> row_alleles;
+    std::vector<size_t> row_indices;
     for (size_t k = 0; k < _n_cols; ++k) {
-        if (get_allele(row_idx, k)) {
-            row_alleles.push_back(k);
+        if (getBit(row_idx, k)) {
+            row_indices.push_back(k);
         }
     }
-    return row_alleles;
+    return row_indices;
 }
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::getAlleles
+ * ardal::BitMatrix::getSetBitIndices
  *
- * Get the alleles for a given row.
+ * Get the set bit indices for a given row.
  *
- * This function retrieves the alleles (SNPs) that are present in a specified row (GUID) of the
- * allele matrix.
+ * This function retrieves the column indices of set bits that are present in a specified row of the
+ * matrix and returns them as a NumPy array.
  *
  * INPUT:
  *  row_idx (int) : The index of the row (GUID) in the matrix.
@@ -119,30 +123,30 @@ std::vector<size_t> AlleleMatrix::accessGUID( size_t row_idx ) const {
  * OUTPUT:
  *  py::array_t<size_t> : A 1D NumPy array containing the alleles for the specified row.
  ****************************************************************************************************/
-py::array_t<size_t> AlleleMatrix::getAlleles( size_t row_idx ) const {
-    std::vector<size_t> row_alleles = accessGUID(row_idx);
-    return py::array_t<size_t>(row_alleles.size(), row_alleles.data());
+py::array_t<size_t> BitMatrix::getSetBitIndices( size_t row_idx ) const {
+    std::vector<size_t> row_indices = getRowSetBitIndices(row_idx);
+    return py::array_t<size_t>(row_indices.size(), row_indices.data());
 }
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::getMatrix
+ * ardal::BitMatrix::getMatrix
  * 
- * Unpack and return the allele matrix.
+ * Unpack and return the bit matrix.
  * 
  * INPUT: 
  *  None (operates on the private member _packed_matrix)
  *
  * OUTPUT:
- *  py::array_t<uint8_t> : A 2D numpy array representing a binary allele matrix.
+ *  py::array_t<uint8_t> : A 2D numpy array representing a binary matrix.
  ****************************************************************************************************/
-py::array_t<uint8_t> AlleleMatrix::getMatrix( void ) const {
+py::array_t<uint8_t> BitMatrix::getMatrix( void ) const {
     py::array_t<uint8_t> unpacked_matrix({_n_rows, _n_cols});
     auto unpacked_ptr = static_cast<uint8_t*>(unpacked_matrix.request().ptr);
 
     for (size_t i = 0; i < _n_rows; ++i) {
         for (size_t j = 0; j < _n_cols; ++j) {
-            unpacked_ptr[i * _n_cols + j] = get_allele(i, j);
+            unpacked_ptr[i * _n_cols + j] = getBit(i, j);
         }
     }
     return unpacked_matrix; 
@@ -150,7 +154,7 @@ py::array_t<uint8_t> AlleleMatrix::getMatrix( void ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::hammingDistanceScalar
+ * ardal::BitMatrix::hammingDistanceScalar
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix using scalar operations.
  * The Hamming distance is the number of positions at which the corresponding bits differ.
@@ -169,7 +173,7 @@ py::array_t<uint8_t> AlleleMatrix::getMatrix( void ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int AlleleMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
+int BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
     // input validation in the name of paranoia/robustness
     if (i >= _n_rows || j >= _n_rows) {
         throw std::out_of_range("Row index out of bounds in hammingDistanceScalar.");
@@ -185,7 +189,7 @@ int AlleleMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::hammingDistanceSIMD
+ * ardal::BitMatrix::hammingDistanceSIMD
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix using SIMD (AVX2)
  * intrinsics for optimized performance.
@@ -205,7 +209,7 @@ int AlleleMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int AlleleMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
+int BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
         throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
@@ -237,7 +241,7 @@ int AlleleMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::hamming
+ * ardal::BitMatrix::hamming
  * 
  * Calculate the Hamming distances between all pairs of rows. SIMD optimised for vectorised distance
  * calculation, with the option of scalar computation for testing and fallback in instances where 
@@ -260,7 +264,7 @@ int AlleleMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
  *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
  *                      where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<int> AlleleMatrix::hamming( bool fill_cache, bool use_simd ) const {
+py::array_t<int> BitMatrix::hamming( bool fill_cache, bool use_simd ) const {
     size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
     py::array_t<int> dist_matrix(total_pairs);
     auto dist_ptr = dist_matrix.mutable_data();
@@ -281,7 +285,7 @@ py::array_t<int> AlleleMatrix::hamming( bool fill_cache, bool use_simd ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::epsilonNeighbourhoodSIMD
+ * ardal::BitMatrix::epsilonNeighbourhoodSIMD
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix and assesses whether
  * they exist in the same neighbourhood, performing an early exit if epsilon is exceeded. 
@@ -303,7 +307,7 @@ py::array_t<int> AlleleMatrix::hamming( bool fill_cache, bool use_simd ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int AlleleMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const {
+int BitMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
         throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
@@ -338,7 +342,7 @@ int AlleleMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) co
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::epsilonNeighbourhoodScalar
+ * ardal::BitMatrix::epsilonNeighbourhoodScalar
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix and assesses whether
  * they exist in the same neighbourhood, performing an early exit if epsilon is exceeded. 
@@ -361,7 +365,7 @@ int AlleleMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) co
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int AlleleMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) const {
+int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
         throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
@@ -380,7 +384,7 @@ int AlleleMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) 
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::neighbourhood
+ * ardal::BitMatrix::neighbourhood
  * 
  * Find the epsilon-neighborhood of a row using Hamming distance.
  *
@@ -398,7 +402,7 @@ int AlleleMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) 
  * EXCEPTIONS:
  *  std::runtime_error : If row_coord is out of range.
  ****************************************************************************************************/
-py::list AlleleMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd ) const {
+py::list BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd ) const {
     // do some data cleanliness
     if (epsilon < 0) {
         throw std::runtime_error("epsilon must be non-negative.");
@@ -411,12 +415,12 @@ py::list AlleleMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd
         }
 
     py::list ep_n;   // store results
-    int q_mass = _rmass[row_idx];   // access pre-calculated row mass
+    int q_mass = _row_masses[row_idx];   // access pre-calculated row mass
 
     for (size_t i = 0; i < _n_rows; ++i) {
         if (i != row_idx) {
             // row mass filter
-            int mass_d = std::abs(q_mass - _rmass[i]);
+            int mass_d = std::abs(q_mass - _row_masses[i]);
             if (mass_d > epsilon) {
                 continue;   // skip neighbourhood evaluation
             }
@@ -437,7 +441,7 @@ py::list AlleleMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::innerProductScalar
+ * ardal::BitMatrix::innerProductScalar
  *
  * Calculates the inner product (number of shared set bits) between two rows of the bit-packed matrix
  * using scalar operations.
@@ -457,7 +461,7 @@ py::list AlleleMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
  
-int AlleleMatrix::innerProductScalar( size_t i, size_t j ) const {
+int BitMatrix::innerProductScalar( size_t i, size_t j ) const {
     int ip = 0;
     for (size_t k = 0; k < _packed_cols; ++k) {
         uint8_t and_byte = _packed_matrix[i][k] & _packed_matrix[j][k];
@@ -468,7 +472,7 @@ int AlleleMatrix::innerProductScalar( size_t i, size_t j ) const {
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::innerProductSIMD
+ * ardal::BitMatrix::innerProductSIMD
  *
  * Calculates the inner product (number of shared set bits) between two rows of the bit-packed matrix
  * using SIMD (AVX2) intrinsics for optimized performance.
@@ -489,7 +493,7 @@ int AlleleMatrix::innerProductScalar( size_t i, size_t j ) const {
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
  
-int AlleleMatrix::innerProductSIMD( size_t i, size_t j ) const {
+int BitMatrix::innerProductSIMD( size_t i, size_t j ) const {
     int ip = 0;
     size_t k = 0;
 
@@ -515,7 +519,7 @@ int AlleleMatrix::innerProductSIMD( size_t i, size_t j ) const {
 }
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::innerProductNeighbourhood
+ * ardal::BitMatrix::innerProductNeighbourhood
  *
  * Find all rows which share at least ip_epsilon alleles with row_idx.
  *
@@ -533,7 +537,7 @@ int AlleleMatrix::innerProductSIMD( size_t i, size_t j ) const {
  * EXCEPTIONS:
  *  std::runtime_error : If query_guid_index is out of range or k_alleles is negative.
  ****************************************************************************************************/
-py::list AlleleMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd ) const {
+py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd ) const {
     if (row_idx >= _n_rows) {
         throw std::runtime_error("Query row index out of range.");
     }
@@ -544,7 +548,7 @@ py::list AlleleMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon
     py::list ipe_n;   // results list
 
     // if query row has lower mass than ip_epsilon then no matches are possible
-    if (static_cast<int>(_rmass[row_idx]) < ip_epsilon) {
+    if (static_cast<int>(_row_masses[row_idx]) < ip_epsilon) {
         return ipe_n;
     }
 
@@ -555,7 +559,7 @@ py::list AlleleMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon
         }
 
         // mass optimisation
-        if (_rmass[i] < ip_epsilon) {
+        if (_row_masses[i] < ip_epsilon) {
             continue;
         }
 
@@ -575,69 +579,40 @@ py::list AlleleMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::getRowMass
+ * ardal::BitMatrix::getRowMasses
  *
- * Calculate the mass of an individual row
+ * Get the popcount of each row in the matrix.
  *
- * This private helper function calculates the "mass" (number of alleles) in a row (guid/sample).
+ * This function returns the pre-calculated popcount of each row in the matrix. The popcount of a row
+ * represents the number of set bits (1s) present in that row.
  *
  * INPUT: 
- *  row_idx (size_t) : The row index to calculate the mass of.
+ *  None (operates on the private member _row_masses)
  *
- * OUTPUT: 
- *  int : The mass of the row.
+ * OUTPUT:
+ *  std::vector<int> : A vector containing the popcount of each row in the matrix.
  ****************************************************************************************************/
-int AlleleMatrix::rowMass( size_t row_idx ) const {
-    int total = 0;
-    for (size_t k = 0; k < _packed_cols; ++k) {
-        uint8_t byte = _packed_matrix[row_idx][k];
-        total += __builtin_popcount(byte);
-    }
-    return total;
+py::array_t<int> BitMatrix::getRowMasses( void ) {
+    return py::array_t<int>(_row_masses.size(), _row_masses.data());
 }
 
 
 /****************************************************************************************************
- * ardal::AlleleMatrix::mass
+ * ardal::BitMatrix::getColumnMasses
  *
- * Calculate the row masses of the matrix.
+ * Get the popcount of each column in the matrix.
  *
- * This private helper function calculates the "mass" of each row in the matrix. In the context
- * of a binary allele matrix, the mass of a row represents the number of alleles (1s) present
- * in that row.
- *
- * INPUT: 
- *  None (operates on the private member _packed_matrix)
- *
- * OUTPUT:
- *  std::vector<int> : A vector containing the mass of each row in the matrix.
- ****************************************************************************************************/
-std::vector<int> AlleleMatrix::mass( void ) const {
-    std::vector<int> mass_vector(_n_rows, 0);
-    for (size_t i = 0; i < _n_rows; ++i) {
-        int row_mass = rowMass(i);
-        mass_vector[i] = row_mass;
-    }
-    return mass_vector;
-}
-
-
-/****************************************************************************************************
- * ardal::AlleleMatrix::getMass
- *
- * Get the mass of each row in the matrix.
- *
- * This function returns the pre-calculated mass of each row in the matrix. The mass of a row
- * represents the number of alleles (1s) present in that row.
+ * This function returns the pre-calculated popcount of each column in the matrix. The popcount of a
+ * columnn represents the number of set bits (1s) present in that column.
  *
  * INPUT: 
- *  None (operates on the private member _rmass)
+ *  None (operates on the private member _col_masses)
  *
  * OUTPUT:
- *  std::vector<int> : A vector containing the mass of each row in the matrix.
+ *  std::vector<int> : A vector containing the popcount of each column in the matrix.
  ****************************************************************************************************/
-py::array_t<int> AlleleMatrix::getMass( void ) {
-    return py::array_t<int>(_rmass.size(), _rmass.data());
+py::array_t<int> BitMatrix::getColumnMasses( void ) {
+    return py::array_t<int>(_col_masses.size(), _col_masses.data());
 }
 
 } // namespace _ardal
@@ -645,12 +620,13 @@ py::array_t<int> AlleleMatrix::getMass( void ) {
 
 // Pybind methods
 PYBIND11_MODULE(_ardal, m) {  // _ardal module and method bindings
-    py::class_<_ardal::AlleleMatrix>(m, "AlleleMatrix")
+    py::class_<_ardal::BitMatrix>(m, "BitMatrix")
         .def(py::init<py::array_t<uint8_t>&>())
-        .def("hamming", &_ardal::AlleleMatrix::hamming, py::arg("fill_cache") = false, py::arg("use_simd") = true)
-        .def("neighbourhood", &_ardal::AlleleMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true)
-        .def("innerProductNeighbourhood", &_ardal::AlleleMatrix::innerProductNeighbourhood, py::arg("row_idx"), py::arg("ip_epsilon"), py::arg("use_simd") = true)
-        .def("getAlleles", &_ardal::AlleleMatrix::getAlleles, py::arg("row_idx"))
-        .def("getMass", &_ardal::AlleleMatrix::getMass)
-        .def("getMatrix", &_ardal::AlleleMatrix::getMatrix);
+        .def("hamming", &_ardal::BitMatrix::hamming, py::arg("fill_cache") = false, py::arg("use_simd") = true)
+        .def("neighbourhood", &_ardal::BitMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true)
+        .def("innerProductNeighbourhood", &_ardal::BitMatrix::innerProductNeighbourhood, py::arg("row_idx"), py::arg("ip_epsilon"), py::arg("use_simd") = true)
+        .def("getSetBitIndices", &_ardal::BitMatrix::getSetBitIndices, py::arg("row_idx"))
+        .def("getRowMasses", &_ardal::BitMatrix::getRowMasses)
+        .def("getColumnMasses", &_ardal::BitMatrix::getColumnMasses)
+        .def("getMatrix", &_ardal::BitMatrix::getMatrix);
 }
