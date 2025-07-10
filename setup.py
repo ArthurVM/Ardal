@@ -8,21 +8,21 @@ with open("README.md", "r") as fh:
     
 ext_modules = [
     Extension(
-        '_ardal',
+        'ardal._ardal',
         sources=['src/BitMatrix.cpp'],
         include_dirs=[
             os.path.abspath("include/"),
             os.path.abspath(os.path.dirname(__file__))
         ],
         language='c++',
-        extra_compile_args=['-O3', '-march=native', '-ffast-math'],
-        extra_link_args=['-O3']
+        extra_compile_args=['-O3', '-march=native', '-ffast-math', '-fopenmp'],
+        extra_link_args=['-O3', '-fopenmp']
     )
 ]
 
 setup(
     name='ardal',
-    version='0.1.0',
+    version='0.2.0-alpha',
     author="A. V. Morris",
     long_description=long_description,
     packages=find_packages(),

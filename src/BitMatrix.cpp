@@ -44,7 +44,7 @@ BitMatrix::BitMatrix(py::array_t<uint8_t> input_matrix) {
     _n_cols = buf.shape[1];
 
     // calculate packed matrix columns
-    _packed_cols = (_n_cols + 7) / 8;
+    _packed_cols = (_n_cols + 63) / 64;
 
     // size check
     if (_n_rows > std::numeric_limits<size_t>::max() / _n_cols) {
@@ -53,7 +53,7 @@ BitMatrix::BitMatrix(py::array_t<uint8_t> input_matrix) {
 
     // allocate memory for packed matrix
     auto ptr = static_cast<uint8_t*>(buf.ptr);
-    _packed_matrix.resize(_n_rows, std::vector<uint8_t>(_packed_cols, 0));
+    _packed_matrix.resize(_n_rows, std::vector<uint64_t>(_packed_cols, 0));
     
     // get the mass (popcount) of each row and column
     _row_masses.resize(_n_rows, 0);
@@ -67,7 +67,7 @@ BitMatrix::BitMatrix(py::array_t<uint8_t> input_matrix) {
                 throw std::runtime_error("Input matrix must only contain binary values (0 or 1)");
             }
             if (val) {
-                _packed_matrix[i][j / 8] |= (1 << (j % 8));
+                _packed_matrix[i][j / 64] |= (1ULL << (j % 64));
                 // populate mass counters
                 _row_masses[i]++;
                 _col_masses[j]++;
@@ -100,9 +100,16 @@ std::vector<size_t> BitMatrix::getRowSetBitIndices( size_t row_idx ) const {
         throw std::out_of_range("Row index out of bounds in getRowSetBitIndices.");
     }
     std::vector<size_t> row_indices;
-    for (size_t k = 0; k < _n_cols; ++k) {
-        if (getBit(row_idx, k)) {
-            row_indices.push_back(k);
+    row_indices.reserve(_row_masses[row_idx]);
+    for (size_t k = 0; k < _packed_cols; ++k) {
+        uint64_t chunk = _packed_matrix[row_idx][k];
+        while (chunk != 0) {
+            int trailing_zeros = __builtin_ctzll(chunk);
+            size_t col_idx = k * 64 + trailing_zeros;
+            if (col_idx < _n_cols) {
+                row_indices.push_back(col_idx);
+            }
+            chunk &= chunk - 1;   // clear the least significant bit
         }
     }
     return row_indices;
@@ -181,7 +188,7 @@ int BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
 
     int dist = 0;
     for (size_t k = 0; k < _packed_cols; ++k) {
-        uint8_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
+        uint64_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
         dist += __builtin_popcount(xor_byte);
     }
     return dist;
@@ -219,22 +226,22 @@ int BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
     size_t k = 0;
 
     // SIMD block
-    for (; k + 31 < _packed_cols; k += 32) {
+    for (; k + 4 <= _packed_cols; k += 4) {
         __m256i a = _mm256_loadu_si256((__m256i const*)&_packed_matrix[i][k]);
         __m256i b = _mm256_loadu_si256((__m256i const*)&_packed_matrix[j][k]);
         __m256i xor_result = _mm256_xor_si256(a, b);
 
-        // horizontal popcount using 8 lanes of 32-bit integers
-        for (int lane = 0; lane < 8; ++lane) {
-            uint32_t chunk = _mm256_extract_epi32(xor_result, lane);
-            dist += __builtin_popcount(chunk);
-        }
+        // horizontal popcount on 4x 64-bit integers
+        uint64_t chunks[4];
+        _mm256_storeu_si256((__m256i*)chunks, xor_result);
+        dist += __builtin_popcountll(chunks[0]) + __builtin_popcountll(chunks[1]) +
+                __builtin_popcountll(chunks[2]) + __builtin_popcountll(chunks[3]);
     }
 
     // cover the non 32 chunk tail
     for (; k < _packed_cols; ++k) {
-        uint8_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcount(xor_byte);
+        uint64_t xor_chunk = _packed_matrix[i][k] ^ _packed_matrix[j][k];
+        dist += __builtin_popcountll(xor_chunk);
     }
     return dist;
 }
@@ -258,29 +265,106 @@ int BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
  *  use_simd (bool)   : A boolean flag to specify whether to use SIMD for vectorised distance
  *                      calculation.
  *  fill_cache (bool) : A boolean flag to specify whether to fill the cache (CURRENTLY INACTIVE).
+ *  threads (int)     : The number of threads to use for parallel computation.
  *
  * OUTPUT:
  *  py::array_t<int>  : A 1D NumPy array representing the condensed distance matrix containing
  *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
  *                      where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<int> BitMatrix::hamming( bool fill_cache, bool use_simd ) const {
-    size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
+py::array_t<int> BitMatrix::hamming( bool fill_cache, bool use_simd, int threads ) const {
+    if (threads <= 0)
+        throw std::runtime_error("Thread count must be positive.");
+    
+    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
     py::array_t<int> dist_matrix(total_pairs);
-    auto dist_ptr = dist_matrix.mutable_data();
+    
+    {
+        py::gil_scoped_release release;   // release GIL for full parallel region
 
-    size_t idx = 0;
-    for (size_t i = 0; i < _n_rows; ++i) {
-        for (size_t j = i + 1; j < _n_rows; ++j) {
-            // run as SIMD
-            if (use_simd)
-                dist_ptr[idx++] = hammingDistanceSIMD(i, j);
-            // run as scalar
-            else
-                dist_ptr[idx++] = hammingDistanceScalar(i, j);
+        omp_set_num_threads(threads);
+
+        auto dist_ptr = dist_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t j = i + 1; j < _n_rows; ++j) {
+                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+                int dist = use_simd
+                    ? hammingDistanceSIMD(i, j)
+                    : hammingDistanceScalar(i, j);
+
+                dist_ptr[idx] = dist;
+
+                // if (fill_cache) {
+                //     // currently not in action to save some headaches
+                //     #pragma omp critical
+                //     _hamming_cache[{i, j}] = dist;
+                // }
+            }
         }
-    }
+    }   // GIL reestablished here
     return dist_matrix;
+}
+
+/****************************************************************************************************
+ * ardal::BitMatrix::innerProduct
+ * 
+ * Calculate the Inner Product between all pairs of rows. SIMD optimised for vectorised distance
+ * calculation, with the option of scalar computation for testing and fallback in instances where 
+ * CPU does not support AVX2.
+ *
+ * This function calculates the pairwise Inner Product between all rows of the bit matrix.
+ * The Inner Product between two rows is the number of positions at which the corresponding
+ * elements are both set (1). The results are returned as a condensed distance matrix.
+ *
+ * INPUT: 
+ *  None (operates on the private member _packed_matrix)
+ * 
+ * PARAMETERS: 
+ *  use_simd (bool)   : A boolean flag to specify whether to use SIMD for vectorised distance
+ *                      calculation.
+ *  fill_cache (bool) : A boolean flag to specify whether to fill the cache (CURRENTLY INACTIVE).
+ *  threads (int)     : The number of threads to use for parallel computation.
+ *
+ * OUTPUT:
+ *  py::array_t<int>  : A 1D NumPy array representing the condensed distance matrix containing
+ *                      the pairwise Inner Products.  The length of the array is n*(n-1)/2,
+ *                      where 'n' is the number of rows in the matrix.
+ ****************************************************************************************************/
+py::array_t<int> BitMatrix::innerProduct( bool fill_cache, bool use_simd, int threads ) const {
+    if (threads <= 0)
+        throw std::runtime_error("Thread count must be positive.");
+    
+    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
+    py::array_t<int> inner_product_matrix(total_pairs);
+    
+    {
+        py::gil_scoped_release release;   // release GIL for full parallel region
+
+        omp_set_num_threads(threads);
+
+        auto inner_product_ptr = inner_product_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t j = i + 1; j < _n_rows; ++j) {
+                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+                int inner_product = use_simd
+                    ? innerProductSIMD(i, j)
+                    : innerProductScalar(i, j);
+
+                inner_product_ptr[idx] = inner_product;
+
+                // if (fill_cache) {
+                //     // currently not in action to save some headaches
+                //     #pragma omp critical
+                //     _hamming_cache[{i, j}] = inner_product;
+                // }
+            }
+        }
+    }   // GIL reestablished here
+    return inner_product_matrix;
 }
 
 
@@ -317,16 +401,17 @@ int BitMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const
     size_t k = 0;
 
     // SIMD block
-    for (; k + 31 < _packed_cols; k += 32) {
+    for (; k + 4 <= _packed_cols; k += 4) {
         __m256i a = _mm256_loadu_si256((__m256i const*)&_packed_matrix[i][k]);
         __m256i b = _mm256_loadu_si256((__m256i const*)&_packed_matrix[j][k]);
         __m256i xor_result = _mm256_xor_si256(a, b);
 
-        // horizontal popcount using 8 lanes of 32-bit integers
-        for (int lane = 0; lane < 8; ++lane) {
-            uint32_t chunk = _mm256_extract_epi32(xor_result, lane);
-            dist += __builtin_popcount(chunk);
-        }
+        // horizontal popcount on 4x 64bit integers
+        uint64_t chunks[4];
+        _mm256_storeu_si256((__m256i*)chunks, xor_result);
+        dist += __builtin_popcountll(chunks[0]) + __builtin_popcountll(chunks[1]) +
+                __builtin_popcountll(chunks[2]) + __builtin_popcountll(chunks[3]);
+
         if (dist > epsilon) {
             return dist;   // early break where epsilon is exceeded
         }
@@ -334,8 +419,8 @@ int BitMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const
 
     // cover the non 32 chunk tail
     for (; k < _packed_cols; ++k) {
-        uint8_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcount(xor_byte);
+        uint64_t xor_chunk = _packed_matrix[i][k] ^ _packed_matrix[j][k];
+        dist += __builtin_popcountll(xor_chunk);
     }
     return dist;
 }
@@ -373,8 +458,8 @@ int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) con
 
     int dist = 0;
     for (size_t k = 0; k < _packed_cols; ++k) {
-        uint8_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcount(xor_byte);
+        uint64_t xor_chunk = _packed_matrix[i][k] ^ _packed_matrix[j][k];
+        dist += __builtin_popcountll(xor_chunk);
         if (dist > epsilon) {
             return dist;  // early break where epsilon is exceeded
         }
@@ -395,6 +480,11 @@ int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) con
  *  row_coord (size_t) : The index of the query GUID, representing the centroid of the neighbourhood.
  *  epsilon (int)      : The maximum Hamming distance threshold.
  *
+ * PARAMETERS:
+ *  use_simd (bool) : A boolean flag to specify whether to use SIMD for vectorised distance
+ *                      calculation.
+ *  threads (int)   : The number of threads to use for parallel computation.
+ *
  * OUTPUT:
  *  py::list<tuple(row, dist)> : A 1D NumPy array containing the indices of the rows that are within 
  *                               the epsilon-neighborhood of the target row.
@@ -402,7 +492,7 @@ int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) con
  * EXCEPTIONS:
  *  std::runtime_error : If row_coord is out of range.
  ****************************************************************************************************/
-py::list BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd ) const {
+py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd, int threads ) const {
     // do some data cleanliness
     if (epsilon < 0) {
         throw std::runtime_error("epsilon must be non-negative.");
@@ -413,29 +503,61 @@ py::list BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd ) 
     if (row_idx >= _n_rows) {
         throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
         }
+    if (threads <= 0)
+        throw std::runtime_error("Number of threads must be positive.");
+    
+    int q_mass = _row_masses[row_idx];    // access pre-calculated row mass
+    std::vector<std::vector<std::pair<size_t, int>>> thread_results;
 
-    py::list ep_n;   // store results
-    int q_mass = _row_masses[row_idx];   // access pre-calculated row mass
+    {
+        py::gil_scoped_release release;   // release GIL for full parallel region
+        omp_set_num_threads(threads);     // Explicitly control number of threads
 
-    for (size_t i = 0; i < _n_rows; ++i) {
-        if (i != row_idx) {
-            // row mass filter
-            int mass_d = std::abs(q_mass - _row_masses[i]);
-            if (mass_d > epsilon) {
-                continue;   // skip neighbourhood evaluation
-            }
+        #pragma omp parallel
+        {
+            const int thread_id = omp_get_thread_num();
 
-            int distance;   // initialise distance
-            if (use_simd) {
-                distance = epsilonNeighbourhoodSIMD(row_idx, i, epsilon);
-            } else {
-                distance = epsilonNeighbourhoodScalar(row_idx, i, epsilon);
-            }
-            if (distance <= epsilon) {
-                ep_n.append(py::make_tuple(i, distance));
+            #pragma omp single
+            thread_results.resize(omp_get_num_threads());
+
+            auto& local = thread_results[thread_id];
+
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < _n_rows; ++i) {
+                if (i == row_idx) continue;
+
+                int mass_d = std::abs(q_mass - _row_masses[i]);
+                if (mass_d > epsilon) continue;
+
+                int distance = use_simd
+                    ? epsilonNeighbourhoodSIMD(row_idx, i, epsilon)
+                    : epsilonNeighbourhoodScalar(row_idx, i, epsilon);
+
+                if (distance <= epsilon)
+                    local.emplace_back(i, distance);
             }
         }
+    }   // GIL reestablished here
+
+    // count total neighbours to preallocate np array
+    size_t total_neighbours = 0;
+    for (const auto& vec : thread_results) {
+        total_neighbours += vec.size();
     }
+
+    // create result np array of shape (total_neighbours, 2)
+    py::array_t<int64_t> ep_n({total_neighbours, (size_t)2});
+    auto result_ptr = ep_n.mutable_data();
+
+    // populate array with (idex, dist) pairs
+    size_t curr_idx = 0;
+    for (const auto& vec : thread_results) {
+        for (const auto& [idx, dist] : vec) {
+            result_ptr[curr_idx * 2 + 0] = idx;
+            result_ptr[curr_idx * 2 + 1] = dist;
+            curr_idx++;
+        }
+    }       
     return ep_n;
 }
 
@@ -464,8 +586,8 @@ py::list BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd ) 
 int BitMatrix::innerProductScalar( size_t i, size_t j ) const {
     int ip = 0;
     for (size_t k = 0; k < _packed_cols; ++k) {
-        uint8_t and_byte = _packed_matrix[i][k] & _packed_matrix[j][k];
-        ip += __builtin_popcount(and_byte);
+        uint64_t and_chunk = _packed_matrix[i][k] & _packed_matrix[j][k];
+        ip += __builtin_popcountll(and_chunk);
     }
     return ip;
 }
@@ -498,22 +620,22 @@ int BitMatrix::innerProductSIMD( size_t i, size_t j ) const {
     size_t k = 0;
 
     // SIMD block
-    for (; k + 31 < _packed_cols; k += 32) {
+    for (; k + 4 <= _packed_cols; k += 4) {
         __m256i a = _mm256_loadu_si256((__m256i const*)&_packed_matrix[i][k]);
         __m256i b = _mm256_loadu_si256((__m256i const*)&_packed_matrix[j][k]);
         __m256i and_result = _mm256_and_si256(a, b);
 
-        // horizontal popcount using 8 lanes of 32-bit integers
-        for (int lane = 0; lane < 8; ++lane) {
-            uint32_t chunk = _mm256_extract_epi32(and_result, lane);
-            ip += __builtin_popcount(chunk);
-        }
+        // horizontal popcount on 4x 64-bit integers
+        uint64_t chunks[4];
+        _mm256_storeu_si256((__m256i*)chunks, and_result);
+        ip += __builtin_popcountll(chunks[0]) + __builtin_popcountll(chunks[1]) +
+              __builtin_popcountll(chunks[2]) + __builtin_popcountll(chunks[3]);
     }
 
     // cover the non 32 chunk tail
     for (; k < _packed_cols; ++k) {
-        uint8_t and_byte = _packed_matrix[i][k] & _packed_matrix[j][k];
-        ip += __builtin_popcount(and_byte);
+        uint64_t and_chunk = _packed_matrix[i][k] & _packed_matrix[j][k];
+        ip += __builtin_popcountll(and_chunk);
     }
     return ip;
 }
@@ -579,6 +701,179 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
 
 
 /****************************************************************************************************
+ * ardal::BitMatrix::uniqueSharedBits
+ *
+ * Finds the indices of bits that are set (1) in ALL specified rows and are NOT set in ANY other row.
+ *
+ * INPUT:
+ *  row_indices (const std::vector<size_t>&) : A vector of row indices (sample IDs) to consider as the group.
+ * 
+ * PARAMETERS:
+ *  use_simd (bool) : A boolean flag to specify whether to use SIMD for vectorised bitwise operations.
+ *
+ * OUTPUT:
+ *  std::vector<size_t> : A vector containing the column indices of the unique shared bits.
+ ****************************************************************************************************/
+std::vector<size_t> BitMatrix::uniqueSharedBits(const std::vector<size_t>& row_indices, bool use_simd) const {
+    if (row_indices.empty()) return {};
+ 
+    const size_t ingroup_size = row_indices.size();
+    std::vector<uint64_t> group_and(_packed_cols, ~0ULL);   // initialize with all bits set
+
+    if (use_simd) {
+        // SIMD ingroup AND
+        size_t k = 0;
+        for (; k + 4 <= _packed_cols; k += 4) {
+            __m256i acc = _mm256_loadu_si256((__m256i const*)&_packed_matrix[row_indices[0]][k]);
+            for (size_t idx = 1; idx < ingroup_size; ++idx) {
+                __m256i row = _mm256_loadu_si256((__m256i const*)&_packed_matrix[row_indices[idx]][k]);
+                acc = _mm256_and_si256(acc, row);
+            }
+            _mm256_storeu_si256((__m256i*)&group_and[k], acc);
+        }
+        // remainder loop for ingroup AND
+        for (; k < _packed_cols; ++k) {
+            uint64_t acc = _packed_matrix[row_indices[0]][k];
+            for (size_t idx = 1; idx < ingroup_size; ++idx) {
+                acc &= _packed_matrix[row_indices[idx]][k];
+            }
+            group_and[k] = acc;
+        }
+    } else {
+        // scalar ingroup AND
+        for (size_t k = 0; k < _packed_cols; ++k) {
+            uint64_t acc = _packed_matrix[row_indices[0]][k];
+            for (size_t idx = 1; idx < ingroup_size; ++idx) {
+                acc &= _packed_matrix[row_indices[idx]][k];
+            }
+            group_and[k] = acc;
+        }
+    }
+
+    // check column mass for uniqueness
+    // this checks each column mass (number of set bits) against the number of ingroup rows
+    // in order for that column to be unique and shared by the in group, these two values must be identical
+    std::vector<size_t> unique_bits;
+    for (size_t k = 0; k < _packed_cols; ++k) {
+        uint64_t chunk = group_and[k];
+        if (chunk == 0) continue;   // optimisation: skip empty chunks
+
+        while (chunk != 0) {
+            int trailing_zeros = __builtin_ctzll(chunk);
+            size_t col_idx = k * 64 + trailing_zeros;
+            if (col_idx < _n_cols) {
+                if (col_idx < _n_cols && _col_masses[col_idx] == ingroup_size) {
+                    unique_bits.push_back(col_idx);
+                }
+            }
+            chunk &= chunk - 1;   // clear the LSB
+        }
+    }
+    return unique_bits;
+}
+
+
+/****************************************************************************************************
+ * ardal::BitMatrix::columnEntropy
+ *
+ * Calculates the Shannon entropy for each column in the matrix.
+ * Entropy H(X) = -p * log2(p) - (1-p) * log2(1-p), where p is the bit frequency.
+ *
+ * INPUT:
+ *  None
+ *
+ * OUTPUT:
+ *  py::array_t<double> : A 1D NumPy array of entropy values, one for each column.
+ ****************************************************************************************************/
+py::array_t<double> BitMatrix::columnEntropy() const {
+    py::array_t<double> entropies(_n_cols);
+    auto entropies_ptr = entropies.mutable_data();
+
+    for (size_t j = 0; j < _n_cols; ++j) {
+        if (_n_rows == 0) {
+            entropies_ptr[j] = 0.0;
+            continue;
+        }
+        double p = static_cast<double>(_col_masses[j]) / _n_rows;
+
+        if (p == 0.0 || p == 1.0) {
+            entropies_ptr[j] = 0.0;
+        } else {
+            entropies_ptr[j] = -p * std::log2(p) - (1.0 - p) * std::log2(1.0 - p);
+        }
+    }
+    return entropies;
+}
+
+
+/****************************************************************************************************
+ * ardal::BitMatrix::klDivergence
+ *
+ * Calculates the Kullback-Leibler (KL) divergence for each column, measuring how well it
+ * distinguishes an "ingroup" of rows from the "outgroup" (all other rows).
+ *
+ * INPUT:
+ *  ingroup_indices (const std::vector<size_t>&) : A vector of row indices for the ingroup.
+ *
+ * OUTPUT:
+ *  py::array_t<double> : A 1D NumPy array of KL divergence scores, one for each column.
+ ****************************************************************************************************/
+py::array_t<double> BitMatrix::klDivergence(const std::vector<size_t>& ingroup_indices) const {
+    const size_t ingroup_size = ingroup_indices.size();
+    if (ingroup_size == 0 || ingroup_size == _n_rows) {
+        // if ingroup is empty or all rows then discrimination is meaningless
+        py::array_t<double> scores(_n_cols);
+        std::fill(scores.mutable_data(), scores.mutable_data() + _n_cols, 0.0);
+        return scores;
+    }
+    const size_t outgroup_size = _n_rows - ingroup_size;
+
+    // calculate column masses for the ingroup
+    // could probably be optimised at some point
+    std::vector<int> ingroup_col_masses(_n_cols, 0);
+    for (const auto& row_idx : ingroup_indices) {
+        if (row_idx >= _n_rows) continue;   // safety check
+        for (size_t k = 0; k < _packed_cols; ++k) {
+            uint64_t chunk = _packed_matrix[row_idx][k];
+            while (chunk != 0) {
+                int trailing_zeros = __builtin_ctzll(chunk);
+                size_t col_idx = k * 64 + trailing_zeros;
+                if (col_idx < _n_cols) {
+                    ingroup_col_masses[col_idx]++;
+                }
+                chunk &= chunk - 1;   // clear the LSB
+            }
+        }
+    }
+
+    py::array_t<double> scores(_n_cols);
+    auto scores_ptr = scores.mutable_data();
+
+    for (size_t j = 0; j < _n_cols; ++j) {
+        double ingroup_mass = static_cast<double>(ingroup_col_masses[j]);
+        double outgroup_mass = static_cast<double>(_col_masses[j] - ingroup_col_masses[j]);
+
+        // Laplace smoothing to avoid log(0) or division by 0 evil
+        double p_ingroup = (ingroup_mass + 1.0) / (ingroup_size + 2.0);
+        double p_outgroup = (outgroup_mass + 1.0) / (outgroup_size + 2.0);
+
+        double q_ingroup = 1.0 - p_ingroup;
+        double q_outgroup = 1.0 - p_outgroup;
+
+        double dkl = 0.0;
+        if (p_ingroup > 0.0 && p_outgroup > 0.0) {
+            dkl += p_ingroup * std::log2(p_ingroup / p_outgroup);
+        }
+        if (q_ingroup > 0.0 && q_outgroup > 0.0) {
+            dkl += q_ingroup * std::log2(q_ingroup / q_outgroup);
+        }
+        scores_ptr[j] = dkl;
+    }
+    return scores;
+}
+
+
+/****************************************************************************************************
  * ardal::BitMatrix::getRowMasses
  *
  * Get the popcount of each row in the matrix.
@@ -622,9 +917,13 @@ py::array_t<int> BitMatrix::getColumnMasses( void ) {
 PYBIND11_MODULE(_ardal, m) {  // _ardal module and method bindings
     py::class_<_ardal::BitMatrix>(m, "BitMatrix")
         .def(py::init<py::array_t<uint8_t>&>())
-        .def("hamming", &_ardal::BitMatrix::hamming, py::arg("fill_cache") = false, py::arg("use_simd") = true)
-        .def("neighbourhood", &_ardal::BitMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true)
+        .def("hamming", &_ardal::BitMatrix::hamming, py::arg("fill_cache") = false, py::arg("use_simd") = true, py::arg("threads") = 1)
+        .def("innerProduct", &_ardal::BitMatrix::innerProduct, py::arg("fill_cache") = false, py::arg("use_simd") = true, py::arg("threads") = 1)
+        .def("neighbourhood", &_ardal::BitMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true, py::arg("threads") = 1)
         .def("innerProductNeighbourhood", &_ardal::BitMatrix::innerProductNeighbourhood, py::arg("row_idx"), py::arg("ip_epsilon"), py::arg("use_simd") = true)
+        .def("uniqueSharedBits", &_ardal::BitMatrix::uniqueSharedBits, py::arg("row_indices"), py::arg("use_simd") = true)
+        .def("columnEntropy", &_ardal::BitMatrix::columnEntropy)
+        .def("klDivergence", &_ardal::BitMatrix::klDivergence, py::arg("ingroup_indices"))
         .def("getSetBitIndices", &_ardal::BitMatrix::getSetBitIndices, py::arg("row_idx"))
         .def("getRowMasses", &_ardal::BitMatrix::getRowMasses)
         .def("getColumnMasses", &_ardal::BitMatrix::getColumnMasses)

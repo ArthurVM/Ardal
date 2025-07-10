@@ -1,4 +1,6 @@
 import re
+import os
+import json
 import pandas as pd
 import numpy as np
 from humanize import naturalsize
@@ -6,7 +8,7 @@ from sys import stdout, stderr, getsizeof
 from scipy.spatial.distance import pdist, squareform
 from collections import defaultdict, namedtuple
 
-import _ardal
+from . import _ardal
 from .ArdalParser import ArdalParser
 
 
@@ -37,14 +39,19 @@ class Ardal(object):
     ########## COMPUTE FUNCTIONS ##########
             
     
-    def pairwise(self, guids: list = [], metric: str = "hamming", use_simd : bool=True, chunk_size : int=100 ) -> pd.DataFrame:
+    def pairwise(self, guids: list = [], metric: str = "hamming", use_simd : bool=True, threads : int=1,chunk_size : int=100 ) -> pd.DataFrame:
         """ Takes a set of GUIDs and calculates the pairwise distance between them, returning a distance matrix.
-        Pairwise distance can be calculated using Jaccard, Euclidean, or absolute distance functions.
+        Pairwise distance can be calculated using Hamming, Jaccard, or Inner Product (number of shared SNPs) functions.
         If an empty list if provided (as by default) then the pairwise distance of all samples within the matrix will be calculated.
         """
+        ## check there is enough memory to store the pairwise matrix
+        mat_size = len(self.__headers["guids"])**2
+        total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+        if mat_size * 8 > total_memory * 0.8: ## 8 bytes per float64, 80% of total memory
+            raise MemoryError(f"Pairwise distance matrix of scale {len(self.__headers['guids'])}x{len(self.__headers['guids'])} will requre {naturalsize(mat_size * 8, binary=True)} memory and will exceed system memory limits. Please subset your data.")
 
         ## check the specified distance function is valid
-        accepted_dist_functions = ["jaccard", "hamming"]
+        accepted_dist_functions = ["jaccard", "hamming", "inner_product"]
         if metric not in accepted_dist_functions:
             raise ValueError(f"{metric} not an accepted distance function. Accepted distance functions: {accepted_dist_functions}")
         
@@ -53,30 +60,86 @@ class Ardal(object):
             # dist_tri = self.__bit_matrix.jaccard()
             return 0
         elif metric == "hamming":
-            dist_tri = self.__bit_matrix.hamming(use_simd=use_simd)
-
+            dist_tri = self.__bit_matrix.hamming(use_simd=use_simd, threads=threads)
+        elif metric == "inner_product":
+            dist_tri = self.__bit_matrix.innerProduct(use_simd=use_simd, threads=threads)
+        
         dist_matrix = np.array(squareform(dist_tri))
         dist_df = pd.DataFrame(dist_matrix, columns=self.__headers["guids"], index=self.__headers["guids"])
         
         return dist_df
 
     
-    def neighbourhood( self, guid : str, n : int, use_simd : bool = True ) -> dict:
+    def neighbourhood( self, guid : str, n : int, use_simd : bool = True, threads : int = 1 ) -> dict:
         """ get the allele neighbourhood of a GUID using hamming distance
         """
 
         guid_coord = self._encodeGuid(guid)
-        ncoords = self.__bit_matrix.neighbourhood(row_idx=guid_coord, epsilon=n, use_simd=use_simd)
+        ncoords = self.__bit_matrix.neighbourhood(row_idx=guid_coord, epsilon=n, use_simd=use_simd, threads=threads)
         neighbourhood = {self._decodeGuid(coord) : hdist for coord, hdist in ncoords}
 
         return neighbourhood
+    
+
+    def snvDist( self, guid : str, n : int ) -> dict:
+        """ find all GUIDs which lie within n SNVs of a given GUID
+        WARNING : NOT PRODUCTION READY
+        assumes allele ID of form {ref_nucleotide}{pos}{alt_nucleotide} and so the pos can be indexed out with [1:-1]
+        """
+        snv_neighbourhood = {}
+
+        guid_coord = self._encodeGuid(guid)
+        guid_snv_positions = set([self._decodeAllele(allele_coord)[1:-1] for allele_coord in self.__bit_matrix.getSetBitIndices(guid_coord)])
+
+        for guid_idx in range(len(self.__headers["guids"])):
+            if guid_idx == guid_coord:
+                continue
+            other_snv_positions = set([self._decodeAllele(allele_coord)[1:-1] for allele_coord in self.__bit_matrix.getSetBitIndices(guid_idx)])
+            snv_dist = guid_snv_positions ^ other_snv_positions
+            if len(snv_dist) <= n:
+                snv_neighbourhood[self._decodeGuid(guid_idx)] = len(snv_dist)
+        
+        return snv_neighbourhood
 
 
-    def unique( self, guids : list ) -> set:
+    def uniqueSNPs( self, guids : list ) -> set:
         """
         Finds the set of SNPs unique to a given set of GUIDs.
 
-        A SNP is considered unique if it is present in all of the specified
+        A SNP is considered unique if it is present in ANY of the specified
+        GUIDs and absent in all other GUIDs.
+
+        INPUT:
+            guids (list): A list of GUIDs.
+
+        OUTPUT:
+            dict: A dictionary of {guid : unique_snps} pairs.
+
+        EXCEPTIONS:
+            ValueError: If guids is not a list or set, if guids is empty, or if any GUID is not found.
+        """
+        ## input checks
+        if not isinstance(guids, list):
+            raise ValueError("guids must be a list.")
+        if len(guids) == 0:
+            raise ValueError("guids set cannot be empty.")
+        for guid in guids:
+            if guid not in self.__headers["guids"]:
+                raise ValueError(f"guid '{guid}' not found in allele matrix.")
+            
+        unqiue_snps = defaultdict(set)
+        for guid in guids:
+            guid_unique_snps = self.__bit_matrix.uniqueSharedBits([self._encodeGuid(guid)])
+            unqiue_snps[guid] = {self._decodeAllele(idx) for idx in guid_unique_snps}
+        
+        return unqiue_snps
+
+
+    def uniqueCore( self, guids : list ) -> set:
+        """
+        Finds the set of SNPs unique to a given set of GUIDs and shared by all GUIDs in that set.
+
+        A SNP is considered unique core if it is present in ALL of the specified
         GUIDs and absent in all other GUIDs.
 
         INPUT:
@@ -98,33 +161,9 @@ class Ardal(object):
             if guid not in self.__headers["guids"]:
                 raise ValueError(f"guid '{guid}' not found in allele matrix.")
             
-        ## get the intersection of SNPs for the guids
-        ## core SNPs for input guids
-        intersection = self.core(guids)
-
-        ## convert the guids into a set to enable set algebra
-        guids_set = set(guids)
-
-        ## construct the set of other guids
-        other_guids = set(self.__headers["guids"]) - guids_set
-        
-        ## access the SNPs present in the other guids
-        ## this will be any snp which is not unique to the guid set
-        if other_guids:
-            other_guid_coords = [self._encodeGuid(guid) for guid in other_guids]
-            union_of_others_alleles = set()
-            for guid_coord in other_guid_coords:
-                snp_indices = self.__bit_matrix.getSetBitIndices(guid_coord)
-                for snp_idx in snp_indices:
-                    union_of_others_alleles.add(self._decodeAllele(snp_idx))
-        else:
-            union_of_others_alleles = set() ## return empty set if there are no other guids to compare against
-
-        ## difference the set
-        ## subtract the SNPs present in ANY of the other GUIDs from the SNPs present in ALL of the specified GUIDs.
-        unique_snps = intersection - union_of_others_alleles
-
-        return unique_snps
+        guid_coords = [self._encodeGuid(guid) for guid in guids]
+        unique_snp_indices = self.__bit_matrix.uniqueSharedBits(guid_coords)
+        return {self._decodeAllele(idx) for idx in unique_snp_indices}
     
 
     def core( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:
@@ -230,7 +269,36 @@ class Ardal(object):
                 accessory_alleles[alleles] = count
         
         return core_alleles, accessory_alleles
-        
+    
+
+    ########## STATISTICAL FUNCTIONS ##########
+
+    def alleleEntropy( self ) -> dict:
+        """ Computes the Shannon entropy for each allele in the matrix.
+        Entropy H(X) = -p * log2(p) - (1-p) * log2(1-p), where p is the allele frequency.
+        """
+        allele_entropy = self.__bit_matrix.columnEntropy()
+        entropies_dict = dict(sorted(zip(self.__headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
+        return entropies_dict
+    
+    
+    def klDivergence( self, guids : list ) -> dict:
+        """ Computes the Kullbeck Liebler divergence between the in group (input guids) and out group (all others)
+        allele frequency distributions for each allele in the matrix.
+        D_{kl}(P||Q) = sum_{x\inX}(P(x) * log2(P(x)/Q(x)))
+        """
+        ## check input
+        if len(guids) == 0:
+            raise ValueError("guids set cannot be empty.")
+        for guid in guids:
+            if guid not in self.__headers["guids"]:
+                raise ValueError(f"guid '{guid}' not found in allele matrix.")
+            
+        guid_coords = [self._encodeGuid(guid) for guid in guids]
+        kl_divergence = self.__bit_matrix.klDivergence(guid_coords)
+        kl_dict = dict(sorted(zip(self.__headers["alleles"], kl_divergence), key=lambda x: x[1], reverse=True))
+        return kl_dict
+
 
     ########## PUBLIC UTILITY FUNCTIONS ##########
 
@@ -244,11 +312,65 @@ class Ardal(object):
         return set([allele for allele in self.__headers["alleles"] if pattern.match(allele)])
     
 
-    def subsetbyGUID( self, guid_list : list ):
+    def subset( self, guid_list : list = [], allele_list : list = [] ) -> list[np.array, dict]:
         """ Take a list of GUIDs and subset the allele matrix to include only these GUIDs, allowing for standard operations.
-        Returns an Ardal object with the subsetted matrix.
+        Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
-        return None
+        ## check input
+        if not isinstance(guid_list, list):
+            raise ValueError("guid_list must be a list.")
+        if not isinstance(allele_list, list):
+            raise ValueError("allele_list must be a list.")
+        if len(guid_list) == 0 and len(allele_list) == 0:
+            raise ValueError("guid_list and allele_list cannot both be empty.")
+
+        ## check GUIDs
+        if guid_list:
+            final_guids = self._checkGUIDs(guid_list)
+            if not final_guids:
+                raise ValueError("None of the provided GUIDs were found in the matrix.")
+        else:
+            final_guids = self.getHeaders()["guids"]
+
+        ## check alleles
+        if allele_list:
+            final_alleles = self._checkAlleles(allele_list)
+            if not final_alleles:
+                raise ValueError("None of the provided alleles were found in the matrix.")
+        else:
+            final_alleles = self.getHeaders()["alleles"]
+
+        ## subset the DataFrame
+        ## TODO: this is pretty grim, could be done better in C++
+        subset_df = self.toDataFrame().loc[final_guids, final_alleles]
+
+        ## create new headers and matrix for the new Ardal object
+        new_headers = {"guids": subset_df.index.tolist(), "alleles": subset_df.columns.tolist()}
+        new_matrix = subset_df.values.astype(np.uint8)
+        
+        ## return the new subset matrix/JSON pair
+        return [new_matrix, new_headers]
+        
+    
+    def write( self, file_path : str, output_prefix : str, npz : bool = False ) -> None:
+        """ Write the allele matrix to disk.
+        Writes as a numpy/JSON pair.
+        The npz flag writes the numpy matrix as a compressed npz.
+        """
+        if not os.path.exists(file_path):
+            raise ValueError(f"Path '{file_path}' does not exist.")
+
+        json_out_path = os.path.join(file_path, output_prefix + "_headers.json")
+        matrix_out_path = os.path.join(file_path, output_prefix + "_matrix.npy")
+
+        if os.path.exists(json_out_path):
+            raise ValueError(f"File '{json_out_path}' already exists.")
+        if os.path.exists(matrix_out_path):
+            raise ValueError(f"File '{matrix_out_path}' already exists.")
+
+        np.save(matrix_out_path, self.__bit_matrix.getMatrix())
+        with open(os.path.join(file_path, output_prefix + "_headers.json")) as fout:
+            json.dump(self.__headers, fout, indent=4)
 
 
     def toDict( self ) -> dict:

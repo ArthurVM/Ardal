@@ -8,7 +8,9 @@
 #include <set>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <pybind11/stl.h>
 #include <immintrin.h>
+#include <omp.h>
 
 namespace py = pybind11;
 namespace _ardal {
@@ -30,11 +32,19 @@ public:
     BitMatrix( py::array_t<uint8_t> input_matrix );
 
     // distance methods
-    py::array_t<int> hamming( bool fill_cache = false, bool use_simd = true ) const;
+    py::array_t<int> hamming( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
+    py::array_t<int> innerProduct( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
  
     // neighbourhood methods
-    py::list neighbourhood( size_t row_idx, int epsilon, bool use_simd = true )  const;
+    py::array_t<int64_t> neighbourhood( size_t row_idx, int epsilon, bool use_simd = true, int threads = 1 )  const;
     py::list innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd = true ) const;
+
+    // set operation methods
+    std::vector<size_t> uniqueSharedBits(const std::vector<size_t>& row_indices, bool use_simd = true) const;
+
+    // statistical methods
+    py::array_t<double> columnEntropy() const;
+    py::array_t<double> klDivergence(const std::vector<size_t>& ingroup_indices) const;
 
     // get methods
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
@@ -44,7 +54,7 @@ public:
 
 private:
     // bit-packed matrix
-    std::vector<std::vector<uint8_t>> _packed_matrix;
+    std::vector<std::vector<uint64_t>> _packed_matrix;
 
     // attributes
     size_t _n_rows;            // the number of rows (guids)
@@ -71,8 +81,8 @@ private:
 
     // internal helper: bit unpacking
     inline bool getBit( size_t row, size_t col ) const {
-        uint8_t byte = _packed_matrix[row][col / 8];
-        return (byte >> (col % 8)) & 1;
+        uint64_t byte = _packed_matrix[row][col / 64];
+        return (byte >> (col % 64)) & 1;
     }
 };
 
