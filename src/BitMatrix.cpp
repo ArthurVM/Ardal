@@ -74,6 +74,8 @@ BitMatrix::BitMatrix(py::array_t<uint8_t> input_matrix) {
             }
         }
     }
+    // calculate matrix density
+    _density = density();
 }
 
 
@@ -774,6 +776,66 @@ std::vector<size_t> BitMatrix::uniqueSharedBits(const std::vector<size_t>& row_i
 
 
 /****************************************************************************************************
+ * ardal::BitMatrix::density
+ *
+ * Calculates the density of the matrix, defined as the proportion of set bits.
+ *
+ * INPUT:
+ *  None
+ *
+ * OUTPUT:
+ *  double : The density of the matrix.
+ ****************************************************************************************************/
+double BitMatrix::density( void ) const {
+    if (_n_rows == 0 || _n_cols == 0) {
+        return 0.0;
+    }
+    double total_set_bits = std::accumulate(_col_masses.begin(), _col_masses.end(), 0.0);
+    return total_set_bits / (static_cast<double>(_n_rows) * _n_cols);
+}
+
+
+/****************************************************************************************************
+ * ardal::BitMatrix::colFrequency
+ *
+ * Calculates the frequency of set bits for each column within a specified subset of rows.
+ *
+ * INPUT:
+ *  row_indices (std::vector<size_t>&) : A vector of row indices to consider for frequency calculation.
+ *
+ * OUTPUT:
+ *  py::array_t<double> : A 1D NumPy array of row frequencies, one for each column.
+ ****************************************************************************************************/
+py::array_t<double> BitMatrix::colFrequency(std::vector<size_t>& row_indices) const {
+    py::array_t<double> frequencies(_n_cols);
+    auto frequencies_ptr = frequencies.mutable_data();
+
+    std::fill(frequencies_ptr, frequencies_ptr + _n_cols, 0.0);
+
+    size_t n = row_indices.size();
+    if (n == 0 || _n_cols == 0) {
+        return frequencies;
+    }
+
+    for (size_t row : row_indices) {
+        if (row >= _n_rows) continue;
+        for (size_t col = 0; col < _n_cols; ++col) {
+            if (getBit(row, col)) {
+                frequencies_ptr[col] += 1.0;
+            }
+        }
+    }
+
+    for (size_t col = 0; col < _n_cols; ++col) {
+        frequencies_ptr[col] /= static_cast<double>(n);
+    }
+
+    return frequencies;
+}
+
+
+
+/****************************************************************************************************
  * ardal::BitMatrix::columnEntropy
  *
  * Calculates the Shannon entropy for each column in the matrix.
@@ -893,6 +955,26 @@ py::array_t<int> BitMatrix::getRowMasses( void ) {
 
 
 /****************************************************************************************************
+ * ardal::BitMatrix::getDensity
+ *
+ * Get the density of the matrix.
+ *
+ * This function returns the pre-calculated density of the matrix. The density is defined as the
+ * proportion of set bits (1s) in the entire matrix.
+ *
+ * INPUT: 
+ *  None (operates on the private member _density)
+ *
+ * OUTPUT:
+ *  double : The density of the matrix.
+ ****************************************************************************************************/
+ 
+double BitMatrix::getDensity( void ) const {
+    return _density;
+}
+
+
+/****************************************************************************************************
  * ardal::BitMatrix::getColumnMasses
  *
  * Get the popcount of each column in the matrix.
@@ -922,10 +1004,12 @@ PYBIND11_MODULE(_ardal, m) {  // _ardal module and method bindings
         .def("neighbourhood", &_ardal::BitMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true, py::arg("threads") = 1)
         .def("innerProductNeighbourhood", &_ardal::BitMatrix::innerProductNeighbourhood, py::arg("row_idx"), py::arg("ip_epsilon"), py::arg("use_simd") = true)
         .def("uniqueSharedBits", &_ardal::BitMatrix::uniqueSharedBits, py::arg("row_indices"), py::arg("use_simd") = true)
+        .def("colFrequency", &_ardal::BitMatrix::colFrequency, py::arg("row_indices"))
         .def("columnEntropy", &_ardal::BitMatrix::columnEntropy)
         .def("klDivergence", &_ardal::BitMatrix::klDivergence, py::arg("ingroup_indices"))
         .def("getSetBitIndices", &_ardal::BitMatrix::getSetBitIndices, py::arg("row_idx"))
         .def("getRowMasses", &_ardal::BitMatrix::getRowMasses)
         .def("getColumnMasses", &_ardal::BitMatrix::getColumnMasses)
+        .def("getDensity", &_ardal::BitMatrix::getDensity)
         .def("getMatrix", &_ardal::BitMatrix::getMatrix);
 }

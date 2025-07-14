@@ -40,16 +40,18 @@ public:
     py::list innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd = true ) const;
 
     // set operation methods
-    std::vector<size_t> uniqueSharedBits(const std::vector<size_t>& row_indices, bool use_simd = true) const;
+    std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd = true ) const;
 
     // statistical methods
-    py::array_t<double> columnEntropy() const;
-    py::array_t<double> klDivergence(const std::vector<size_t>& ingroup_indices) const;
+    py::array_t<double> colFrequency( std::vector<size_t>& row_indices ) const;
+    py::array_t<double> columnEntropy( void ) const;
+    py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
 
     // get methods
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
     py::array_t<int> getRowMasses( void );
     py::array_t<int> getColumnMasses( void );
+    double getDensity( void ) const;
     py::array_t<uint8_t> getMatrix( void ) const;
 
 private:
@@ -57,11 +59,12 @@ private:
     std::vector<std::vector<uint64_t>> _packed_matrix;
 
     // attributes
-    size_t _n_rows;            // the number of rows (guids)
-    size_t _n_cols;            // the number of columns (alleles)
-    size_t _packed_cols;       // the number of packed columns
+    size_t _n_rows;                 // the number of rows (guids)
+    size_t _n_cols;                 // the number of columns (alleles)
+    size_t _packed_cols;            // the number of packed columns
     std::vector<int> _row_masses;   // the mass of each row
     std::vector<int> _col_masses;   // the mass of each column
+    double _density;                // the density of the matrix
 
     // access methods
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
@@ -75,6 +78,9 @@ private:
     int epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const;
     int innerProductScalar( size_t i, size_t j ) const;
     int innerProductSIMD( size_t i, size_t j ) const;
+
+    // statistics helper methods
+    double density( void ) const;
 
     // hamming distance cache
     std::unordered_map<std::pair<size_t, size_t>, int, pair_hash> _hamming_cache;
