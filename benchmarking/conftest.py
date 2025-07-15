@@ -3,7 +3,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import json
-import _ardal
+from ardal import _ardal
 
 
 @pytest.fixture(scope="session")
