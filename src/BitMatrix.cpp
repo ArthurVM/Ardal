@@ -139,7 +139,7 @@ py::array_t<size_t> BitMatrix::getSetBitIndices( size_t row_idx ) const {
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::getMatrix
+ * ardal::BitMatrix::getBitMatrix
  * 
  * Unpack and return the bit matrix.
  * 
@@ -149,7 +149,7 @@ py::array_t<size_t> BitMatrix::getSetBitIndices( size_t row_idx ) const {
  * OUTPUT:
  *  py::array_t<uint8_t> : A 2D numpy array representing a binary matrix.
  ****************************************************************************************************/
-py::array_t<uint8_t> BitMatrix::getMatrix( void ) const {
+py::array_t<uint8_t> BitMatrix::getBitMatrix( void ) const {
     py::array_t<uint8_t> unpacked_matrix({_n_rows, _n_cols});
     auto unpacked_ptr = static_cast<uint8_t*>(unpacked_matrix.request().ptr);
 
@@ -1001,23 +1001,3 @@ py::array_t<int> BitMatrix::getColumnMasses( void ) {
 }
 
 } // namespace _ardal
-
-
-// Pybind methods
-PYBIND11_MODULE(_ardal, m) {  // _ardal module and method bindings
-    py::class_<_ardal::BitMatrix>(m, "BitMatrix")
-        .def(py::init<py::array_t<uint8_t>&>())
-        .def("hamming", &_ardal::BitMatrix::hamming, py::arg("fill_cache") = false, py::arg("use_simd") = true, py::arg("threads") = 1)
-        .def("innerProduct", &_ardal::BitMatrix::innerProduct, py::arg("fill_cache") = false, py::arg("use_simd") = true, py::arg("threads") = 1)
-        .def("neighbourhood", &_ardal::BitMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true, py::arg("threads") = 1)
-        .def("innerProductNeighbourhood", &_ardal::BitMatrix::innerProductNeighbourhood, py::arg("row_idx"), py::arg("ip_epsilon"), py::arg("use_simd") = true)
-        .def("uniqueSharedBits", &_ardal::BitMatrix::uniqueSharedBits, py::arg("row_indices"), py::arg("use_simd") = true)
-        .def("colFrequency", &_ardal::BitMatrix::colFrequency, py::arg("row_indices"))
-        .def("columnEntropy", &_ardal::BitMatrix::columnEntropy)
-        .def("klDivergence", &_ardal::BitMatrix::klDivergence, py::arg("ingroup_indices"))
-        .def("getSetBitIndices", &_ardal::BitMatrix::getSetBitIndices, py::arg("row_idx"))
-        .def("getRowMasses", &_ardal::BitMatrix::getRowMasses)
-        .def("getColumnMasses", &_ardal::BitMatrix::getColumnMasses)
-        .def("getDensity", &_ardal::BitMatrix::getDensity)
-        .def("getMatrix", &_ardal::BitMatrix::getMatrix);
-}

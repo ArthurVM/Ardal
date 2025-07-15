@@ -1,4 +1,7 @@
 // BitMatrix.hpp
+/*
+Copyright 2025 Arthur V. Morris
+*/
 #pragma once
 
 #include <vector>
@@ -31,28 +34,28 @@ public:
     // constructor: takes a NumPy matrix
     BitMatrix( py::array_t<uint8_t> input_matrix );
 
-    // distance methods
+    // distance functions
     py::array_t<int> hamming( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
     py::array_t<int> innerProduct( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
  
-    // neighbourhood methods
-    py::array_t<int64_t> neighbourhood( size_t row_idx, int epsilon, bool use_simd = true, int threads = 1 )  const;
+    // neighbourhood functions
+    py::array_t<int64_t> neighbourhood( size_t row_idx, int epsilon, bool use_simd = true, int threads = 1 ) const;
     py::list innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd = true ) const;
 
-    // set operation methods
+    // set operation functions
     std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd = true ) const;
 
-    // statistical methods
+    // statistical functions
     py::array_t<double> colFrequency( std::vector<size_t>& row_indices ) const;
     py::array_t<double> columnEntropy( void ) const;
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
 
-    // get methods
+    // get functions
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
     py::array_t<int> getRowMasses( void );
     py::array_t<int> getColumnMasses( void );
     double getDensity( void ) const;
-    py::array_t<uint8_t> getMatrix( void ) const;
+    py::array_t<uint8_t> getBitMatrix( void ) const;
 
 private:
     // bit-packed matrix
@@ -66,20 +69,20 @@ private:
     std::vector<int> _col_masses;   // the mass of each column
     double _density;                // the density of the matrix
 
-    // access methods
+    // access functions
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
 
-    // distance methods
+    // distance functions
     int hammingDistanceScalar( size_t i, size_t j ) const;
     int hammingDistanceSIMD( size_t i, size_t j ) const;
 
-    // neighbourhood methods
+    // neighbourhood functions
     int epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) const;
     int epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const;
     int innerProductScalar( size_t i, size_t j ) const;
     int innerProductSIMD( size_t i, size_t j ) const;
 
-    // statistics helper methods
+    // statistics helper functions
     double density( void ) const;
 
     // hamming distance cache

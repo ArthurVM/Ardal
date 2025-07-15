@@ -7,6 +7,7 @@ from humanize import naturalsize
 from sys import stdout, stderr, getsizeof
 from scipy.spatial.distance import pdist, squareform
 from collections import defaultdict, namedtuple
+from typing import List, Union
 
 from . import _ardal
 from .ArdalParser import ArdalParser
@@ -16,30 +17,39 @@ class Ardal(object):
     """ Class for handling Ardal-neighbourhood objects. """
 
 
-    def __init__( self, data_source : str, __ref : bool=False, file_format : str=None ):
+    def __init__( self,
+                  data_source : str,
+                  use_roaring_if_sparse : bool=True,
+                  density_threshold : float=0.02,
+                  __ref : bool=False, 
+                  file_format : str=None ):
         """ Ardal constructor
         """
         super(Ardal, self).__init__()
 
-        self.__bit_matrix = None
+        self.__hybrid_matrix = None
         self.__headers = None
         self.__ref = __ref
 
         parser = ArdalParser(data_source, file_format)
 
         if parser.matrix is not None:
-            self.__bit_matrix = _ardal.BitMatrix(parser.matrix)
+            self.__hybrid_matrix = _ardal.HybridMatrix(parser.matrix,
+                                                       use_roaring_if_sparse=use_roaring_if_sparse,
+                                                       density_threshold=density_threshold)
             self.__headers = parser.headers
         else:
             ## raise an error if parsing fails to prevent unexpected behaviour down the line
             raise ValueError(f"Failed to parse data from: {data_source}") 
+        
+        self.roaring = self.__hybrid_matrix.roaringEnabled()
+        self.stats(print_stats=True)
 
-        print(self.stats())
 
     ########## COMPUTE FUNCTIONS ##########
             
     
-    def pairwise(self, guids: list = [], metric: str = "hamming", use_simd : bool=True, threads : int=1,chunk_size : int=100 ) -> pd.DataFrame:
+    def pairwise( self, guids: list = [], metric: str = "hamming", use_simd : bool=True, threads : int=1, force_bit_backend: bool=False, chunk_size : int=100 ) -> pd.DataFrame:
         """ Takes a set of GUIDs and calculates the pairwise distance between them, returning a distance matrix.
         Pairwise distance can be calculated using Hamming, Jaccard, or Inner Product (number of shared SNPs) functions.
         If an empty list if provided (as by default) then the pairwise distance of all samples within the matrix will be calculated.
@@ -57,12 +67,16 @@ class Ardal(object):
         
         ## calculate the distance matrix using _ardal
         if metric == "jaccard":
-            # dist_tri = self.__bit_matrix.jaccard()
-            return 0
+            # dist_tri = self.__hybrid_matrix.jaccard()
+            raise NotImplementedError("Jaccard distance is not yet implemented.")
         elif metric == "hamming":
-            dist_tri = self.__bit_matrix.hamming(use_simd=use_simd, threads=threads)
+            dist_tri = self.__hybrid_matrix.hamming(use_simd=use_simd,
+                                                    threads=threads,
+                                                    force_bit_backend=force_bit_backend)
         elif metric == "inner_product":
-            dist_tri = self.__bit_matrix.innerProduct(use_simd=use_simd, threads=threads)
+            dist_tri = self.__hybrid_matrix.innerProduct(use_simd=use_simd,
+                                                         threads=threads,
+                                                         force_bit_backend=force_bit_backend)
         
         dist_matrix = np.array(squareform(dist_tri))
         dist_df = pd.DataFrame(dist_matrix, columns=self.__headers["guids"], index=self.__headers["guids"])
@@ -70,12 +84,28 @@ class Ardal(object):
         return dist_df
 
     
-    def neighbourhood( self, guid : str, n : int, use_simd : bool = True, threads : int = 1 ) -> dict:
+    def neighbourhood( self, guid : str, n : int, use_simd : bool = True, threads : int = 1, force_bit_backend: bool=False ) -> dict:
         """ get the allele neighbourhood of a GUID using hamming distance
         """
 
+        if not isinstance(guid, str):
+            raise ValueError("guid must be a string.")
+        if not isinstance(n, int):
+            raise ValueError("n must be an integer.")
+        if n < 0:
+            raise ValueError("n must be non-negative.")
+        if n == 0:
+            return {}
+        if guid not in self.__headers["guids"]:
+            raise ValueError(f"guid '{guid}' not found in allele matrix.")
+
+
         guid_coord = self._encodeGuid(guid)
-        ncoords = self.__bit_matrix.neighbourhood(row_idx=guid_coord, epsilon=n, use_simd=use_simd, threads=threads)
+        ncoords = self.__hybrid_matrix.neighbourhood(row_idx=guid_coord,
+                                                        epsilon=n,
+                                                        use_simd=use_simd,
+                                                        threads=threads,
+                                                        force_bit_backend=force_bit_backend)
         neighbourhood = {self._decodeGuid(coord) : hdist for coord, hdist in ncoords}
 
         return neighbourhood
@@ -89,12 +119,12 @@ class Ardal(object):
         snv_neighbourhood = {}
 
         guid_coord = self._encodeGuid(guid)
-        guid_snv_positions = set([self._decodeAllele(allele_coord)[1:-1] for allele_coord in self.__bit_matrix.getSetBitIndices(guid_coord)])
+        guid_snv_positions = set([self._decodeAllele(allele_coord)[1:-1] for allele_coord in self.__hybrid_matrix.getSetBitIndices(guid_coord)])
 
         for guid_idx in range(len(self.__headers["guids"])):
             if guid_idx == guid_coord:
                 continue
-            other_snv_positions = set([self._decodeAllele(allele_coord)[1:-1] for allele_coord in self.__bit_matrix.getSetBitIndices(guid_idx)])
+            other_snv_positions = set([self._decodeAllele(allele_coord)[1:-1] for allele_coord in self.__hybrid_matrix.getSetBitIndices(guid_idx)])
             snv_dist = guid_snv_positions ^ other_snv_positions
             if len(snv_dist) <= n:
                 snv_neighbourhood[self._decodeGuid(guid_idx)] = len(snv_dist)
@@ -102,7 +132,7 @@ class Ardal(object):
         return snv_neighbourhood
 
 
-    def uniqueSNPs( self, guids : list ) -> set:
+    def uniqueSNPs( self, guids : list, force_bit_backend: bool=False ) -> set:
         """
         Finds the set of SNPs unique to a given set of GUIDs.
 
@@ -129,13 +159,14 @@ class Ardal(object):
             
         unqiue_snps = defaultdict(set)
         for guid in guids:
-            guid_unique_snps = self.__bit_matrix.uniqueSharedBits([self._encodeGuid(guid)])
+            guid_unique_snps = self.__hybrid_matrix.uniqueSharedBits([self._encodeGuid(guid)], 
+                                                                     force_bit_backend=force_bit_backend)
             unqiue_snps[guid] = {self._decodeAllele(idx) for idx in guid_unique_snps}
         
         return unqiue_snps
 
 
-    def uniqueCore( self, guids : list ) -> set:
+    def uniqueCore( self, guids : list, force_bit_backend: bool=False ) -> set:
         """
         Finds the set of SNPs unique to a given set of GUIDs and shared by all GUIDs in that set.
 
@@ -162,7 +193,7 @@ class Ardal(object):
                 raise ValueError(f"guid '{guid}' not found in allele matrix.")
             
         guid_coords = [self._encodeGuid(guid) for guid in guids]
-        unique_snp_indices = self.__bit_matrix.uniqueSharedBits(guid_coords)
+        unique_snp_indices = self.__hybrid_matrix.uniqueSharedBits(guid_coords, force_bit_backend=force_bit_backend)
         return {self._decodeAllele(idx) for idx in unique_snp_indices}
     
 
@@ -218,7 +249,7 @@ class Ardal(object):
         return {allele for allele, count in accessory_alleles.items()}
             
 
-    def allele( self, alleles : list ) -> set:
+    def allele( self, alleles : list, force_bit_backend : bool=False ) -> set:
         """ Take a set of alleles and return all GUIDs containing all of those alleles.
         """
 
@@ -236,7 +267,7 @@ class Ardal(object):
 
         result_guids = set()
         for guid_idx, guid_name in enumerate(self.__headers["guids"]):
-            present_alleles = set(self.__bit_matrix.getSetBitIndices(guid_idx))
+            present_alleles = set(self.__hybrid_matrix.getSetBitIndices(guid_idx, force_bit_backend=force_bit_backend))
             if allele_indices.issubset(present_alleles):
                 result_guids.add(guid_name)
         
@@ -253,7 +284,7 @@ class Ardal(object):
 
         allele_count_dict = defaultdict(int)
         for guid_coord in encoded_guids:
-            snp_indices = self.__bit_matrix.getSetBitIndices(guid_coord)
+            snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_coord)
             for snp_idx in snp_indices:
                 allele_count_dict[self._decodeAllele(snp_idx)] += 1
         
@@ -286,7 +317,7 @@ class Ardal(object):
                     raise ValueError(f"guid '{guid}' not found in allele matrix.")
         
         guid_coords = [self._encodeGuid(guid) for guid in guids]
-        allele_freq = self.__bit_matrix.colFrequency(guid_coords)
+        allele_freq = self.__hybrid_matrix.colFrequency(guid_coords)
 
         return dict(sorted(zip(self.__headers["alleles"], allele_freq), key=lambda x: x[1], reverse=True))
         
@@ -295,7 +326,7 @@ class Ardal(object):
         """ Computes the Shannon entropy for each allele in the matrix.
         Entropy H(X) = -p * log2(p) - (1-p) * log2(1-p), where p is the allele frequency.
         """
-        allele_entropy = self.__bit_matrix.columnEntropy()
+        allele_entropy = self.__hybrid_matrix.columnEntropy()
         entropies_dict = dict(sorted(zip(self.__headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
         return entropies_dict
     
@@ -346,7 +377,7 @@ class Ardal(object):
         D_{kl}(P||Q) = sum_{x\inX}(P(x) * log2(P(x)/Q(x)))
         """
         guid_coords = [self._encodeGuid(guid) for guid in guids]
-        kl_divergence = self.__bit_matrix.klDivergence(guid_coords)
+        kl_divergence = self.__hybrid_matrix.klDivergence(guid_coords)
         kl_dict = dict(sorted(zip(self.__headers["alleles"], kl_divergence), key=lambda x: x[1], reverse=True))
         return kl_dict
 
@@ -500,7 +531,7 @@ class Ardal(object):
         if os.path.exists(matrix_out_path):
             raise ValueError(f"File '{matrix_out_path}' already exists.")
 
-        np.save(matrix_out_path, self.__bit_matrix.getMatrix())
+        np.save(matrix_out_path, self.__hybrid_matrix.getMatrix())
         with open(os.path.join(file_path, output_prefix + "_headers.json")) as fout:
             json.dump(self.__headers, fout, indent=4)
 
@@ -510,36 +541,83 @@ class Ardal(object):
         """
         allele_dict = defaultdict(list)
         for guid_idx, guid_name in enumerate(self.__headers["guids"]):
-            snp_indices = self.__bit_matrix.getSetBitIndices(guid_idx)
+            snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_idx)
             for snp_idx in snp_indices:
                 allele_dict[guid_name].append(self._decodeAllele(snp_idx))
         return dict(allele_dict)
     
 
-    def stats( self ) -> dict:
+    def stats( self, print_stats : bool = False ) -> dict:
         """ Return a dictionary containing information about the database and its size in memory.
         """
-        stats = {
-            "n_guids"     : len(self.__headers["guids"]),
-            "n_alleles"   : len(self.__headers["alleles"]),
-            "matrix_size" : naturalsize(self.getMatrix().nbytes, binary=True),
-            "density"     : self.getDensity()
-            
-        }
+        n_guids = len(self.__headers["guids"])
+        n_alleles = len(self.__headers["alleles"])
+        density = self.getDensity()
+        roaring = self.roaring
+        bit_matrix_size_bytes = self.getBitMatrix().nbytes
+        if self.roaring:
+            roaring_mat = self.getRoaringMatrix(decode=False)
+            roaring_size_bytes = sum(arr.nbytes for arr in roaring_mat)
+            total_size_bytes = bit_matrix_size_bytes + roaring_size_bytes
+            roaring_matrix_size = naturalsize(roaring_size_bytes, binary=True)
+        else: 
+            roaring_matrix_size = None
+            total_size_bytes = bit_matrix_size_bytes
+        bit_matrix_size = naturalsize(bit_matrix_size_bytes, binary=True)
+        total_size = naturalsize(total_size_bytes, binary=True)
 
+        stats = {
+            "Number of GUIDs"     : n_guids,
+            "Number of Alleles"   : n_alleles,
+            "Matrix Density"      : density,
+            "Roaring Enabled"     : roaring,
+            "Bit Matrix Size"     : bit_matrix_size,
+            "Roaring Matrix Size" : roaring_matrix_size,
+            "Total Matrix Size"   : total_size
+        }
+        
+        if print_stats:
+            ## pretty print the stats
+            max_key_len = max(len(k) for k in stats.keys())
+            print("\n--- Ardal Matrix Statistics ---")
+            for k, v in stats.items():
+                print(f"{k.ljust(max_key_len)} : {v}")
+            print("-----------------------------\n")
+        
         return stats
     
 
     def getDensity( self ) -> float:
         """ Computes the sparsity of the allele matrix.
         """
-        return self.__bit_matrix.getDensity()
+        return self.__hybrid_matrix.getDensity()
     
 
-    def getMatrix( self ) -> np.array:
-        """ Return the allele matrix.
+    def getBitMatrix( self ) -> np.array:
+        """ Return the bit allele matrix.
         """
-        return self.__bit_matrix.getMatrix()
+        return self.__hybrid_matrix.getBitMatrix()
+        
+    
+    def getRoaringMatrix( self, decode : bool=True ) -> dict:
+        """ Return the roaring allele matrix.
+        """
+        roaring_dict = defaultdict(list)
+        guids = self.__headers["guids"]
+
+        if self.roaring:
+            rormat = self.__hybrid_matrix.getRoaringMatrix()
+
+            if decode:
+                for i, mat in enumerate(rormat):
+                    allele_ids = [self._decodeAllele(idx) for idx in mat]
+                    roaring_dict[guids[i]].append(allele_ids)
+                return roaring_dict
+            else:
+                return rormat
+                
+        else:
+            raise ValueError("Ardal object was instantialised with 'use_roaring_if_sparse=False'. Cannot retrieve roaring matrix.")
     
 
     def getHeaders( self ) -> dict:
@@ -551,7 +629,7 @@ class Ardal(object):
     def snpCount( self ) -> dict:
         """ Return a dictionary of SNP counts for each GUID.
         """
-        guid_mass_vec = self.__bit_matrix.getRowMasses()
+        guid_mass_vec = self.__hybrid_matrix.getRowMasses()
         return {guid : mass for guid, mass in zip(self.__headers["guids"], guid_mass_vec)}
     
 
