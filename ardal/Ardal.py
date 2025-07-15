@@ -273,7 +273,7 @@ class Ardal(object):
 
     ########## STATISTICAL FUNCTIONS ##########
 
-    def alleleFrequency( self, guids : list=[] ) -> dict:
+    def af( self, guids : list=[] ) -> dict:
         """ Calculates the allele frequency for each allele in the matrix across the group of guids.
         if an empty list is provided then all guids will be used.
         """
@@ -281,8 +281,6 @@ class Ardal(object):
             guids = self.__headers["guids"]
         else:
             ## check input
-            if len(guids) == 0:
-                raise ValueError("guids set cannot be empty.")
             for guid in guids:
                 if guid not in self.__headers["guids"]:
                     raise ValueError(f"guid '{guid}' not found in allele matrix.")
@@ -302,25 +300,58 @@ class Ardal(object):
         return entropies_dict
     
     
-    def klDivergence( self, guids : list ) -> dict:
+    def snpInform(self, guids: list, metric: str = "kullbackleibler") -> dict:
+        """
+        Calculates various scores that measure the association of each SNP
+        with a specified group of samples (guids).
+
+        This function serves as a unified interface for metrics that return a single
+        float value per SNP, representing the strength or nature of the association.
+        It compares an "in-group" (the provided guids) against an "out-group"
+        (all other samples).
+
+        Args:
+            guids (list): A list of sample identifiers for the in-group.
+            metrics (string): Specify which metric to use. Default : 'kullbackleibler'.
+                Available metrics:
+                - 'kullbackleibler': Kullback-Leibler divergence.
+                - 'jensenshannon': Jensen-Shannon divergence.
+                - 'informationgain': Information Gain.
+
+        Returns:
+            dict: A dictionary of snp : score pairs.
+        """
+        ## input validation
+        available_metrics = {'kullbackleibler', 'jensenshannon', 'informationgain'}
+        if metric not in available_metrics:
+            raise ValueError(f"Metric '{metric}' is not supported. Available metrics: {list(available_metrics)}")
+        
+        if not isinstance(guids, list) or not guids:
+            raise ValueError("guids must be a non-empty list.")
+        for guid in guids:
+            if guid not in self.__headers["guids"]:
+                raise ValueError(f"guid '{guid}' not found in allele matrix.")
+
+        if metric == 'kullbackleibler':
+            return self._klDivergence(guids)
+        if metric == 'jensenshannon':
+            return self._jsDivergence(guids)
+        if metric == 'informationgain':
+            return self._informationGain(guids)
+    
+    
+    def _klDivergence( self, guids : list ) -> dict:
         """ Computes the Kullbeck Liebler divergence between the in group (input guids) and out group (all others)
         allele frequency distributions for each allele in the matrix.
         D_{kl}(P||Q) = sum_{x\inX}(P(x) * log2(P(x)/Q(x)))
         """
-        ## check input
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self.__headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
-            
         guid_coords = [self._encodeGuid(guid) for guid in guids]
         kl_divergence = self.__bit_matrix.klDivergence(guid_coords)
         kl_dict = dict(sorted(zip(self.__headers["alleles"], kl_divergence), key=lambda x: x[1], reverse=True))
         return kl_dict
 
     
-    def jsDivergence( self, guids ) -> dict:
+    def _jsDivergence( self, guids ) -> dict:
         """
         Computes Jensen-Shannon divergence for each SNP between target_guids and others.
         
@@ -328,13 +359,6 @@ class Ardal(object):
             guids: list of sample identifiers to define the target group
         """
         from scipy.spatial.distance import jensenshannon
-
-        ## check input
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self.__headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
 
         all_guids = self.getHeaders()["guids"]
         X = self.getMatrix()
@@ -350,14 +374,14 @@ class Ardal(object):
         P = X_target.mean(axis=0) + 1e-9   # Add small epsilon to avoid log(0)
         Q = X_other.mean(axis=0) + 1e-9
 
-        # create 2-row matrix and compute JS over each column
+        ## create 2 row matrix and compute JS over each column
         M = 0.5 * (P + Q)
         js_scores = 0.5 * (P * np.log2(P / M) + Q * np.log2(Q / M))
 
         return dict(sorted(zip(self.__headers["alleles"], js_scores), key=lambda x: x[1], reverse=True))
 
 
-    def informationGain( self, guids ) -> dict:
+    def _informationGain( self, guids ) -> dict:
         """
         Compute information gain for each SNP column in binary matrix X,
         with respect to whether a sample is in target_guids.
@@ -366,13 +390,6 @@ class Ardal(object):
             np.ndarray of shape (n_snps,) - information gain per SNP
         """
         from scipy.stats import entropy
-
-        ## check input
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self.__headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
 
         all_guids = self.getHeaders()["guids"]
         X = self.getMatrix()
@@ -394,6 +411,25 @@ class Ardal(object):
 
         return dict(sorted(zip(self.__headers["alleles"], IGs), key=lambda x: x[1], reverse=True))
 
+
+    def testSnpAssociations(self, guids: list, tests: list = None) -> dict:
+        """
+        Performs statistical tests to evaluate the significance of the association
+        of each SNP with a specified group of samples (guids).
+
+        This function is for metrics that typically return a test statistic and a p-value.
+
+        Args:
+            guids (list): A list of sample identifiers for the in-group.
+            metrics (string): Specify which test to run. Default : 'chi2'.
+                Available tests:
+                - 'chi2': Chi-squared test of independence (Not Implemented).
+                - 'fisher': Fisher's Exact Test (Not Implemented).
+
+        Returns:
+            dict: A dictionary of snp : [score, p-value] pairs.
+        """
+        raise NotImplementedError("This function is not yet implemented.")
 
 
     ########## PUBLIC UTILITY FUNCTIONS ##########

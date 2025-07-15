@@ -813,7 +813,15 @@ py::array_t<double> BitMatrix::colFrequency(std::vector<size_t>& row_indices) co
     std::fill(frequencies_ptr, frequencies_ptr + _n_cols, 0.0);
 
     size_t n = row_indices.size();
-    if (n == 0 || _n_cols == 0) {
+    if (_n_cols == 0) {
+        return frequencies;
+    }
+
+    // if no or all indices are provided then quickly return normalised column masses
+    if (n == _n_cols || n == 0) {
+        for (size_t col = 0; col < _n_cols; ++col) {
+            frequencies_ptr[col] = _col_masses[col] / static_cast<double>(_n_rows);
+        }
         return frequencies;
     }
 
