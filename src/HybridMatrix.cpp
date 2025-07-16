@@ -29,8 +29,8 @@ namespace _ardal {
  *  Propagates exceptions from `BitMatrix` and `RoaringMatrix` constructors.
  ****************************************************************************************************/  
 HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
-                           bool use_roaring_if_sparse,
-                           double density_threshold ) {
+                            bool use_roaring_if_sparse,
+                            double density_threshold ) {
     bit_backend = std::make_unique<_ardal::BitMatrix>(matrix);
     density = bit_backend->getDensity();
 

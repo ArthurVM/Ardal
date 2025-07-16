@@ -4,7 +4,9 @@ Copyright 2025 Arthur V. Morris
 */
 #pragma once
 
+#include "roaring.hh"
 #include <vector>
+#include <iostream>
 #include <unordered_map>
 #include <utility>
 #include <cstdint>
@@ -25,7 +27,7 @@ public:
     RoaringMatrix( py::array_t<uint8_t> input_matrix );
 
     // distance functions
-    py::array_t<int> hamming( bool use_simd = true, int threads = 1 ) const;
+    py::array_t<uint32_t> hamming( int threads = 1 ) const;
     py::array_t<int> innerProduct( bool use_simd = true, int threads = 1 ) const;
  
     // neighbourhood functions
@@ -42,15 +44,14 @@ public:
 
 private:
     // roaring matrix
-    std::vector<std::vector<size_t>> _roaring_matrix;
+    std::vector<roaring::Roaring> _roaring_matrix;
 
     // attributes
     size_t _n_rows;
     size_t _n_cols;
 
     // distance functions
-    int hammingDistanceScalar( size_t i, size_t j ) const;
-    int hammingDistanceSIMD( size_t i, size_t j ) const;
+    uint32_t hammingDistance( size_t i, size_t j ) const;
 
     // neighbourhood functions
     int epsilonNeighbourhoodScalar( size_t i, size_t j ) const;

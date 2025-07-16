@@ -33,6 +33,8 @@ namespace _ardal {
 RoaringMatrix::RoaringMatrix(py::array_t<uint8_t> input_matrix) {
     auto buf = input_matrix.request();
 
+    std::cout << "Building roaring" << std::endl;
+
     if (buf.ndim != 2) {
         throw std::runtime_error("Input matrix must be 2-dimensional");
     }
@@ -47,13 +49,14 @@ RoaringMatrix::RoaringMatrix(py::array_t<uint8_t> input_matrix) {
     // populate roaring bitmaps
     auto ptr = static_cast<uint8_t*>(buf.ptr);
     for (size_t i = 0; i < _n_rows; ++i) {
+        roaring::Roaring& bitmap = _roaring_matrix[i];
         for (size_t j = 0; j < _n_cols; ++j) {
             uint8_t val = ptr[i * _n_cols + j];
             if (val != 0 && val != 1) {
                 throw std::runtime_error("Input matrix must only contain binary values (0 or 1)");
             }
             if (val) {
-                _roaring_matrix[i].push_back(j);
+                bitmap.add(j);
             }
         }
     }
@@ -80,36 +83,49 @@ RoaringMatrix::RoaringMatrix(py::array_t<uint8_t> input_matrix) {
  *                     the pairwise Hamming distances. The length of the array is n*(n-1)/2,
  *                     where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<int> RoaringMatrix::hamming( bool use_simd, int threads ) const {
+py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
+
+    std::cout << "Calculating hamming" << std::endl;
+
     const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
-    py::array_t<int> dist_matrix(total_pairs);
-    auto dist_ptr = dist_matrix.mutable_data();
-    
-    for (size_t i = 0; i < _n_rows; ++i) {
-        for (size_t j = i + 1; j < _n_rows; ++j) {
-            size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
-            int dist = use_simd
-                    ? hammingDistanceSIMD(i, j)
-                    : hammingDistanceScalar(i, j);
-            dist_ptr[idx] = dist;
+    py::array_t<uint32_t> dist_matrix(total_pairs);     
+    {
+        py::gil_scoped_release release;
+        omp_set_num_threads(threads);
+
+        auto dist_ptr = dist_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(guided)
+        for (size_t pair_idx = 0; pair_idx < total_pairs; ++pair_idx) {
+            size_t i = 0, j = 0;
+            size_t temp = pair_idx;
+
+            i = floor((2.0 * _n_rows - 1 - sqrt(pow(2.0 * _n_rows - 1, 2) - 8.0 * temp)) / 2.0);
+            j = temp + i + 1 - _n_rows * i + i * i / 2;
+
+            uint32_t dist = 0;
+
+            dist = hammingDistance(i, j);
+            dist_ptr[pair_idx] = dist;
+        }    
+
+        #pragma omp parallel for schedule(static)
+        for (size_t pair_idx = 0; pair_idx < total_pairs; ++pair_idx) {
+              size_t i = 0, j = 0;
+               i = floor((2.0 * _n_rows - 1 - sqrt(pow(2.0 * _n_rows - 1, 2) - 8.0 * pair_idx)) / 2.0);
+               j = pair_idx + i + 1 - _n_rows * i + i * i / 2;
+            size_t row_idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+            dist_ptr[row_idx] = hammingDistance(i, j);
         }
-    }
+    }     
     return dist_matrix;
 }
 
 
-int RoaringMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
-    std::vector<size_t> row_i = _roaring_matrix[i];
-    std::vector<size_t> row_j = _roaring_matrix[j];
-    int hamming_dist = (row_i ^ row_j).cardinality();
-    return hamming_dist;
-}
-
-
-int RoaringMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
-    std::vector<size_t> row_i = _roaring_matrix[i];
-    std::vector<size_t> row_j = _roaring_matrix[j];
-    int hamming_dist = (row_i ^ row_j).cardinality();
+uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
+    const roaring::Roaring &row_i = _roaring_matrix.at(i);
+    const roaring::Roaring &row_j = _roaring_matrix.at(j);
+    uint32_t hamming_dist = (row_i ^ row_j).cardinality();
     return hamming_dist;
 }
 
@@ -151,16 +167,24 @@ int RoaringMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j ) const {
 
 
 py::array_t<size_t> RoaringMatrix::getSetBitIndices( size_t row_idx ) const {
-    const auto& row_vec = _roaring_matrix[row_idx];
-    return py::array_t<size_t>(row_vec.size(), row_vec.data());
+    const auto& bitmap = _roaring_matrix.at(row_idx);
+
+    // Create a numpy array of uint32_t to hold the values.
+    py::array_t<uint32_t> values_u32(bitmap.cardinality());
+
+    // Fill the numpy array with values from the roaring bitmap.
+    bitmap.toUint32Array(values_u32.mutable_data());
+
+    // Cast the numpy array to size_t, which is what the python side expects.
+    return values_u32.cast<py::array_t<size_t>>();
 }
 
 
 py::list RoaringMatrix::getRoaringMatrix( void ) const {
     py::list roaring_matrix;
     for (size_t i = 0; i < _n_rows; ++i) {
-        const auto& row_vec = _roaring_matrix[i];
-        roaring_matrix.append(py::array_t<size_t>(row_vec.size(), row_vec.data()));
+        const auto& bitmap = _roaring_matrix[i];
+        roaring_matrix.append(getSetBitIndices(i));
     }
     return roaring_matrix;
 }

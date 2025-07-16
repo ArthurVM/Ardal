@@ -12,7 +12,8 @@ ext_modules = [
         sources=['src/BitMatrix.cpp',
                  'src/RoaringMatrix.cpp',
                  'src/HybridMatrix.cpp',
-                 'src/bindings.cpp'],
+                 'src/bindings.cpp',
+                 'src/roaring.c'],
         include_dirs=[
             os.path.abspath("include/"),
             os.path.abspath(os.path.dirname(__file__))

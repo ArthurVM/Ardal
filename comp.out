@@ -1,0 +1,89 @@
+Using pip 25.0 from /home/amorris/anaconda3/lib/python3.9/site-packages/pip (python 3.9)
+Obtaining file:///home/amorris/BioInf/Ardal_MAIN/Ardal
+  Preparing metadata (setup.py): started
+  Running command python setup.py egg_info
+  /home/amorris/anaconda3/lib/python3.9/site-packages/setuptools/dist.py:330: InformationOnly: Normalizing '0.2.0-alpha' to '0.2.0a0'
+    self.metadata.version = self._normalize_version(self.metadata.version)
+  running egg_info
+  creating /tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info
+  writing /tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/dependency_links.txt
+  writing requirements to /tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/requires.txt
+  writing top-level names to /tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/SOURCES.txt'
+  writing manifest file '/tmp/pip-pip-egg-info-drka7xnp/ardal.egg-info/SOURCES.txt'
+  Preparing metadata (setup.py): finished with status 'done'
+Requirement already satisfied: numpy in /home/amorris/anaconda3/lib/python3.9/site-packages (from ardal==0.2.0a0) (1.26.4)
+Requirement already satisfied: pandas in /home/amorris/anaconda3/lib/python3.9/site-packages (from ardal==0.2.0a0) (1.3.4)
+Requirement already satisfied: scipy in /home/amorris/anaconda3/lib/python3.9/site-packages (from ardal==0.2.0a0) (1.13.1)
+Requirement already satisfied: pyjson in /home/amorris/anaconda3/lib/python3.9/site-packages (from ardal==0.2.0a0) (1.4.1)
+Requirement already satisfied: humanize in /home/amorris/anaconda3/lib/python3.9/site-packages (from ardal==0.2.0a0) (4.12.3)
+Requirement already satisfied: python-dateutil>=2.7.3 in /home/amorris/anaconda3/lib/python3.9/site-packages (from pandas->ardal==0.2.0a0) (2.9.0.post0)
+Requirement already satisfied: pytz>=2017.3 in /home/amorris/anaconda3/lib/python3.9/site-packages (from pandas->ardal==0.2.0a0) (2024.2)
+Requirement already satisfied: six>=1.5 in /home/amorris/anaconda3/lib/python3.9/site-packages (from python-dateutil>=2.7.3->pandas->ardal==0.2.0a0) (1.17.0)
+Installing collected packages: ardal
+  DEPRECATION: Legacy editable install of ardal==0.2.0a0 from file:///home/amorris/BioInf/Ardal_MAIN/Ardal (setup.py develop) is deprecated. pip 25.1 will enforce this behaviour change. A possible replacement is to add a pyproject.toml or enable --use-pep517, and use setuptools >= 64. If the resulting installation is not behaving as expected, try using --config-settings editable_mode=compat. Please consult the setuptools documentation for more information. Discussion can be found at https://github.com/pypa/pip/issues/11457
+  Running setup.py develop for ardal
+    Running command python setup.py develop
+    /home/amorris/anaconda3/lib/python3.9/site-packages/setuptools/dist.py:330: InformationOnly: Normalizing '0.2.0-alpha' to '0.2.0a0'
+      self.metadata.version = self._normalize_version(self.metadata.version)
+    running develop
+    /home/amorris/anaconda3/lib/python3.9/site-packages/setuptools/command/develop.py:41: EasyInstallDeprecationWarning: easy_install command is deprecated.
+    !!
+
+            ********************************************************************************
+            Please avoid running ``setup.py`` and ``easy_install``.
+            Instead, use pypa/build, pypa/installer or other
+            standards-based tools.
+
+            See https://github.com/pypa/setuptools/issues/917 for details.
+            ********************************************************************************
+
+    !!
+      easy_install.initialize_options(self)
+    /home/amorris/anaconda3/lib/python3.9/site-packages/setuptools/_distutils/cmd.py:79: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+    !!
+
+            ********************************************************************************
+            Please avoid running ``setup.py`` directly.
+            Instead, use pypa/build, pypa/installer or other
+            standards-based tools.
+
+            See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+            ********************************************************************************
+
+    !!
+      self.initialize_options()
+    running egg_info
+    creating ardal.egg-info
+    writing ardal.egg-info/PKG-INFO
+    writing dependency_links to ardal.egg-info/dependency_links.txt
+    writing requirements to ardal.egg-info/requires.txt
+    writing top-level names to ardal.egg-info/top_level.txt
+    writing manifest file 'ardal.egg-info/SOURCES.txt'
+    reading manifest file 'ardal.egg-info/SOURCES.txt'
+    writing manifest file 'ardal.egg-info/SOURCES.txt'
+    running build_ext
+    building 'ardal._ardal' extension
+    creating build/temp.linux-x86_64-cpython-39/src
+    /usr/local/gcc-11.4.0/bin/g++-11.4 -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -I/home/amorris/BioInf/Ardal_MAIN/Ardal/include -I/home/amorris/BioInf/Ardal_MAIN/Ardal -I/home/amorris/anaconda3/include/python3.9 -c src/BitMatrix.cpp -o build/temp.linux-x86_64-cpython-39/src/BitMatrix.o -O3 -march=native -ffast-math -fopenmp
+    src/BitMatrix.cpp: In member function ‘std::vector<long unsigned int> _ardal::BitMatrix::uniqueSharedBits(const std::vector<long unsigned int>&, bool) const’:
+    src/BitMatrix.cpp:768:63: warning: comparison of integer expressions of different signedness: ‘const value_type’ {aka ‘const int’} and ‘const size_t’ {aka ‘const long unsigned int’} [-Wsign-compare]
+      768 |                 if (col_idx < _n_cols && _col_masses[col_idx] == ingroup_size) {
+    /usr/local/gcc-11.4.0/bin/g++-11.4 -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -I/home/amorris/BioInf/Ardal_MAIN/Ardal/include -I/home/amorris/BioInf/Ardal_MAIN/Ardal -I/home/amorris/anaconda3/include/python3.9 -c src/HybridMatrix.cpp -o build/temp.linux-x86_64-cpython-39/src/HybridMatrix.o -O3 -march=native -ffast-math -fopenmp
+    /usr/local/gcc-11.4.0/bin/g++-11.4 -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -I/home/amorris/BioInf/Ardal_MAIN/Ardal/include -I/home/amorris/BioInf/Ardal_MAIN/Ardal -I/home/amorris/anaconda3/include/python3.9 -c src/RoaringMatrix.cpp -o build/temp.linux-x86_64-cpython-39/src/RoaringMatrix.o -O3 -march=native -ffast-math -fopenmp
+    src/RoaringMatrix.cpp: In member function ‘pybind11::list _ardal::RoaringMatrix::getRoaringMatrix() const’:
+    src/RoaringMatrix.cpp:179:21: warning: unused variable ‘bitmap’ [-Wunused-variable]
+      179 |         const auto& bitmap = _roaring_matrix[i];
+          |                     ^~~~~~
+    /usr/local/gcc-11.4.0/bin/g++-11.4 -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -I/home/amorris/BioInf/Ardal_MAIN/Ardal/include -I/home/amorris/BioInf/Ardal_MAIN/Ardal -I/home/amorris/anaconda3/include/python3.9 -c src/bindings.cpp -o build/temp.linux-x86_64-cpython-39/src/bindings.o -O3 -march=native -ffast-math -fopenmp
+    /usr/local/gcc-11.4.0/bin/gcc-11.4 -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -I/home/amorris/BioInf/Ardal_MAIN/Ardal/include -I/home/amorris/BioInf/Ardal_MAIN/Ardal -I/home/amorris/anaconda3/include/python3.9 -c src/roaring.c -o build/temp.linux-x86_64-cpython-39/src/roaring.o -O3 -march=native -ffast-math -fopenmp
+    creating build/lib.linux-x86_64-cpython-39/ardal
+    /usr/local/gcc-11.4.0/bin/g++-11.4 -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /home/amorris/anaconda3/include -fPIC -O2 -isystem /home/amorris/anaconda3/include -pthread -B /home/amorris/anaconda3/compiler_compat -shared build/temp.linux-x86_64-cpython-39/src/BitMatrix.o build/temp.linux-x86_64-cpython-39/src/HybridMatrix.o build/temp.linux-x86_64-cpython-39/src/RoaringMatrix.o build/temp.linux-x86_64-cpython-39/src/bindings.o build/temp.linux-x86_64-cpython-39/src/roaring.o -o build/lib.linux-x86_64-cpython-39/ardal/_ardal.cpython-39-x86_64-linux-gnu.so -O3 -fopenmp
+    copying build/lib.linux-x86_64-cpython-39/ardal/_ardal.cpython-39-x86_64-linux-gnu.so -> ardal
+    Creating /home/amorris/anaconda3/lib/python3.9/site-packages/ardal.egg-link (link to .)
+    ardal 0.2.0a0 is already the active version in easy-install.pth
+
+    Installed /home/amorris/BioInf/Ardal_MAIN/Ardal
+Successfully installed ardal

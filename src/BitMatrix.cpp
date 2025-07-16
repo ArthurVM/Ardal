@@ -163,6 +163,67 @@ py::array_t<uint8_t> BitMatrix::getBitMatrix( void ) const {
 
 
 /****************************************************************************************************
+ * ardal::BitMatrix::hamming
+ * 
+ * Calculate the Hamming distances between all pairs of rows. SIMD optimised for vectorised distance
+ * calculation, with the option of scalar computation for testing and fallback in instances where 
+ * CPU does not support AVX2.
+ *
+ * This function calculates the pairwise Hamming distances between all rows of the allele matrix.
+ * The Hamming distance between two rows is the number of positions at which the corresponding
+ * elements differ.  The results are returned as a condensed distance matrix.
+ *
+ * INPUT: 
+ *  None (operates on the private member _packed_matrix)
+ * 
+ * PARAMETERS: 
+ *  use_simd (bool)   : A boolean flag to specify whether to use SIMD for vectorised distance
+ *                      calculation.
+ *  fill_cache (bool) : A boolean flag to specify whether to fill the cache (CURRENTLY INACTIVE).
+ *  threads (int)     : The number of threads to use for parallel computation.
+ *
+ * OUTPUT:
+ *  py::array_t<int>  : A 1D NumPy array representing the condensed distance matrix containing
+ *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
+ *                      where 'n' is the number of rows in the matrix.
+ ****************************************************************************************************/
+py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int threads ) const {
+    if (threads <= 0)
+        throw std::runtime_error("Thread count must be positive.");
+    
+    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
+    py::array_t<uint32_t> dist_matrix(total_pairs);
+    
+    {
+        py::gil_scoped_release release;   // release GIL for full parallel region
+        omp_set_num_threads(threads);
+
+        auto dist_ptr = dist_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t j = i + 1; j < _n_rows; ++j) {
+                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+                uint32_t dist = use_simd
+                    ? hammingDistanceSIMD(i, j)
+                    : hammingDistanceScalar(i, j);
+
+                dist_ptr[idx] = dist;
+
+                // if (fill_cache) {
+                //     // currently not in action to save some headaches
+                //     #pragma omp critical
+                //     _hamming_cache[{i, j}] = dist;
+                // }
+            }
+        }
+    }   // GIL reestablished here
+    return dist_matrix;
+}
+
+
+
+/****************************************************************************************************
  * ardal::BitMatrix::hammingDistanceScalar
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix using scalar operations.
@@ -182,16 +243,16 @@ py::array_t<uint8_t> BitMatrix::getBitMatrix( void ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
+uint32_t BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
     // input validation in the name of paranoia/robustness
     if (i >= _n_rows || j >= _n_rows) {
         throw std::out_of_range("Row index out of bounds in hammingDistanceScalar.");
     }
 
-    int dist = 0;
+    uint32_t dist = 0;
     for (size_t k = 0; k < _packed_cols; ++k) {
         uint64_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcount(xor_byte);
+        dist += __builtin_popcountll(xor_byte);
     }
     return dist;
 }
@@ -218,13 +279,13 @@ int BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
+uint32_t BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
         throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
     }
 
-    int dist = 0;
+    uint32_t dist = 0;
     size_t k = 0;
 
     // SIMD block
@@ -248,66 +309,6 @@ int BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
     return dist;
 }
 
-
-/****************************************************************************************************
- * ardal::BitMatrix::hamming
- * 
- * Calculate the Hamming distances between all pairs of rows. SIMD optimised for vectorised distance
- * calculation, with the option of scalar computation for testing and fallback in instances where 
- * CPU does not support AVX2.
- *
- * This function calculates the pairwise Hamming distances between all rows of the allele matrix.
- * The Hamming distance between two rows is the number of positions at which the corresponding
- * elements differ.  The results are returned as a condensed distance matrix.
- *
- * INPUT: 
- *  None (operates on the private member _packed_matrix)
- * 
- * PARAMETERS: 
- *  use_simd (bool)   : A boolean flag to specify whether to use SIMD for vectorised distance
- *                      calculation.
- *  fill_cache (bool) : A boolean flag to specify whether to fill the cache (CURRENTLY INACTIVE).
- *  threads (int)     : The number of threads to use for parallel computation.
- *
- * OUTPUT:
- *  py::array_t<int>  : A 1D NumPy array representing the condensed distance matrix containing
- *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
- *                      where 'n' is the number of rows in the matrix.
- ****************************************************************************************************/
-py::array_t<int> BitMatrix::hamming( bool fill_cache, bool use_simd, int threads ) const {
-    if (threads <= 0)
-        throw std::runtime_error("Thread count must be positive.");
-    
-    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
-    py::array_t<int> dist_matrix(total_pairs);
-    
-    {
-        py::gil_scoped_release release;   // release GIL for full parallel region
-
-        omp_set_num_threads(threads);
-
-        auto dist_ptr = dist_matrix.mutable_data();
-
-        #pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < _n_rows; ++i) {
-            for (size_t j = i + 1; j < _n_rows; ++j) {
-                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
-                int dist = use_simd
-                    ? hammingDistanceSIMD(i, j)
-                    : hammingDistanceScalar(i, j);
-
-                dist_ptr[idx] = dist;
-
-                // if (fill_cache) {
-                //     // currently not in action to save some headaches
-                //     #pragma omp critical
-                //     _hamming_cache[{i, j}] = dist;
-                // }
-            }
-        }
-    }   // GIL reestablished here
-    return dist_matrix;
-}
 
 /****************************************************************************************************
  * ardal::BitMatrix::innerProduct

@@ -18,11 +18,12 @@ add_library(_ardal MODULE
     src/BitMatrix.cpp
     src/RoaringMatrix.cpp
     src/HybridMatrix.cpp
+    src/roaring.c
 )
 
 # Add all necessary include directories to the target
 target_include_directories(_ardal PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"  # For <pybind11/pybind11.h>
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"   # For <pybind11> and <roaring>
     "${CMAKE_CURRENT_SOURCE_DIR}/src"       # For your project's headers
     ${PYTHON_INCLUDE_DIRS}                  # For <Python.h>
 )

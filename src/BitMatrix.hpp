@@ -35,7 +35,7 @@ public:
     BitMatrix( py::array_t<uint8_t> input_matrix );
 
     // distance functions
-    py::array_t<int> hamming( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
+    py::array_t<uint32_t> hamming( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
     py::array_t<int> innerProduct( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
  
     // neighbourhood functions
@@ -73,8 +73,8 @@ private:
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
 
     // distance functions
-    int hammingDistanceScalar( size_t i, size_t j ) const;
-    int hammingDistanceSIMD( size_t i, size_t j ) const;
+    uint32_t hammingDistanceScalar( size_t i, size_t j ) const;
+    uint32_t hammingDistanceSIMD( size_t i, size_t j ) const;
 
     // neighbourhood functions
     int epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) const;

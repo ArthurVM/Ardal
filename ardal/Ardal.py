@@ -21,6 +21,7 @@ class Ardal(object):
                   data_source : str,
                   use_roaring_if_sparse : bool=True,
                   density_threshold : float=0.02,
+                  force_roaring : bool=False,
                   __ref : bool=False, 
                   file_format : str=None ):
         """ Ardal constructor
@@ -32,6 +33,11 @@ class Ardal(object):
         self.__ref = __ref
 
         parser = ArdalParser(data_source, file_format)
+
+        ## do some parameter fiddling to enforce the generation of a roaring matrix
+        if force_roaring:
+            use_roaring_if_sparse = True
+            density_threshold = 1.0
 
         if parser.matrix is not None:
             self.__hybrid_matrix = _ardal.HybridMatrix(parser.matrix,
@@ -78,7 +84,7 @@ class Ardal(object):
                                                          threads=threads,
                                                          force_bit_backend=force_bit_backend)
         
-        dist_matrix = np.array(squareform(dist_tri))
+        dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
         dist_df = pd.DataFrame(dist_matrix, columns=self.__headers["guids"], index=self.__headers["guids"])
         
         return dist_df
@@ -536,12 +542,12 @@ class Ardal(object):
             json.dump(self.__headers, fout, indent=4)
 
 
-    def toDict( self ) -> dict:
+    def toDict( self, force_bit_backend : bool = False ) -> dict:
         """ Return a dictionary containing present allele IDs mapped to their guid.
         """
         allele_dict = defaultdict(list)
         for guid_idx, guid_name in enumerate(self.__headers["guids"]):
-            snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_idx)
+            snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_idx, force_bit_backend=force_bit_backend)
             for snp_idx in snp_indices:
                 allele_dict[guid_name].append(self._decodeAllele(snp_idx))
         return dict(allele_dict)
@@ -611,7 +617,7 @@ class Ardal(object):
             if decode:
                 for i, mat in enumerate(rormat):
                     allele_ids = [self._decodeAllele(idx) for idx in mat]
-                    roaring_dict[guids[i]].append(allele_ids)
+                    roaring_dict[guids[i]]=allele_ids
                 return roaring_dict
             else:
                 return rormat
