@@ -97,25 +97,10 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
 
         #pragma omp parallel for schedule(guided)
         for (size_t pair_idx = 0; pair_idx < total_pairs; ++pair_idx) {
-            size_t i = 0, j = 0;
-            size_t temp = pair_idx;
+            size_t i = floor((2.0 * _n_rows - 1 - sqrt(pow(2.0 * _n_rows - 1, 2) - 8.0 * pair_idx)) / 2.0);
+            size_t j = pair_idx + i + 1 - _n_rows * i + i * i / 2;
 
-            i = floor((2.0 * _n_rows - 1 - sqrt(pow(2.0 * _n_rows - 1, 2) - 8.0 * temp)) / 2.0);
-            j = temp + i + 1 - _n_rows * i + i * i / 2;
-
-            uint32_t dist = 0;
-
-            dist = hammingDistance(i, j);
-            dist_ptr[pair_idx] = dist;
-        }    
-
-        #pragma omp parallel for schedule(static)
-        for (size_t pair_idx = 0; pair_idx < total_pairs; ++pair_idx) {
-              size_t i = 0, j = 0;
-               i = floor((2.0 * _n_rows - 1 - sqrt(pow(2.0 * _n_rows - 1, 2) - 8.0 * pair_idx)) / 2.0);
-               j = pair_idx + i + 1 - _n_rows * i + i * i / 2;
-            size_t row_idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
-            dist_ptr[row_idx] = hammingDistance(i, j);
+            dist_ptr[pair_idx] = hammingDistance(i, j);
         }
     }     
     return dist_matrix;
@@ -123,10 +108,7 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
 
 
 uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
-    const roaring::Roaring &row_i = _roaring_matrix.at(i);
-    const roaring::Roaring &row_j = _roaring_matrix.at(j);
-    uint32_t hamming_dist = (row_i ^ row_j).cardinality();
-    return hamming_dist;
+    return (_roaring_matrix[i] ^ _roaring_matrix[j]).cardinality();
 }
 
 

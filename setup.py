@@ -13,7 +13,7 @@ ext_modules = [
                  'src/RoaringMatrix.cpp',
                  'src/HybridMatrix.cpp',
                  'src/bindings.cpp',
-                 'src/roaring.c'],
+                 'src/roaring/roaring.c'],
         include_dirs=[
             os.path.abspath("include/"),
             os.path.abspath(os.path.dirname(__file__))

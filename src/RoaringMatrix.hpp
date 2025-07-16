@@ -4,7 +4,7 @@ Copyright 2025 Arthur V. Morris
 */
 #pragma once
 
-#include "roaring.hh"
+#include "roaring/roaring.hh"
 #include <vector>
 #include <iostream>
 #include <unordered_map>
