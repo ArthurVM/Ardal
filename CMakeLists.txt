@@ -18,7 +18,7 @@ add_library(_ardal MODULE
     src/BitMatrix.cpp
     src/RoaringMatrix.cpp
     src/HybridMatrix.cpp
-    src/roaring.c
+    src/roaring/roaring.c
 )
 
 # Add all necessary include directories to the target

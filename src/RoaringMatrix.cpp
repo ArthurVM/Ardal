@@ -30,7 +30,9 @@ namespace _ardal {
  *   - If the input matrix is not 2-dimensional.
  *   - If the input matrix contains values other than 0 or 1.
  ****************************************************************************************************/
-RoaringMatrix::RoaringMatrix(py::array_t<uint8_t> input_matrix) {
+RoaringMatrix::RoaringMatrix( py::array_t<uint8_t> input_matrix,
+                              const std::vector<int>& row_masses )
+    : _row_masses(row_masses) {
     auto buf = input_matrix.request();
 
     std::cout << "Building roaring" << std::endl;
@@ -112,39 +114,152 @@ uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
 }
 
 
-py::array_t<int> RoaringMatrix::innerProduct( bool use_simd, int threads ) const {
-    py::array_t<int> inner_product_matrix;
-    return inner_product_matrix;
-}
+py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, int threads ) const {
+    // do some data cleanliness
+    if (epsilon < 0) {
+        throw std::runtime_error("epsilon must be non-negative.");
+        }
+    if (row_idx < 0) {
+        throw std::runtime_error("Row index must be non-negative.");
+        }
+    if (row_idx >= _n_rows) {
+        throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
+        }
+    if (threads <= 0)
+        throw std::runtime_error("Number of threads must be positive.");
+    
+    int q_mass = _row_masses[row_idx];    // access pre-calculated row mass
+    std::vector<std::vector<std::pair<size_t, int>>> thread_results;
 
+    {
+        py::gil_scoped_release release;   // release GIL for full parallel region
+        omp_set_num_threads(threads);     // Explicitly control number of threads
 
-py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd, int threads ) const {
-    py::array_t<int64_t> ep_n;
+        #pragma omp parallel
+        {
+            const int thread_id = omp_get_thread_num();
+
+            #pragma omp single
+            thread_results.resize(omp_get_num_threads());
+
+            auto& local = thread_results[thread_id];
+
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < _n_rows; ++i) {
+                if (i == row_idx) continue;
+
+                int mass_d = std::abs(q_mass - _row_masses[i]);
+                if (mass_d > epsilon) continue;
+                
+                // due to the restrictions on using a roaring bitmap, early exit is not trivial :(
+                int distance = hammingDistance(row_idx, i);
+
+                if (distance <= epsilon)
+                    local.emplace_back(i, distance);
+            }
+        }
+    }   // GIL reestablished here
+
+    // count total neighbours to preallocate np array
+    size_t total_neighbours = 0;
+    for (const auto& vec : thread_results) {
+        total_neighbours += vec.size();
+    }
+
+    // create result np array of shape (total_neighbours, 2)
+    py::array_t<int64_t> ep_n({total_neighbours, (size_t)2});
+    auto result_ptr = ep_n.mutable_data();
+
+    // populate array with (idex, dist) pairs
+    size_t curr_idx = 0;
+    for (const auto& vec : thread_results) {
+        for (const auto& [idx, dist] : vec) {
+            result_ptr[curr_idx * 2 + 0] = idx;
+            result_ptr[curr_idx * 2 + 1] = dist;
+            curr_idx++;
+        }
+    }       
     return ep_n;
 }
 
 
-py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd ) const {
-    py::list ip_n_list;
-    return ip_n_list;
+py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
+    py::array_t<int> inner_product_matrix;
+    return inner_product_matrix;
+}
+
+py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, int threads ) const {
+    // do some data cleanliness
+    if (ip_epsilon < 0) {
+        throw std::runtime_error("epsilon must be non-negative.");
+        }
+    if (row_idx < 0) {
+        throw std::runtime_error("Row index must be non-negative.");
+        }
+    if (row_idx >= _n_rows) {
+        throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
+        }
+    if (threads <= 0)
+        throw std::runtime_error("Number of threads must be positive.");
+    
+    std::vector<std::vector<std::pair<size_t, int>>> thread_results;
+
+    {
+        py::gil_scoped_release release;   // release GIL for full parallel region
+        omp_set_num_threads(threads);     // Explicitly control number of threads
+
+        #pragma omp parallel
+        {
+            const int thread_id = omp_get_thread_num();
+
+            #pragma omp single
+            thread_results.resize(omp_get_num_threads());
+
+            auto& local = thread_results[thread_id];
+
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < _n_rows; ++i) {
+                if (i == row_idx) continue;
+                
+                int distance = innerProductRowwise(row_idx, i);
+
+                if (distance >= ip_epsilon)
+                    local.emplace_back(i, distance);
+            }
+        }
+    }   // GIL reestablished here
+
+    // count total neighbours to preallocate np array
+    size_t total_neighbours = 0;
+    for (const auto& vec : thread_results) {
+        total_neighbours += vec.size();
+    }
+
+    // create result np array of shape (total_neighbours, 2)
+    py::array_t<int64_t> ipe_n({total_neighbours, (size_t)2});
+    auto result_ptr = ipe_n.mutable_data();
+
+    // populate array with (idex, dist) pairs
+    size_t curr_idx = 0;
+    for (const auto& vec : thread_results) {
+        for (const auto& [idx, dist] : vec) {
+            result_ptr[curr_idx * 2 + 0] = idx;
+            result_ptr[curr_idx * 2 + 1] = dist;
+            curr_idx++;
+        }
+    }       
+    return ipe_n;
 }
 
 
-std::vector<size_t> RoaringMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd ) const {
+uint32_t RoaringMatrix::innerProductRowwise( size_t i, size_t j ) const {
+    return (_roaring_matrix[i] & _roaring_matrix[j]).cardinality();
+}
+
+
+std::vector<size_t> RoaringMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices ) const {
     std::vector<size_t> shared_bits;
     return shared_bits;
-}
-
-
-int RoaringMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j ) const {
-    int dist = 0;
-    return dist;
-}
-
-
-int RoaringMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j ) const {
-    int dist = 0;
-    return dist;
 }
 
 

@@ -51,6 +51,8 @@ public:
 
     py::array_t<double> columnEntropy( void ) const;
 
+    py::dict bitCooccurrence( double threshold = 0.95, bool use_simd = true, int cache_bytes = 1e+9 ) const;
+
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
 
 

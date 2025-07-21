@@ -52,10 +52,18 @@ class Ardal(object):
         self.stats(print_stats=True)
 
 
+
+
     ########## COMPUTE FUNCTIONS ##########
             
     
-    def pairwise( self, guids: list = [], metric: str = "hamming", use_simd : bool=True, threads : int=1, force_bit_backend: bool=False, chunk_size : int=100 ) -> pd.DataFrame:
+    def pairwise( self,
+                  guids: list = [],
+                  metric: str = "hamming",
+                  use_simd : bool=True,
+                  threads : int=1,
+                  force_bit_backend: bool=False,
+                  chunk_size : int=100 ) -> pd.DataFrame:
         """ Takes a set of GUIDs and calculates the pairwise distance between them, returning a distance matrix.
         Pairwise distance can be calculated using Hamming, Jaccard, or Inner Product (number of shared SNPs) functions.
         If an empty list if provided (as by default) then the pairwise distance of all samples within the matrix will be calculated.
@@ -90,7 +98,12 @@ class Ardal(object):
         return dist_df
 
     
-    def neighbourhood( self, guid : str, n : int, use_simd : bool = True, threads : int = 1, force_bit_backend: bool=False ) -> dict:
+    def neighbourhood( self,
+                       guid : str,
+                       n : int,
+                       use_simd : bool = True,
+                       threads : int = 1,
+                       force_bit_backend: bool=False ) -> dict:
         """ get the allele neighbourhood of a GUID using hamming distance
         """
 
@@ -117,7 +130,9 @@ class Ardal(object):
         return neighbourhood
     
 
-    def snvDist( self, guid : str, n : int ) -> dict:
+    def snvDist( self,
+                 guid : str,
+                 n : int ) -> dict:
         """ find all GUIDs which lie within n SNVs of a given GUID
         WARNING : NOT PRODUCTION READY
         assumes allele ID of form {ref_nucleotide}{pos}{alt_nucleotide} and so the pos can be indexed out with [1:-1]
@@ -138,7 +153,9 @@ class Ardal(object):
         return snv_neighbourhood
 
 
-    def uniqueSNPs( self, guids : list, force_bit_backend: bool=False ) -> set:
+    def uniqueSNPs( self,
+                    guids : list,
+                    force_bit_backend: bool=False ) -> set:
         """
         Finds the set of SNPs unique to a given set of GUIDs.
 
@@ -170,92 +187,11 @@ class Ardal(object):
             unqiue_snps[guid] = {self._decodeAllele(idx) for idx in guid_unique_snps}
         
         return unqiue_snps
-
-
-    def uniqueCore( self, guids : list, force_bit_backend: bool=False ) -> set:
-        """
-        Finds the set of SNPs unique to a given set of GUIDs and shared by all GUIDs in that set.
-
-        A SNP is considered unique core if it is present in ALL of the specified
-        GUIDs and absent in all other GUIDs.
-
-        INPUT:
-            guids (list): A list of GUIDs.
-
-        OUTPUT:
-            set: A set of unique SNPs.
-
-        EXCEPTIONS:
-            ValueError: If guids is not a list or set, if guids is empty, or if any GUID is not found.
-        """
-
-        ## input checks
-        if not isinstance(guids, list):
-            raise ValueError("guids must be a list.")
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self.__headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
-            
-        guid_coords = [self._encodeGuid(guid) for guid in guids]
-        unique_snp_indices = self.__hybrid_matrix.uniqueSharedBits(guid_coords, force_bit_backend=force_bit_backend)
-        return {self._decodeAllele(idx) for idx in unique_snp_indices}
     
 
-    def core( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:
-        """ Take a set of guids and return alleles common to this subset.
-        """
-
-        ## check input
-        if not isinstance(guids, list) and not isinstance(missingness, set):
-            raise ValueError("guids must be a list or set.")
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self.__headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
-        if missingness < 0 or missingness > 1:
-            raise ValueError("missingness must be between 0 and 1.")
-        
-        core_alleles, accessory_alleles = self._getCoreAndAccessory(guids, missingness)
-        
-        ## return a dictionary containing counts on the number of guids which exhibit this allele
-        if return_counts:
-            return core_alleles
-        
-        ## return snps with counts exceeding the missingness threshold
-        return {allele for allele, count in core_alleles.items()}
-
-
-    def accessory( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:
-        """ Take a set of guids and return the accessory alleles (the symmetric set of the core alleles).
-        """
-
-        ## check input
-        if not isinstance(guids, list) and not isinstance(guids, set):
-            raise ValueError("guids must be a list or set.")
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self.__headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
-        # if isinstance(missingness, float) and not isinstance(missingness, int):
-        #     raise ValueError("missingness must be a float or integer.")
-        if missingness < 0 or missingness > 1:
-            raise ValueError("missingness must be between 0 and 1.")
-        
-        core_alleles, accessory_alleles = self._getCoreAndAccessory(guids, missingness)
-        
-        ## return a dictionary containing counts on the number of guids which exhibit this allele
-        if return_counts:
-            return accessory_alleles
-        
-        ## return snps with counts exceeding the missingness threshold
-        return {allele for allele, count in accessory_alleles.items()}
-            
-
-    def allele( self, alleles : list, force_bit_backend : bool=False ) -> set:
+    def hasSNPs( self,
+                 alleles : list,
+                 force_bit_backend : bool=False ) -> set:
         """ Take a set of alleles and return all GUIDs containing all of those alleles.
         """
 
@@ -278,39 +214,126 @@ class Ardal(object):
                 result_guids.add(guid_name)
         
         return result_guids
+
+
+    # def uniqueCore( self, guids : list, force_bit_backend: bool=False ) -> set:
+    #     """
+    #     Finds the set of SNPs unique to a given set of GUIDs and shared by all GUIDs in that set.
+
+    #     A SNP is considered unique core if it is present in ALL of the specified
+    #     GUIDs and absent in all other GUIDs.
+
+    #     INPUT:
+    #         guids (list): A list of GUIDs.
+
+    #     OUTPUT:
+    #         set: A set of unique SNPs.
+
+    #     EXCEPTIONS:
+    #         ValueError: If guids is not a list or set, if guids is empty, or if any GUID is not found.
+    #     """
+
+    #     ## input checks
+    #     if not isinstance(guids, list):
+    #         raise ValueError("guids must be a list.")
+    #     if len(guids) == 0:
+    #         raise ValueError("guids set cannot be empty.")
+    #     for guid in guids:
+    #         if guid not in self.__headers["guids"]:
+    #             raise ValueError(f"guid '{guid}' not found in allele matrix.")
+            
+    #     guid_coords = [self._encodeGuid(guid) for guid in guids]
+    #     unique_snp_indices = self.__hybrid_matrix.uniqueSharedBits(guid_coords, force_bit_backend=force_bit_backend)
+    #     return {self._decodeAllele(idx) for idx in unique_snp_indices}
     
 
-    def _getCoreAndAccessory( self, guids : list, missingness : float = 0.0 ) -> tuple:
-        """ Take a set of guids and return both the core and accessory allele sets.
-        """
-        snp_count_threshold = (1-missingness) * len(guids)
+    # def core( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:
+    #     """ Take a set of guids and return alleles common to this subset.
+    #     """
 
-        ## preprocess the guid list
-        encoded_guids = np.array([self._encodeGuid(guid) for guid in guids if guid in self.__headers["guids"]])
-
-        allele_count_dict = defaultdict(int)
-        for guid_coord in encoded_guids:
-            snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_coord)
-            for snp_idx in snp_indices:
-                allele_count_dict[self._decodeAllele(snp_idx)] += 1
+    #     ## check input
+    #     if not isinstance(guids, list) and not isinstance(missingness, set):
+    #         raise ValueError("guids must be a list or set.")
+    #     if len(guids) == 0:
+    #         raise ValueError("guids set cannot be empty.")
+    #     for guid in guids:
+    #         if guid not in self.__headers["guids"]:
+    #             raise ValueError(f"guid '{guid}' not found in allele matrix.")
+    #     if missingness < 0 or missingness > 1:
+    #         raise ValueError("missingness must be between 0 and 1.")
         
-        ## initialise core and accessory dictionaries
-        core_alleles = defaultdict(int)
-        accessory_alleles = defaultdict(int)
-
-        ## populate core and accessoty dicts
-        for alleles, count in allele_count_dict.items():
-            if count >= snp_count_threshold:
-                core_alleles[alleles] = count
-            elif count < snp_count_threshold:
-                accessory_alleles[alleles] = count
+    #     core_alleles, accessory_alleles = self._getCoreAndAccessory(guids, missingness)
         
-        return core_alleles, accessory_alleles
+    #     ## return a dictionary containing counts on the number of guids which exhibit this allele
+    #     if return_counts:
+    #         return core_alleles
+        
+    #     ## return snps with counts exceeding the missingness threshold
+    #     return {allele for allele, count in core_alleles.items()}
+
+
+    # def accessory( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:
+    #     """ Take a set of guids and return the accessory alleles (the symmetric set of the core alleles).
+    #     """
+
+    #     ## check input
+    #     if not isinstance(guids, list) and not isinstance(guids, set):
+    #         raise ValueError("guids must be a list or set.")
+    #     if len(guids) == 0:
+    #         raise ValueError("guids set cannot be empty.")
+    #     for guid in guids:
+    #         if guid not in self.__headers["guids"]:
+    #             raise ValueError(f"guid '{guid}' not found in allele matrix.")
+    #     # if isinstance(missingness, float) and not isinstance(missingness, int):
+    #     #     raise ValueError("missingness must be a float or integer.")
+    #     if missingness < 0 or missingness > 1:
+    #         raise ValueError("missingness must be between 0 and 1.")
+        
+    #     core_alleles, accessory_alleles = self._getCoreAndAccessory(guids, missingness)
+        
+    #     ## return a dictionary containing counts on the number of guids which exhibit this allele
+    #     if return_counts:
+    #         return accessory_alleles
+        
+    #     ## return snps with counts exceeding the missingness threshold
+    #     return {allele for allele, count in accessory_alleles.items()}
     
+
+    # def _getCoreAndAccessory( self, guids : list, missingness : float = 0.0 ) -> tuple:
+    #     """ Take a set of guids and return both the core and accessory allele sets.
+    #     """
+    #     snp_count_threshold = (1-missingness) * len(guids)
+
+    #     ## preprocess the guid list
+    #     encoded_guids = np.array([self._encodeGuid(guid) for guid in guids if guid in self.__headers["guids"]])
+
+    #     allele_count_dict = defaultdict(int)
+    #     for guid_coord in encoded_guids:
+    #         snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_coord)
+    #         for snp_idx in snp_indices:
+    #             allele_count_dict[self._decodeAllele(snp_idx)] += 1
+        
+    #     ## initialise core and accessory dictionaries
+    #     core_alleles = defaultdict(int)
+    #     accessory_alleles = defaultdict(int)
+
+    #     ## populate core and accessoty dicts
+    #     for alleles, count in allele_count_dict.items():
+    #         if count >= snp_count_threshold:
+    #             core_alleles[alleles] = count
+    #         elif count < snp_count_threshold:
+    #             accessory_alleles[alleles] = count
+        
+    #     return core_alleles, accessory_alleles
+    
+
+
 
     ########## STATISTICAL FUNCTIONS ##########
 
-    def af( self, guids : list=[] ) -> dict:
+
+    def af( self,
+            guids : list=[] ) -> dict:
         """ Calculates the allele frequency for each allele in the matrix across the group of guids.
         if an empty list is provided then all guids will be used.
         """
@@ -335,9 +358,26 @@ class Ardal(object):
         allele_entropy = self.__hybrid_matrix.columnEntropy()
         entropies_dict = dict(sorted(zip(self.__headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
         return entropies_dict
+
     
-    
-    def snpInform(self, guids: list, metric: str = "kullbackleibler") -> dict:
+    def alleleCooccurrance( self, threshold : float = 0.95, use_simd : bool = True, cache_bytes : int = 1024**3 ) -> dict:
+        """ Computes the co-occurance of alleles.
+        """
+        print("HERE")
+        cooc_dict = self.__hybrid_matrix.bitCooccurrence(threshold=threshold,
+                                                         use_simd=use_simd,
+                                                         cache_bytes=cache_bytes)
+
+        decoded_dict = defaultdict(list)
+        for ref, cooc_vec in cooc_dict.items():
+            decoded_dict[self._decodeAllele(ref)] = [self._decodeAllele(i) for i in cooc_vec]
+
+        return decoded_dict
+
+
+    def snpInform( self,
+                   guids: list,
+                   metric: str = "kullbackleibler" ) -> dict:
         """
         Calculates various scores that measure the association of each SNP
         with a specified group of samples (guids).
@@ -377,7 +417,8 @@ class Ardal(object):
             return self._informationGain(guids)
     
     
-    def _klDivergence( self, guids : list ) -> dict:
+    def _klDivergence( self,
+                       guids : list ) -> dict:
         """ Computes the Kullbeck Liebler divergence between the in group (input guids) and out group (all others)
         allele frequency distributions for each allele in the matrix.
         D_{kl}(P||Q) = sum_{x\inX}(P(x) * log2(P(x)/Q(x)))
@@ -388,7 +429,8 @@ class Ardal(object):
         return kl_dict
 
     
-    def _jsDivergence( self, guids ) -> dict:
+    def _jsDivergence( self,
+                       guids : list ) -> dict:
         """
         Computes Jensen-Shannon divergence for each SNP between target_guids and others.
         
@@ -418,7 +460,8 @@ class Ardal(object):
         return dict(sorted(zip(self.__headers["alleles"], js_scores), key=lambda x: x[1], reverse=True))
 
 
-    def _informationGain( self, guids ) -> dict:
+    def _informationGain( self,
+                          guids : list ) -> dict:
         """
         Compute information gain for each SNP column in binary matrix X,
         with respect to whether a sample is in target_guids.
@@ -449,7 +492,9 @@ class Ardal(object):
         return dict(sorted(zip(self.__headers["alleles"], IGs), key=lambda x: x[1], reverse=True))
 
 
-    def testSnpAssociations(self, guids: list, tests: list = None) -> dict:
+    def testSnpAssociations( self,
+                             guids: list,
+                             tests: list = None) -> dict:
         """
         Performs statistical tests to evaluate the significance of the association
         of each SNP with a specified group of samples (guids).
@@ -469,9 +514,13 @@ class Ardal(object):
         raise NotImplementedError("This function is not yet implemented.")
 
 
+
+
     ########## PUBLIC UTILITY FUNCTIONS ##########
 
-    def matchAlleleNames(self, expression: str) -> list:
+
+    def matchAlleleNames( self,
+                          expression: str ) -> list:
         """ Return all allele names that match the given expression with wildcards.
         """
         if not isinstance(expression, str):
@@ -481,7 +530,9 @@ class Ardal(object):
         return set([allele for allele in self.__headers["alleles"] if pattern.match(allele)])
     
 
-    def subset( self, guid_list : list = [], allele_list : list = [] ) -> list[np.array, dict]:
+    def subset( self,
+                guid_list : list = [],
+                allele_list : list = [] ) -> list[np.array, dict]:
         """ Take a list of GUIDs and subset the allele matrix to include only these GUIDs, allowing for standard operations.
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
@@ -521,7 +572,10 @@ class Ardal(object):
         return [new_matrix, new_headers]
         
     
-    def write( self, file_path : str, output_prefix : str, npz : bool = False ) -> None:
+    def write( self,
+               file_path : str,
+               output_prefix : str,
+               npz : bool = False ) -> None:
         """ Write the allele matrix to disk.
         Writes as a numpy/JSON pair.
         The npz flag writes the numpy matrix as a compressed npz.
@@ -542,7 +596,8 @@ class Ardal(object):
             json.dump(self.__headers, fout, indent=4)
 
 
-    def toDict( self, force_bit_backend : bool = False ) -> dict:
+    def toDict( self,
+                force_bit_backend : bool = False ) -> dict:
         """ Return a dictionary containing present allele IDs mapped to their guid.
         """
         allele_dict = defaultdict(list)
@@ -553,7 +608,8 @@ class Ardal(object):
         return dict(allele_dict)
     
 
-    def stats( self, print_stats : bool = False ) -> dict:
+    def stats( self,
+               print_stats : bool = False ) -> dict:
         """ Return a dictionary containing information about the database and its size in memory.
         """
         n_guids = len(self.__headers["guids"])
@@ -605,7 +661,8 @@ class Ardal(object):
         return self.__hybrid_matrix.getBitMatrix()
         
     
-    def getRoaringMatrix( self, decode : bool=True ) -> dict:
+    def getRoaringMatrix( self,
+                          decode : bool=True ) -> dict:
         """ Return the roaring allele matrix.
         """
         roaring_dict = defaultdict(list)
@@ -639,22 +696,26 @@ class Ardal(object):
         return {guid : mass for guid, mass in zip(self.__headers["guids"], guid_mass_vec)}
     
 
-    def toDataFrame(self) -> pd.DataFrame:
+    def toDataFrame( self ) -> pd.DataFrame:
         """ Return the allele matrix as a Pandas DataFrame.
         """
         return pd.DataFrame(self.getMatrix(), index=self.__headers["guids"], columns=self.__headers["alleles"])
     
 
-    def flushCache(self) -> None:
+    def flushCache( self ) -> None:
         """ flushes the distance cache.
         """
         # flushCache is not exposed anymore and the cache is not implemented.
         pass
     
 
+
+
     ########## PRIVATE UTILITY FUNCTIONS ##########
 
-    def _checkGUIDs( self, guids : list ) -> list:
+
+    def _checkGUIDs( self,
+                     guids : list ) -> list:
         """ Check guids are present within the matrix and construct a list of present guids to proceed with
         """
 
@@ -668,7 +729,8 @@ class Ardal(object):
         return present_guids
     
 
-    def _checkAlleles( self, alleles : list ) -> list:
+    def _checkAlleles( self,
+                       alleles : list ) -> list:
         """ Check alleles are present within the matrix and construct a list of present alleles to proceed with
         """
         present_alleles = []

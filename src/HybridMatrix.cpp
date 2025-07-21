@@ -4,6 +4,7 @@ Copyright 2025 Arthur V. Morris
 #include "HybridMatrix.hpp"
 #include "BitMatrix.hpp"
 #include "RoaringMatrix.hpp"
+#include <iostream>
 
 namespace _ardal {
 
@@ -36,7 +37,8 @@ HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
 
     if (use_roaring_if_sparse && density < density_threshold) {
         roaring_enabled = true;
-        roaring_backend = std::make_unique<_ardal::RoaringMatrix>(matrix);
+        const auto& row_masses = bit_backend->getRowMassesVector();
+        roaring_backend = std::make_unique<_ardal::RoaringMatrix>(matrix, row_masses);
     } else {
         roaring_enabled = false;
     }
@@ -86,7 +88,7 @@ py::list HybridMatrix::innerProductNeighbourhood( size_t row, int ip_epsilon, bo
 
 std::vector<size_t> HybridMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd, bool force_bit_backend ) const {
     if (!force_bit_backend) {
-        return roaring_backend->uniqueSharedBits(row_indices, use_simd);
+        return roaring_backend->uniqueSharedBits(row_indices);
     } else {
         return bit_backend->uniqueSharedBits(row_indices, use_simd);
     }
@@ -100,6 +102,12 @@ py::array_t<double> HybridMatrix::colFrequency( std::vector<size_t>& row_indices
 
 py::array_t<double> HybridMatrix::columnEntropy( void ) const {
     return bit_backend->columnEntropy();
+}
+
+
+py::dict HybridMatrix::bitCooccurrence( double threshold, bool use_simd, int cache_bytes ) const {
+    std::cout << "HM: GOT HERE" << std::endl;
+    return bit_backend->bitCooccurrence(threshold, use_simd, cache_bytes);
 }
 
 

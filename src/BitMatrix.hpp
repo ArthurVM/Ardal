@@ -46,6 +46,7 @@ public:
     std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd = true ) const;
 
     // statistical functions
+    py::dict bitCooccurrence( double threshold = 0.95, bool use_simd = true, int threads = 1, size_t cache_bytes = 1e+9 ) const;
     py::array_t<double> colFrequency( std::vector<size_t>& row_indices ) const;
     py::array_t<double> columnEntropy( void ) const;
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
@@ -53,6 +54,7 @@ public:
     // get functions
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
     py::array_t<int> getRowMasses( void );
+    const std::vector<int>& getRowMassesVector( void );
     py::array_t<int> getColumnMasses( void );
     double getDensity( void ) const;
     py::array_t<uint8_t> getBitMatrix( void ) const;
@@ -71,6 +73,8 @@ private:
 
     // access functions
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
+    std::vector<uint64_t> getColumnVector(size_t col_idx) const;
+    std::vector<size_t> getColSetBitIndices( size_t col_idx ) const;
 
     // distance functions
     uint32_t hammingDistanceScalar( size_t i, size_t j ) const;
@@ -88,7 +92,8 @@ private:
     // hamming distance cache
     std::unordered_map<std::pair<size_t, size_t>, int, pair_hash> _hamming_cache;
 
-    // internal helper: bit unpacking
+    // internal helpers
+    // bit unpacking
     inline bool getBit( size_t row, size_t col ) const {
         uint64_t byte = _packed_matrix[row][col / 64];
         return (byte >> (col % 64)) & 1;
