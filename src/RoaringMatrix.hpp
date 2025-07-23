@@ -41,6 +41,9 @@ public:
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
     py::list getRoaringMatrix( void ) const;
 
+    // colwise functions
+    py::dict bitCooccurrence( double threshold, int threads = 1 ) const;
+
 
 private:
     // roaring matrix
@@ -54,6 +57,9 @@ private:
     // distance functions
     uint32_t hammingDistance( size_t i, size_t j ) const;
     uint32_t innerProductRowwise( size_t i, size_t j ) const;
+
+    // utility functions
+    std::vector<roaring::Roaring> colwiseRoaringFromRowwise() const;
 
 };
 

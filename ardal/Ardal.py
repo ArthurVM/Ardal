@@ -360,13 +360,12 @@ class Ardal(object):
         return entropies_dict
 
     
-    def alleleCooccurrance( self, threshold : float = 0.95, use_simd : bool = True, cache_bytes : int = 1024**3 ) -> dict:
+    def alleleCooccurrance( self, threshold : float = 0.95, threads : int = 1 ) -> dict:
         """ Computes the co-occurance of alleles.
         """
         print("HERE")
         cooc_dict = self.__hybrid_matrix.bitCooccurrence(threshold=threshold,
-                                                         use_simd=use_simd,
-                                                         cache_bytes=cache_bytes)
+                                                         threads=threads)
 
         decoded_dict = defaultdict(list)
         for ref, cooc_vec in cooc_dict.items():

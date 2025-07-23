@@ -105,9 +105,9 @@ py::array_t<double> HybridMatrix::columnEntropy( void ) const {
 }
 
 
-py::dict HybridMatrix::bitCooccurrence( double threshold, bool use_simd, int cache_bytes ) const {
+py::dict HybridMatrix::bitCooccurrence( double threshold, int threads ) const {
     std::cout << "HM: GOT HERE" << std::endl;
-    return bit_backend->bitCooccurrence(threshold, use_simd, cache_bytes);
+    return roaring_backend->bitCooccurrence(threshold, threads);
 }
 
 

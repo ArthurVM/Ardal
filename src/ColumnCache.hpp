@@ -1,4 +1,6 @@
 // ColumnCache.hpp
+// formed part of the BitMatrix bitCooccurrence function but no longer in use.
+// might be revisited in the future.
 /*
 Copyright 2025 Arthur V. Morris
 */

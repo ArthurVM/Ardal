@@ -32,7 +32,7 @@ PYBIND11_MODULE(_ardal, m) {  // _ardal module and function bindings
         .def("getRowMasses", &_ardal::HybridMatrix::getRowMasses)
         .def("getColumnMasses", &_ardal::HybridMatrix::getColumnMasses)
         .def("getDensity", &_ardal::HybridMatrix::getDensity)
-        .def("bitCooccurrence", &_ardal::HybridMatrix::bitCooccurrence, py::arg("threshold") = 0.95, py::arg("use_simd") = true, py::arg("cache_bytes") = 1e+9)
+        .def("bitCooccurrence", &_ardal::HybridMatrix::bitCooccurrence, py::arg("threshold") = 0.95, py::arg("threads") = 1)
         .def("getBitMatrix", &_ardal::HybridMatrix::getBitMatrix)
         .def("getRoaringMatrix", &_ardal::HybridMatrix::getRoaringMatrix)
         .def("roaringEnabled", &_ardal::HybridMatrix::roaringEnabled);

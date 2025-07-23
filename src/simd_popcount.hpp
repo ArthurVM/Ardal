@@ -1,9 +1,10 @@
+// for the the BitMatrix alleleCooccurrence function, which is not currently in use
 #pragma once
 
 #include <cstdint>
 #include <immintrin.h>
 
-// Basic scalar fallback
+// basic scalar fallback
 inline int popcount_scalar(uint64_t x) {
     return __builtin_popcountll(x);
 }
@@ -57,7 +58,7 @@ inline void popcount_pairwise(const std::vector<uint64_t>& A,
         }
     }
 
-    // Scalar tail + final word masking
+    // scalar tail + final word masking
     for (; i < n; ++i) {
         uint64_t a = A[i];
         uint64_t b = B[i];

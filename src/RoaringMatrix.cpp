@@ -280,10 +280,86 @@ py::array_t<size_t> RoaringMatrix::getSetBitIndices( size_t row_idx ) const {
 py::list RoaringMatrix::getRoaringMatrix( void ) const {
     py::list roaring_matrix;
     for (size_t i = 0; i < _n_rows; ++i) {
-        const auto& bitmap = _roaring_matrix[i];
+        // const auto& bitmap = _roaring_matrix[i];
         roaring_matrix.append(getSetBitIndices(i));
     }
     return roaring_matrix;
+}
+
+
+std::vector<roaring::Roaring> RoaringMatrix::colwiseRoaringFromRowwise() const {
+    // create one roaring bitmap per column
+    std::vector<roaring::Roaring> colwise_roaring(_n_cols);
+
+    // for each row, iterate over its set bits and add the row index to the corresponding column bitmap
+    for (size_t row = 0; row < _n_rows; ++row) {
+        const auto& row_bitmap = _roaring_matrix[row];
+        // Use an iterator to efficiently access set bits
+        for (auto it = row_bitmap.begin(); it != row_bitmap.end(); ++it) {
+            size_t col = *it;
+            if (col < _n_cols) {
+                colwise_roaring[col].add(row);
+            }
+        }
+    }
+    return colwise_roaring;
+}
+
+
+py::dict RoaringMatrix::bitCooccurrence(double threshold, int threads) const {
+    // do some input cleanliness
+    if (threshold < 0 || threshold > 1) {
+        throw std::runtime_error("threshold must be between 0 and 1.");
+    }
+    if (threads <= 0) {
+        throw std::runtime_error("Number of threads must be positive.");
+    }
+    if (_n_rows == 0) {
+        return py::dict();
+    }
+
+    // get the colwise roaring bitmap
+    auto colwise_roaring = colwiseRoaringFromRowwise();
+    size_t n_cols = colwise_roaring.size();
+
+    // thread local results maps
+    std::vector<std::map<size_t, std::vector<size_t>>> thread_maps(threads);
+
+    #pragma omp parallel num_threads(threads)
+    {
+        int tid = omp_get_thread_num();
+        auto& local_map = thread_maps[tid];
+
+        #pragma omp for schedule(static)
+        for (size_t i = 0; i < n_cols - 1; ++i) {
+            const auto& i_bitmap = colwise_roaring[i];
+            for (size_t j = i + 1; j < n_cols; ++j) {
+                const auto& j_bitmap = colwise_roaring[j];
+                double intersection_size = (i_bitmap & j_bitmap).cardinality();
+                double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
+                if (union_size == 0) continue;
+                double jaccard_index = intersection_size / union_size;
+                if (jaccard_index >= threshold) {
+                    local_map[i].push_back(j);
+                }
+            }
+        }
+    } // end parallel region
+
+    // merge thread local maps
+    std::map<size_t, std::vector<size_t>> global_map;
+    for (const auto& local_map : thread_maps) {
+        for (const auto& [k, v] : local_map) {
+            global_map[k].insert(global_map[k].end(), v.begin(), v.end());
+        }
+    }
+
+    // convert to py dict
+    py::dict cooccurrences_py;
+    for (const auto& [k, v] : global_map) {
+        cooccurrences_py[py::int_(k)] = py::cast(v);
+    }
+    return cooccurrences_py;
 }
 
 } // namespace _ardal

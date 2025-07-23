@@ -908,125 +908,157 @@ py::array_t<double> BitMatrix::colFrequency(std::vector<size_t>& row_indices) co
 }
 
 
+/****************************************************************************************************
+ * ardal::BitMatrix::bitCooccurrence
+ * 
+ * NOTE: This function is much slower than the RoaringMatrix version, so it is currently not used.
+ * It may be revisited in the future if the RoaringMatrix version is not suitable for some reason.
+ *
+ * Calculates the co-occurrence of bits across columns in the matrix, returning a dictionary of
+ * column indices and their co-occurring partners.
+ *
+ * INPUT:
+ *  threshold (double)   : The Jaccard threshold for co-occurrence.
+ *  use_simd (bool)      : A boolean flag to specify whether to use SIMD for vectorised distance
+ *                         calculation.
+ *  threads (int)        : The number of threads to use for parallel computation.
+ *  cache_bytes (size_t) : The size of the cache in bytes for storing column vectors.
+ *
+ * OUTPUT:
+ *  py::dict : A dictionary where keys are column indices and values are lists
+ *             of co-occurring column indices.
+ ****************************************************************************************************/
+// py::dict BitMatrix::bitCooccurrence(double threshold, bool use_simd, int threads, size_t cache_bytes) const {
+//     // do some input cleanliness
+//     if (threshold < 0) {
+//         throw std::runtime_error("threshold must be non-negative.");
+//     }
+//     if (threads <= 0) {
+//         throw std::runtime_error("Number of threads must be positive.");
+//     }
+//     if (_n_rows == 0) {
+//         return py::dict();
+//     }
 
-py::dict BitMatrix::bitCooccurrence(double threshold, bool use_simd, int threads, size_t cache_bytes) const {
-    if (threshold < 0) {
-        throw std::runtime_error("threshold must be non-negative.");
-    }
-    if (threads <= 0) {
-        throw std::runtime_error("Number of threads must be positive.");
-    }
-    if (_n_rows == 0) {
-        return py::dict();
-    }
+//     // construct column cache
+//     size_t packed_rows = (_n_rows + 63) / 64;
+//     const double max_disagreements = (1.0 - threshold) * static_cast<double>(_n_rows);
 
-    // construct column cache
-    size_t packed_rows = (_n_rows + 63) / 64;
-    const double max_disagreements = (1.0 - threshold) * static_cast<double>(_n_rows);
-    ColumnCache col_cache(cache_bytes, packed_rows);
+//     // calculate cache size
+//     if (cache_bytes == 0) {
+//         cache_bytes = packed_rows * _n_cols * sizeof(uint64_t);
+//     } else if (cache_bytes < packed_rows * _n_cols * sizeof(uint64_t)) {
+//         throw std::runtime_error("Cache size is too small for the number of columns and rows.");
+//     }
+//     // distribute the cache size evenly across threads
+//     if (cache_bytes % threads != 0) {
+//         cache_bytes -= cache_bytes % threads;  // make it divisible by threads
+//     }
+//     int thread_cache_bytes = cache_bytes / threads;
 
-    // COMMENT OUT FOR DEBUG
-    std::cout << "Calculating bit co-occurrences with threshold: " << threshold
-              << " (missing = " << max_disagreements << ")" << std::endl;
+//     // COMMENT OUT FOR DEBUG
+//     std::cout << "Calculating bit co-occurrences with threshold: " << threshold
+//               << " (missing = " << max_disagreements << ")" << std::endl;
 
-    std::map<size_t, std::vector<size_t>> global_map;
-    std::unordered_set<size_t> global_visited;
+//     std::map<size_t, std::vector<size_t>> global_map;
+//     std::unordered_set<size_t> global_visited;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+//     auto start_time = std::chrono::high_resolution_clock::now();
 
-    #pragma omp parallel num_threads(threads)
-    {
-        std::map<size_t, std::vector<size_t>> local_map;
-        std::unordered_set<size_t> local_visited;
+//     #pragma omp parallel num_threads(threads)
+//     {
+//         ColumnCache local_cache(thread_cache_bytes, packed_rows);
+//         std::map<size_t, std::vector<size_t>> local_map;
+//         std::unordered_set<size_t> local_visited;
 
-        #pragma omp for schedule(dynamic)
-        for (size_t i = 0; i < _n_cols; ++i) {
-            if (local_visited.count(i)) {
-                // std::cout << "0. Skipping column " << i << " as it has already been visited." << std::endl;
-                continue;
-            }
+//         #pragma omp for schedule(dynamic)
+//         for (size_t i = 0; i < _n_cols; ++i) {
+//             if (local_visited.count(i)) {
+//                 // std::cout << "0. Skipping column " << i << " as it has already been visited." << std::endl;
+//                 continue;
+//             }
 
-            std::cout << "Processing column " << i << " with mass " << _col_masses[i] << std::endl;
+//             // std::cout << "Processing column " << i << " with mass " << _col_masses[i] << std::endl;
 
-            const std::vector<uint64_t>& i_vec = col_cache.get(i, [this](size_t idx) {
-                return getColumnVector(idx);
-            });
+//             const std::vector<uint64_t>& i_vec = local_cache.get(i, [this](size_t idx) {
+//                 return getColumnVector(idx);
+//             });
 
-            std::vector<size_t> i_ref_cooccur_vec;
-            size_t i_mass = _col_masses[i];
-            size_t valid_tail = _n_rows % 64;
+//             std::vector<size_t> i_ref_cooccur_vec;
+//             size_t i_mass = _col_masses[i];
+//             size_t valid_tail = _n_rows % 64;
 
-            for (size_t j = i + 1; j < _n_cols; ++j) {
-                if (local_visited.count(j)) {
-                    // std::cout << "1. Skipping column " << j << " as it has already been visited." << std::endl;
-                    continue;
-                }
+//             for (size_t j = i + 1; j < _n_cols; ++j) {
+//                 if (local_visited.count(j)) {
+//                     // std::cout << "1. Skipping column " << j << " as it has already been visited." << std::endl;
+//                     continue;
+//                 }
 
-                // col mass optimisation
-                if (std::abs(static_cast<long>(i_mass) - static_cast<long>(_col_masses[j])) > max_disagreements) {
-                    // std::cout << "2. Skipping pair (" << i << ", " << j << ") due to mass difference." << std::endl;
-                    continue;
-                }
+//                 // col mass optimisation
+//                 if (std::abs(static_cast<long>(i_mass) - static_cast<long>(_col_masses[j])) > max_disagreements) {
+//                     // std::cout << "2. Skipping pair (" << i << ", " << j << ") due to mass difference." << std::endl;
+//                     continue;
+//                 }
 
-                const std::vector<uint64_t>& j_vec = col_cache.get(j, [this](size_t idx) {
-                    return getColumnVector(idx);
-                });
+//                 const std::vector<uint64_t>& j_vec = local_cache.get(j, [this](size_t idx) {
+//                     return getColumnVector(idx);
+//                 });
 
-                // Calculate co-occurrence (Jaccard index)
-                size_t intersection_size = 0;
-                size_t union_size = 0;
+//                 // calculate jaccard
+//                 size_t intersection_size = 0;
+//                 size_t union_size = 0;
 
-                popcount_pairwise(i_vec, j_vec, valid_tail, use_simd,
-                                  intersection_size, union_size);
+//                 popcount_pairwise(i_vec, j_vec, valid_tail, use_simd,
+//                                   intersection_size, union_size);
 
-                if ((union_size - intersection_size) > max_disagreements) {
-                    // std::cout << "3. Skipping pair (" << i << ", " << j << ") due to early exit." << std::endl;
-                    continue;
-                }
+//                 if ((union_size - intersection_size) > max_disagreements) {
+//                     // std::cout << "3. Skipping pair (" << i << ", " << j << ") due to early exit." << std::endl;
+//                     continue;
+//                 }
 
-                if (union_size == 0) {
-                    // std::cout << "4. Skipping pair (" << i << ", " << j << ") due to zero union size." << std::endl;
-                    continue;
-                }
+//                 if (union_size == 0) {
+//                     // std::cout << "4. Skipping pair (" << i << ", " << j << ") due to zero union size." << std::endl;
+//                     continue;
+//                 }
 
-                // std::cout << "5. Intersection: " << intersection_size << ", Union size: " << union_size << std::endl;
+//                 // std::cout << "5. Intersection: " << intersection_size << ", Union size: " << union_size << std::endl;
 
-                double jaccard = static_cast<double>(intersection_size) / union_size;
-                if (jaccard >= threshold) {
-                    i_ref_cooccur_vec.push_back(j);
-                    local_visited.insert(j);
-                }
-            }
+//                 double jaccard = static_cast<double>(intersection_size) / union_size;
+//                 if (jaccard >= threshold) {
+//                     i_ref_cooccur_vec.push_back(j);
+//                     local_visited.insert(j);
+//                 }
+//             }
 
-            if (!i_ref_cooccur_vec.empty()) {
-                local_map[i] = std::move(i_ref_cooccur_vec);
-                local_visited.insert(i);
-            } else {
-                // std::cout << "6. No co-occurrences found for column " << i << "." << std::endl;
-            }
+//             if (!i_ref_cooccur_vec.empty()) {
+//                 local_map[i] = std::move(i_ref_cooccur_vec);
+//                 local_visited.insert(i);
+//             } else {
+//                 // std::cout << "6. No co-occurrences found for column " << i << "." << std::endl;
+//             }
 
-            col_cache.evict(i);
-        }
+//             local_cache.evict(i);
+//         }
 
-        #pragma omp critical
-        {
-            for (auto& [k, v] : local_map) global_map[k] = std::move(v);
-            global_visited.insert(local_visited.begin(), local_visited.end());
-        }
-    }
+//         #pragma omp critical
+//         {
+//             for (auto& [k, v] : local_map) global_map[k] = std::move(v);
+//             global_visited.insert(local_visited.begin(), local_visited.end());
+//         }
+//     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end_time - start_time;
-    std::cout << "[bitCooccurrence] Time elapsed: " << elapsed.count() << " seconds" << std::endl;
+//     auto end_time = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed = end_time - start_time;
+//     std::cout << "[bitCooccurrence] Time elapsed: " << elapsed.count() << " seconds" << std::endl;
 
-    // Convert to Python dictionary
-    py::dict cooccurrences_py;
-    for (auto& [k, v] : global_map) {
-        cooccurrences_py[py::int_(k)] = py::cast(v);
-    }
+//     // Convert to Python dictionary
+//     py::dict cooccurrences_py;
+//     for (auto& [k, v] : global_map) {
+//         cooccurrences_py[py::int_(k)] = py::cast(v);
+//     }
 
-    return cooccurrences_py;
-}
+//     return cooccurrences_py;
+// }
 
 
 
