@@ -9,7 +9,11 @@ with open("README.md", "r") as fh:
 ext_modules = [
     Extension(
         'ardal._ardal',
-        sources=['src/BitMatrix.cpp'],
+        sources=['src/BitMatrix.cpp',
+                 'src/RoaringMatrix.cpp',
+                 'src/HybridMatrix.cpp',
+                 'src/bindings.cpp',
+                 'src/roaring/roaring.c'],
         include_dirs=[
             os.path.abspath("include/"),
             os.path.abspath(os.path.dirname(__file__))

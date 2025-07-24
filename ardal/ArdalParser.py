@@ -9,7 +9,10 @@ class ArdalParser:
     """ Parses Ardal data from CSV, Parquet, or NPY/JSON file pairs.
     """
 
-    def __init__(self, input_data_structure, file_format=None, prefix=None):
+    def __init__( self,
+                 input_data_structure,
+                 file_format=None,
+                 prefix=None ):
         """ ArdalParser constructor
         """
         super(ArdalParser, self).__init__()
@@ -22,7 +25,7 @@ class ArdalParser:
         self._parse()  ## Parse the data upon object creation
 
 
-    def _parse(self) -> int:
+    def _parse( self ) -> int:
         """ Parses the data based on the specified file format.
         """
         

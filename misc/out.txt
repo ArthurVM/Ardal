@@ -1,0 +1,3 @@
+Building roaring
+HM: GOT HERE
+Calculating bit co-occurrences with threshold: 0.95 (missing = 250)
