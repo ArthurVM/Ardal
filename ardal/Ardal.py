@@ -360,12 +360,35 @@ class Ardal(object):
         return entropies_dict
 
     
-    def alleleCooccurrance( self, threshold : float = 0.95, threads : int = 1 ) -> dict:
-        """ Computes the co-occurance of alleles.
+    def alleleCooc( self, allele_indices : list = [], threshold : float = 0.95, threads : int = 1 ) -> dict:
+        """ Computes the co-occurrence of pairs of alleles.
         """
-        print("HERE")
-        cooc_dict = self.__hybrid_matrix.bitCooccurrence(threshold=threshold,
-                                                         threads=threads)
+        if not isinstance(allele_indices, list):
+            raise ValueError("allele_indices must be a list.")
+        if not isinstance(threshold, float):
+            raise ValueError("threshold must be a float.")
+        if not isinstance(threads, int):
+            raise ValueError("threads must be an integer.")
+        if threshold < 0 or threshold > 1:
+            raise ValueError("threshold must be between 0 and 1.")
+        if threads < 1:
+            raise ValueError("threads must be at least 1.")
+
+        if allele_indices != []:
+            ## check allele indices
+            for allele in allele_indices:
+                if allele not in self.__headers["alleles"]:
+                    raise ValueError(f"allele '{allele}' not found in allele matrix.")
+            ## encode the alleles
+            allele_indices = [self._encodeAllele(allele) for allele in allele_indices]
+
+            cooc_dict = self.__hybrid_matrix.bitCooccurrence_subset(col_indices=allele_indices,
+                                                                    threshold=threshold,
+                                                                    threads=threads)
+            
+        else:
+            cooc_dict = self.__hybrid_matrix.bitCooccurrence_all(threshold=threshold,
+                                                                 threads=threads)
 
         decoded_dict = defaultdict(list)
         for ref, cooc_vec in cooc_dict.items():
@@ -436,27 +459,10 @@ class Ardal(object):
         Args:
             guids: list of sample identifiers to define the target group
         """
-        from scipy.spatial.distance import jensenshannon
-
-        all_guids = self.getHeaders()["guids"]
-        X = self.getMatrix()
-        
-        idx_map = np.array([guid in guids for guid in all_guids])
         guid_coords = [self._encodeGuid(guid) for guid in guids]
-        
-        ## split into in-group and out-group
-        X_target = X[idx_map]
-        X_other  = X[~idx_map]
-
-        ## calculate allele frequencies per SNP
-        P = X_target.mean(axis=0) + 1e-9   # Add small epsilon to avoid log(0)
-        Q = X_other.mean(axis=0) + 1e-9
-
-        ## create 2 row matrix and compute JS over each column
-        M = 0.5 * (P + Q)
-        js_scores = 0.5 * (P * np.log2(P / M) + Q * np.log2(Q / M))
-
-        return dict(sorted(zip(self.__headers["alleles"], js_scores), key=lambda x: x[1], reverse=True))
+        js_divergence = self.__hybrid_matrix.jsDivergence(guid_coords)
+        js_dict = dict(sorted(zip(self.__headers["alleles"], js_divergence), key=lambda x: x[1], reverse=True))
+        return js_dict
 
 
     def _informationGain( self,
@@ -468,27 +474,10 @@ class Ardal(object):
         Returns:
             np.ndarray of shape (n_snps,) - information gain per SNP
         """
-        from scipy.stats import entropy
-
-        all_guids = self.getHeaders()["guids"]
-        X = self.getMatrix()
-
-        y = np.array([1 if guid in guids else 0 for guid in all_guids])
-        H_C = entropy(np.bincount(y, minlength=2) / len(y), base=2)
-
-        IGs = np.zeros(X.shape[1])
-        for j in range(X.shape[1]):
-            snp = X[:, j]
-            H_C_given_snp = 0
-            for val in [0, 1]:
-                idx = (snp == val)
-                if np.any(idx):
-                    y_sub = y[idx]
-                    probs = np.bincount(y_sub, minlength=2) / len(y_sub)
-                    H_C_given_snp += (len(y_sub) / len(y)) * entropy(probs, base=2)
-            IGs[j] = H_C - H_C_given_snp
-
-        return dict(sorted(zip(self.__headers["alleles"], IGs), key=lambda x: x[1], reverse=True))
+        guid_coords = [self._encodeGuid(guid) for guid in guids]
+        ig = self.__hybrid_matrix.informationGain(guid_coords)
+        ig_dict = dict(sorted(zip(self.__headers["alleles"], ig), key=lambda x: x[1], reverse=True))
+        return ig_dict
 
 
     def testSnpAssociations( self,
@@ -698,16 +687,8 @@ class Ardal(object):
     def toDataFrame( self ) -> pd.DataFrame:
         """ Return the allele matrix as a Pandas DataFrame.
         """
-        return pd.DataFrame(self.getMatrix(), index=self.__headers["guids"], columns=self.__headers["alleles"])
+        return pd.DataFrame(self.getBitMatrix(), index=self.__headers["guids"], columns=self.__headers["alleles"])
     
-
-    def flushCache( self ) -> None:
-        """ flushes the distance cache.
-        """
-        # flushCache is not exposed anymore and the cache is not implemented.
-        pass
-    
-
 
 
     ########## PRIVATE UTILITY FUNCTIONS ##########

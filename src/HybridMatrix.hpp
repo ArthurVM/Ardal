@@ -51,9 +51,15 @@ public:
 
     py::array_t<double> columnEntropy( void ) const;
 
-    py::dict bitCooccurrence( double threshold = 0.95, int threads = 1 ) const;
+    py::dict bitCooccurrence_all( double threshold = 0.95, int threads = 1 ) const;
+
+    py::dict bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const;
 
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
+
+    py::array_t<double> jsDivergence( const std::vector<size_t>& ingroup_indices ) const;
+
+    py::array_t<double> informationGain( const std::vector<size_t>& ingroup_indices ) const;
 
 
     // get functions: BitMatrix and RoaringMatrix

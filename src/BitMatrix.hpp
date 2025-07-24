@@ -50,6 +50,8 @@ public:
     py::array_t<double> colFrequency( std::vector<size_t>& row_indices ) const;
     py::array_t<double> columnEntropy( void ) const;
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
+    py::array_t<double> jsDivergence( const std::vector<size_t>& ingroup_indices ) const;
+    py::array_t<double> informationGain( const std::vector<size_t>& ingroup_indices ) const;
 
     // get functions
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
@@ -77,14 +79,14 @@ private:
     std::vector<size_t> getColSetBitIndices( size_t col_idx ) const;
 
     // distance functions
-    uint32_t hammingDistanceScalar( size_t i, size_t j ) const;
-    uint32_t hammingDistanceSIMD( size_t i, size_t j ) const;
+    uint32_t hammingDistance_scalar( size_t i, size_t j ) const;
+    uint32_t hammingDistance_SIMD( size_t i, size_t j ) const;
 
     // neighbourhood functions
-    int epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) const;
-    int epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const;
-    int innerProductScalar( size_t i, size_t j ) const;
-    int innerProductSIMD( size_t i, size_t j ) const;
+    int epsilonNeighbourhood_scalar( size_t i, size_t j, int epsilon ) const;
+    int epsilonNeighbourhood_SIMD( size_t i, size_t j, int epsilon ) const;
+    int innerProduct_scalar( size_t i, size_t j ) const;
+    int innerProduct_SIMD( size_t i, size_t j ) const;
 
     // statistics helper functions
     double density( void ) const;

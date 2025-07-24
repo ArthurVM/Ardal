@@ -265,8 +265,8 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int th
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
                 uint32_t dist = use_simd
-                    ? hammingDistanceSIMD(i, j)
-                    : hammingDistanceScalar(i, j);
+                    ? hammingDistance_SIMD(i, j)
+                    : hammingDistance_scalar(i, j);
 
                 dist_ptr[idx] = dist;
 
@@ -284,7 +284,7 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int th
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::hammingDistanceScalar
+ * ardal::BitMatrix::hammingDistance_scalar
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix using scalar operations.
  * The Hamming distance is the number of positions at which the corresponding bits differ.
@@ -303,10 +303,10 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int th
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-uint32_t BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
+uint32_t BitMatrix::hammingDistance_scalar( size_t i, size_t j ) const {
     // input validation in the name of paranoia/robustness
     if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistanceScalar.");
+        throw std::out_of_range("Row index out of bounds in hammingDistance_scalar.");
     }
 
     uint32_t dist = 0;
@@ -319,7 +319,7 @@ uint32_t BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::hammingDistanceSIMD
+ * ardal::BitMatrix::hammingDistance_SIMD
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix using SIMD (AVX2)
  * intrinsics for optimized performance.
@@ -339,10 +339,10 @@ uint32_t BitMatrix::hammingDistanceScalar( size_t i, size_t j ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-uint32_t BitMatrix::hammingDistanceSIMD( size_t i, size_t j ) const {
+uint32_t BitMatrix::hammingDistance_SIMD( size_t i, size_t j ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
+        throw std::out_of_range("Row index out of bounds in hammingDistance_SIMD.");
     }
 
     uint32_t dist = 0;
@@ -414,8 +414,8 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache, bool use_simd, int th
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
                 int inner_product = use_simd
-                    ? innerProductSIMD(i, j)
-                    : innerProductScalar(i, j);
+                    ? innerProduct_SIMD(i, j)
+                    : innerProduct_scalar(i, j);
 
                 inner_product_ptr[idx] = inner_product;
 
@@ -493,8 +493,8 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
                 if (mass_d > epsilon) continue;
 
                 int distance = use_simd
-                    ? epsilonNeighbourhoodSIMD(row_idx, i, epsilon)
-                    : epsilonNeighbourhoodScalar(row_idx, i, epsilon);
+                    ? epsilonNeighbourhood_SIMD(row_idx, i, epsilon)
+                    : epsilonNeighbourhood_scalar(row_idx, i, epsilon);
 
                 if (distance <= epsilon)
                     local.emplace_back(i, distance);
@@ -526,7 +526,7 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::epsilonNeighbourhoodScalar
+ * ardal::BitMatrix::epsilonNeighbourhood_scalar
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix and assesses whether
  * they exist in the same neighbourhood, performing an early exit if epsilon is exceeded. 
@@ -549,10 +549,10 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) const {
+int BitMatrix::epsilonNeighbourhood_scalar( size_t i, size_t j, int epsilon ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
+        throw std::out_of_range("Row index out of bounds in hammingDistance_SIMD.");
     }
 
     int dist = 0;
@@ -568,7 +568,7 @@ int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) con
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::epsilonNeighbourhoodSIMD
+ * ardal::BitMatrix::epsilonNeighbourhood_SIMD
  *
  * Calculates the Hamming distance between two rows of the bit-packed matrix and assesses whether
  * they exist in the same neighbourhood, performing an early exit if epsilon is exceeded. 
@@ -590,10 +590,10 @@ int BitMatrix::epsilonNeighbourhoodScalar( size_t i, size_t j, int epsilon ) con
  * EXCEPTIONS:
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
-int BitMatrix::epsilonNeighbourhoodSIMD( size_t i, size_t j, int epsilon ) const {
+int BitMatrix::epsilonNeighbourhood_SIMD( size_t i, size_t j, int epsilon ) const {
     // input valiation for robustness
     if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistanceSIMD.");
+        throw std::out_of_range("Row index out of bounds in hammingDistance_SIMD.");
     }
 
     int dist = 0;
@@ -676,9 +676,9 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
 
         int inner_product;   // initialise inner product
         if (use_simd) {
-            inner_product = innerProductSIMD(row_idx, i);
+            inner_product = innerProduct_SIMD(row_idx, i);
         } else {
-            inner_product = innerProductScalar(row_idx, i);
+            inner_product = innerProduct_scalar(row_idx, i);
         }
         
         if (inner_product >= ip_epsilon) {
@@ -690,7 +690,7 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::innerProductScalar
+ * ardal::BitMatrix::innerProduct_scalar
  *
  * Calculates the inner product (number of shared set bits) between two rows of the bit-packed matrix
  * using scalar operations.
@@ -710,7 +710,7 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
  
-int BitMatrix::innerProductScalar( size_t i, size_t j ) const {
+int BitMatrix::innerProduct_scalar( size_t i, size_t j ) const {
     int ip = 0;
     for (size_t k = 0; k < _packed_cols; ++k) {
         uint64_t and_chunk = _packed_matrix[i][k] & _packed_matrix[j][k];
@@ -721,7 +721,7 @@ int BitMatrix::innerProductScalar( size_t i, size_t j ) const {
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::innerProductSIMD
+ * ardal::BitMatrix::innerProduct_SIMD
  *
  * Calculates the inner product (number of shared set bits) between two rows of the bit-packed matrix
  * using SIMD (AVX2) intrinsics for optimized performance.
@@ -742,7 +742,7 @@ int BitMatrix::innerProductScalar( size_t i, size_t j ) const {
  *  std::out_of_range : If i or j are not smaller than _n_rows
  ****************************************************************************************************/
  
-int BitMatrix::innerProductSIMD( size_t i, size_t j ) const {
+int BitMatrix::innerProduct_SIMD( size_t i, size_t j ) const {
     int ip = 0;
     size_t k = 0;
 
@@ -1157,6 +1157,149 @@ py::array_t<double> BitMatrix::klDivergence(const std::vector<size_t>& ingroup_i
             dkl += q_ingroup * std::log2(q_ingroup / q_outgroup);
         }
         scores_ptr[j] = dkl;
+    }
+    return scores;
+}
+
+
+/****************************************************************************************************
+ * ardal::BitMatrix::jsDivergence
+ *
+ * Calculates the Jensen-Shannon divergence for each column, measuring how well it distinguishes an
+ * "ingroup" of rows from the "outgroup" (all other rows).
+ *
+ * INPUT:
+ *  ingroup_indices (const std::vector<size_t>&) : A vector of row indices for the ingroup.
+ *
+ * OUTPUT:
+ *  py::array_t<double> : A 1D NumPy array of Jensen-Shannon divergence scores, one for each column.
+ ****************************************************************************************************/
+py::array_t<double> BitMatrix::jsDivergence( const std::vector<size_t>& ingroup_indices ) const {
+    const size_t ingroup_size = ingroup_indices.size();
+    if (ingroup_size == 0 || ingroup_size == _n_rows) {
+        py::array_t<double> scores(_n_cols);
+        std::fill(scores.mutable_data(), scores.mutable_data() + _n_cols, 0.0);
+        return scores;
+    }
+    const size_t outgroup_size = _n_rows - ingroup_size;
+
+    // calculate column masses for the ingroup
+    // could probably be optimised at some point
+    std::vector<int> ingroup_col_masses(_n_cols, 0);
+    for (const auto& row_idx : ingroup_indices) {
+        if (row_idx >= _n_rows) continue;   // safety check
+        for (size_t k = 0; k < _packed_cols; ++k) {
+            uint64_t chunk = _packed_matrix[row_idx][k];
+            while (chunk) {
+                int tz = __builtin_ctzll(chunk);
+                size_t col = k * 64 + tz;
+                if (col < _n_cols) {
+                    ingroup_col_masses[col]++;
+                }
+                chunk &= chunk - 1;    // clear the LSB
+            }
+        }
+    }
+
+    py::array_t<double> scores(_n_cols);
+    auto scores_ptr = scores.mutable_data();
+
+    for (size_t j = 0; j < _n_cols; ++j) {
+        double ig_mass = static_cast<double>(ingroup_col_masses[j]);
+        double og_mass = static_cast<double>(_col_masses[j] - ingroup_col_masses[j]);
+
+        // Laplace smoothing
+        double p = (ig_mass + 1.0) / (ingroup_size + 2.0);
+        double q = (og_mass + 1.0) / (outgroup_size + 2.0);
+
+        double m = 0.5 * (p + q);
+        double js = 0.0;
+
+        if (p > 0.0) js += 0.5 * p * std::log2(p / m);
+        if (q > 0.0) js += 0.5 * q * std::log2(q / m);
+
+        double mp = 1.0 - p, mq = 1.0 - q, mm = 1.0 - m;
+        if (mp > 0.0) js += 0.5 * mp * std::log2(mp / mm);
+        if (mq > 0.0) js += 0.5 * mq * std::log2(mq / mm);
+
+        scores_ptr[j] = js;
+    }
+    return scores;
+}
+
+
+/****************************************************************************************************
+ * ardal::BitMatrix::informationGain
+ *
+ * Calculates the information gain for each column in the matrix with respect to a specified ingroup.
+ * Information gain is calculated as the difference between the entropy of the class and the conditional
+ * entropy given the presence of a specific allele (column).
+ *
+ * INPUT:
+ *  ingroup_indices (const std::vector<size_t>&) : A vector of row indices for the ingroup.
+ *
+ * OUTPUT:
+ *  py::array_t<double> : A 1D NumPy array of information gain scores, one for each column.
+ ****************************************************************************************************/
+py::array_t<double> BitMatrix::informationGain( const std::vector<size_t>& ingroup_indices ) const {
+    const size_t ingroup_size = ingroup_indices.size();
+    if (ingroup_size == 0 || ingroup_size == _n_rows) {
+        py::array_t<double> scores(_n_cols);
+        std::fill(scores.mutable_data(), scores.mutable_data() + _n_cols, 0.0);
+        return scores;
+    }
+
+    // calculate column masses for the ingroup
+    // could probably be optimised at some point
+    std::vector<int> ingroup_col_masses(_n_cols, 0);
+    for (const auto& row_idx : ingroup_indices) {
+        if (row_idx >= _n_rows) continue;   // safety check
+        for (size_t k = 0; k < _packed_cols; ++k) {
+            uint64_t chunk = _packed_matrix[row_idx][k];
+            while (chunk) {
+                int tz = __builtin_ctzll(chunk);
+                size_t col = k * 64 + tz;
+                if (col < _n_cols) {
+                    ingroup_col_masses[col]++;
+                }
+                chunk &= chunk - 1;    // clear the LSB
+            }
+        }
+    }
+
+    const size_t total_size = _n_rows;
+    const double p_class = static_cast<double>(ingroup_size) / total_size;
+
+    auto entropy = [](double p) -> double {
+        return (p > 0.0 && p < 1.0) ? -p * std::log2(p) - (1.0 - p) * std::log2(1.0 - p) : 0.0;
+    };
+
+    double H_C = entropy(p_class);
+
+    py::array_t<double> scores(_n_cols);
+    auto scores_ptr = scores.mutable_data();
+
+    for (size_t j = 0; j < _n_cols; ++j) {
+        size_t n_11 = static_cast<size_t>(ingroup_col_masses[j]);
+        size_t n_10 = static_cast<size_t>(_col_masses[j] - ingroup_col_masses[j]);
+        size_t n_01 = ingroup_size - n_11;
+        size_t n_00 = (_n_rows - ingroup_size) - n_10;
+
+        double H_C_given_snp = 0.0;
+
+        double n0 = n_00 + n_01;
+        if (n0 > 0) {
+            double p0 = static_cast<double>(n_01) / n0;
+            H_C_given_snp += (n0 / static_cast<double>(total_size)) * entropy(p0);
+        }
+
+        double n1 = n_10 + n_11;
+        if (n1 > 0) {
+            double p1 = static_cast<double>(n_11) / n1;
+            H_C_given_snp += (n1 / static_cast<double>(total_size)) * entropy(p1);
+        }
+
+        scores_ptr[j] = H_C - H_C_given_snp;
     }
     return scores;
 }

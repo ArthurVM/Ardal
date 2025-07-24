@@ -287,7 +287,7 @@ py::list RoaringMatrix::getRoaringMatrix( void ) const {
 }
 
 
-std::vector<roaring::Roaring> RoaringMatrix::colwiseRoaringFromRowwise() const {
+std::vector<roaring::Roaring> RoaringMatrix::colwiseRoaringFromRowwise( void ) const {
     // create one roaring bitmap per column
     std::vector<roaring::Roaring> colwise_roaring(_n_cols);
 
@@ -306,7 +306,7 @@ std::vector<roaring::Roaring> RoaringMatrix::colwiseRoaringFromRowwise() const {
 }
 
 
-py::dict RoaringMatrix::bitCooccurrence(double threshold, int threads) const {
+py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) const {
     // do some input cleanliness
     if (threshold < 0 || threshold > 1) {
         throw std::runtime_error("threshold must be between 0 and 1.");
@@ -334,6 +334,86 @@ py::dict RoaringMatrix::bitCooccurrence(double threshold, int threads) const {
         for (size_t i = 0; i < n_cols - 1; ++i) {
             const auto& i_bitmap = colwise_roaring[i];
             for (size_t j = i + 1; j < n_cols; ++j) {
+                if (i == j) continue; // skip self-comparison
+                const auto& j_bitmap = colwise_roaring[j];
+                double intersection_size = (i_bitmap & j_bitmap).cardinality();
+                double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
+                if (union_size == 0) continue;
+                double jaccard_index = intersection_size / union_size;
+                if (jaccard_index >= threshold) {
+                    local_map[i].push_back(j);
+                }
+            }
+        }
+    } // end parallel region
+
+    // merge thread local maps
+    std::map<size_t, std::vector<size_t>> global_map;
+    for (const auto& local_map : thread_maps) {
+        for (const auto& [k, v] : local_map) {
+            global_map[k].insert(global_map[k].end(), v.begin(), v.end());
+        }
+    }
+
+    // convert to py dict
+    py::dict cooccurrences_py;
+    for (const auto& [k, v] : global_map) {
+        cooccurrences_py[py::int_(k)] = py::cast(v);
+    }
+    return cooccurrences_py;
+}
+
+
+
+py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const {
+    // do some input cleanliness
+    if (threshold < 0 || threshold > 1) {
+        throw std::runtime_error("threshold must be between 0 and 1.");
+    }
+    if (threads <= 0) {
+        throw std::runtime_error("Number of threads must be positive.");
+    }
+    if (_n_rows == 0) {
+        return py::dict();
+    }
+    if (col_indices.empty() || col_indices.size() == 1) {
+        return py::dict();
+    }
+    // check if col_indices are valid
+    for (const auto& idx : col_indices) {
+        if (idx >= _n_cols) {
+            throw std::runtime_error("Column index out of bounds.");
+        }
+    }
+
+    // get the colwise roaring bitmap
+    auto colwise_roaring = colwiseRoaringFromRowwise();
+    size_t n_cols = colwise_roaring.size();
+
+    // thread local results maps
+    std::vector<std::map<size_t, std::vector<size_t>>> thread_maps(threads);
+
+    #pragma omp parallel num_threads(threads)
+    {
+        int tid = omp_get_thread_num();
+        auto& local_map = thread_maps[tid];
+
+        #pragma omp for schedule(static)
+        for (size_t i = 0; i < n_cols - 1; ++i) {
+            // check if the column is in the subset
+            if (std::find(col_indices.begin(), col_indices.end(), i) == col_indices.end()) {
+                continue; // skip columns not in the subset
+            }
+
+            const auto& i_bitmap = colwise_roaring[i];
+            for (size_t j = i + 1; j < n_cols; ++j) {
+                if (i == j) continue; // skip self-comparison
+
+                // check if the column is in the subset
+                if (std::find(col_indices.begin(), col_indices.end(), j) == col_indices.end()) {
+                    continue; // skip columns not in the subset
+                }
+
                 const auto& j_bitmap = colwise_roaring[j];
                 double intersection_size = (i_bitmap & j_bitmap).cardinality();
                 double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;

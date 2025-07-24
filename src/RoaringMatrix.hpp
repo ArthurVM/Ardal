@@ -42,7 +42,8 @@ public:
     py::list getRoaringMatrix( void ) const;
 
     // colwise functions
-    py::dict bitCooccurrence( double threshold, int threads = 1 ) const;
+    py::dict bitCooccurrence_all( double threshold, int threads = 1 ) const;
+    py::dict bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const;
 
 
 private:
@@ -59,7 +60,7 @@ private:
     uint32_t innerProductRowwise( size_t i, size_t j ) const;
 
     // utility functions
-    std::vector<roaring::Roaring> colwiseRoaringFromRowwise() const;
+    std::vector<roaring::Roaring> colwiseRoaringFromRowwise( void ) const;
 
 };
 

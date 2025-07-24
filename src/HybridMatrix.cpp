@@ -105,14 +105,38 @@ py::array_t<double> HybridMatrix::columnEntropy( void ) const {
 }
 
 
-py::dict HybridMatrix::bitCooccurrence( double threshold, int threads ) const {
-    std::cout << "HM: GOT HERE" << std::endl;
-    return roaring_backend->bitCooccurrence(threshold, threads);
+py::dict HybridMatrix::bitCooccurrence_all( double threshold, int threads ) const {
+    
+    if (roaring_enabled) {
+        return roaring_backend->bitCooccurrence_all(threshold, threads);
+    } else { 
+        std::runtime_error("Bit co-occurrence is not supported in BitMatrix backend.");
+    }
+}
+
+
+py::dict HybridMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const {
+    
+    if (roaring_enabled) {
+        return roaring_backend->bitCooccurrence_subset(col_indices, threshold, threads);
+    } else { 
+        std::runtime_error("Bit co-occurrence is not supported in BitMatrix backend.");
+    }
 }
 
 
 py::array_t<double> HybridMatrix::klDivergence( const std::vector<size_t>& input_guids ) const {
     return bit_backend->klDivergence(input_guids);
+}
+
+
+py::array_t<double> HybridMatrix::jsDivergence( const std::vector<size_t>& input_guids ) const {
+    return bit_backend->jsDivergence(input_guids);
+}
+
+
+py::array_t<double> HybridMatrix::informationGain( const std::vector<size_t>& input_guids ) const {
+    return bit_backend->informationGain(input_guids);
 }
 
 
