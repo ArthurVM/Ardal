@@ -2,8 +2,7 @@
 Copyright 2025 Arthur V. Morris
 */
 #include "BitMatrix.hpp"
-#include "ColumnCache.hpp"
-#include "simd_popcount.hpp"
+#include "simd_utils.hpp"
 #include <chrono>
 #include <stdexcept>
 #include <cmath>
@@ -247,14 +246,28 @@ py::array_t<uint8_t> BitMatrix::getBitMatrix( void ) const {
  *                      the pairwise Hamming distances.  The length of the array is n*(n-1)/2,
  *                      where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int threads ) const {
-    if (threads <= 0)
+py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
+                                          bool use_simd,
+                                          int threads ) const {
+    if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
-    
+    }
+
     const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);
     
     {
+        // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
+        using HammingFunc = uint32_t(*)(const uint64_t*, const uint64_t*, size_t);
+
+        HammingFunc hamming_func;
+        #ifdef __AVX2__
+            hamming_func = use_simd ? &simd_utils::hamming_avx2 : &simd_utils::hamming_scalar;
+        #else
+            hamming_func = &simd_utils::hamming_scalar;
+        #endif
+
+        // open mp thread stuff
         py::gil_scoped_release release;   // release GIL for full parallel region
         omp_set_num_threads(threads);
 
@@ -264,9 +277,8 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int th
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
-                uint32_t dist = use_simd
-                    ? hammingDistance_SIMD(i, j)
-                    : hammingDistance_scalar(i, j);
+
+                uint32_t dist = hamming_func(&_packed_matrix[i][0], &_packed_matrix[j][0], _packed_cols);
 
                 dist_ptr[idx] = dist;
 
@@ -277,96 +289,8 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache, bool use_simd, int th
                 // }
             }
         }
-    }   // GIL reestablished here
+    }   // GIL reestablished
     return dist_matrix;
-}
-
-
-
-/****************************************************************************************************
- * ardal::BitMatrix::hammingDistance_scalar
- *
- * Calculates the Hamming distance between two rows of the bit-packed matrix using scalar operations.
- * The Hamming distance is the number of positions at which the corresponding bits differ.
- * This function iterates through each byte of the packed rows, performs a bitwise XOR, and then
- * counts the set bits (popcount) in the result.
- *
- * This is a private helper function used by `hamming`.
- *
- * INPUT:
- *  i (size_t) : The row index of the first allele sequence.
- *  j (size_t) : The row index of the second allele sequence.
- *
- * OUTPUT:
- *  int : The Hamming distance between the two specified rows.
- * 
- * EXCEPTIONS:
- *  std::out_of_range : If i or j are not smaller than _n_rows
- ****************************************************************************************************/
-uint32_t BitMatrix::hammingDistance_scalar( size_t i, size_t j ) const {
-    // input validation in the name of paranoia/robustness
-    if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistance_scalar.");
-    }
-
-    uint32_t dist = 0;
-    for (size_t k = 0; k < _packed_cols; ++k) {
-        uint64_t xor_byte = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcountll(xor_byte);
-    }
-    return dist;
-}
-
-
-/****************************************************************************************************
- * ardal::BitMatrix::hammingDistance_SIMD
- *
- * Calculates the Hamming distance between two rows of the bit-packed matrix using SIMD (AVX2)
- * intrinsics for optimized performance.
- * The function processes the packed bytes in chunks of 32 bytes (256 bits) using AVX2 instructions
- * to perform bitwise XOR and then uses `__builtin_popcount` on 32-bit lanes to sum the differing bits.
- * A remainder loop handles any bytes not fitting into 32-byte chunks.
- *
- * This is a private helper function used by `hamming`.
- *
- * INPUT:
- *  i (size_t) : The row index of the first allele sequence.
- *  j (size_t): The row index of the second allele sequence.
- *
- * OUTPUT:
- *  int : The Hamming distance between the two specified rows.
- * 
- * EXCEPTIONS:
- *  std::out_of_range : If i or j are not smaller than _n_rows
- ****************************************************************************************************/
-uint32_t BitMatrix::hammingDistance_SIMD( size_t i, size_t j ) const {
-    // input valiation for robustness
-    if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistance_SIMD.");
-    }
-
-    uint32_t dist = 0;
-    size_t k = 0;
-
-    // SIMD block
-    for (; k + 4 <= _packed_cols; k += 4) {
-        __m256i a = _mm256_loadu_si256((__m256i const*)&_packed_matrix[i][k]);
-        __m256i b = _mm256_loadu_si256((__m256i const*)&_packed_matrix[j][k]);
-        __m256i xor_result = _mm256_xor_si256(a, b);
-
-        // horizontal popcount on 4x 64-bit integers
-        uint64_t chunks[4];
-        _mm256_storeu_si256((__m256i*)chunks, xor_result);
-        dist += __builtin_popcountll(chunks[0]) + __builtin_popcountll(chunks[1]) +
-                __builtin_popcountll(chunks[2]) + __builtin_popcountll(chunks[3]);
-    }
-
-    // cover the non 64 chunk tail
-    for (; k < _packed_cols; ++k) {
-        uint64_t xor_chunk = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcountll(xor_chunk);
-    }
-    return dist;
 }
 
 
@@ -395,7 +319,9 @@ uint32_t BitMatrix::hammingDistance_SIMD( size_t i, size_t j ) const {
  *                      the pairwise Inner Products.  The length of the array is n*(n-1)/2,
  *                      where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<int> BitMatrix::innerProduct( bool fill_cache, bool use_simd, int threads ) const {
+py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
+                                          bool use_simd,
+                                          int threads ) const {
     if (threads <= 0)
         throw std::runtime_error("Thread count must be positive.");
     
@@ -403,8 +329,18 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache, bool use_simd, int th
     py::array_t<int> inner_product_matrix(total_pairs);
     
     {
-        py::gil_scoped_release release;   // release GIL for full parallel region
+        // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
+        using InnerProductFunc = int(*)(const uint64_t*, const uint64_t*, size_t);
 
+        InnerProductFunc inner_product_func;
+        #ifdef __AVX2__
+            inner_product_func = use_simd ? &simd_utils::inner_product_avx2 : &simd_utils::inner_product_scalar;
+        #else
+            inner_product_func = &simd_utils::inner_product_scalar;
+        #endif
+
+        // open mp threading
+        py::gil_scoped_release release;   // release GIL for full parallel region
         omp_set_num_threads(threads);
 
         auto inner_product_ptr = inner_product_matrix.mutable_data();
@@ -413,9 +349,8 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache, bool use_simd, int th
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
-                int inner_product = use_simd
-                    ? innerProduct_SIMD(i, j)
-                    : innerProduct_scalar(i, j);
+                
+                int inner_product = inner_product_func(&_packed_matrix[i][0], &_packed_matrix[j][0], _packed_cols);
 
                 inner_product_ptr[idx] = inner_product;
 
@@ -473,6 +408,17 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
     std::vector<std::vector<std::pair<size_t, int>>> thread_results;
 
     {
+        // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
+        using EpsilonHammingFunc = int(*)(const uint64_t*, const uint64_t*, size_t, int);
+
+        EpsilonHammingFunc epsilon_neighbourhood_func;
+        #ifdef __AVX2__
+            epsilon_neighbourhood_func = use_simd ? &simd_utils::epsilon_hamming_avx2 : &simd_utils::epsilon_hamming_scalar;
+        #else
+            epsilon_neighbourhood_func = &simd_utils::epsilon_hamming_scalar;
+        #endif
+
+        // open mp threading
         py::gil_scoped_release release;   // release GIL for full parallel region
         omp_set_num_threads(threads);     // Explicitly control number of threads
 
@@ -492,9 +438,7 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
                 int mass_d = std::abs(q_mass - _row_masses[i]);
                 if (mass_d > epsilon) continue;
 
-                int distance = use_simd
-                    ? epsilonNeighbourhood_SIMD(row_idx, i, epsilon)
-                    : epsilonNeighbourhood_scalar(row_idx, i, epsilon);
+                int distance = epsilon_neighbourhood_func(&_packed_matrix[row_idx][0], &_packed_matrix[i][0], _packed_cols, epsilon);
 
                 if (distance <= epsilon)
                     local.emplace_back(i, distance);
@@ -526,106 +470,6 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::epsilonNeighbourhood_scalar
- *
- * Calculates the Hamming distance between two rows of the bit-packed matrix and assesses whether
- * they exist in the same neighbourhood, performing an early exit if epsilon is exceeded. 
- * Scalar implementation for for testing and fallback in instances where CPU does not support AVX2.
- * 
- * The function processes the packed bytes in chunks of 32 bytes (256 bits) using AVX2 instructions
- * to perform bitwise XOR and then uses `__builtin_popcount` on 32-bit lanes to sum the differing bits.
- * A remainder loop handles any bytes not fitting into 32-byte chunks.
- *
- * This is a private helper function used by `neighbourhood`.
- *
- * INPUT:
- *  i (size_t)       : The row index of the first allele sequence.
- *  j (size_t)       : The row index of the second allele sequence.
- *  epsilon (int)    : The size of the neighbourhood (in hamming distance).
- *
- * OUTPUT:
- *  int : The Hamming distance between the two specified rows.
- * 
- * EXCEPTIONS:
- *  std::out_of_range : If i or j are not smaller than _n_rows
- ****************************************************************************************************/
-int BitMatrix::epsilonNeighbourhood_scalar( size_t i, size_t j, int epsilon ) const {
-    // input valiation for robustness
-    if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistance_SIMD.");
-    }
-
-    int dist = 0;
-    for (size_t k = 0; k < _packed_cols; ++k) {
-        uint64_t xor_chunk = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcountll(xor_chunk);
-        if (dist > epsilon) {
-            return dist;  // early break where epsilon is exceeded
-        }
-    }
-    return dist;
-}
-
-
-/****************************************************************************************************
- * ardal::BitMatrix::epsilonNeighbourhood_SIMD
- *
- * Calculates the Hamming distance between two rows of the bit-packed matrix and assesses whether
- * they exist in the same neighbourhood, performing an early exit if epsilon is exceeded. 
- * Vectorised with SIMD (AVX2) intrinsics for optimized performance.
- * The function processes the packed bytes in chunks of 32 bytes (256 bits) using AVX2 instructions
- * to perform bitwise XOR and then uses `__builtin_popcount` on 32-bit lanes to sum the differing bits.
- * A remainder loop handles any bytes not fitting into 32-byte chunks.
- *
- * This is a private helper function used by `neighbourhood`.
- *
- * INPUT:
- *  i (size_t)       : The row index of the first allele sequence.
- *  j (size_t)       : The row index of the second allele sequence.
- *  epsilon (size_t) : The size of the neighbourhood (in hamming distance).
- *
- * OUTPUT:
- *  int : The Hamming distance between the two specified rows.
- * 
- * EXCEPTIONS:
- *  std::out_of_range : If i or j are not smaller than _n_rows
- ****************************************************************************************************/
-int BitMatrix::epsilonNeighbourhood_SIMD( size_t i, size_t j, int epsilon ) const {
-    // input valiation for robustness
-    if (i >= _n_rows || j >= _n_rows) {
-        throw std::out_of_range("Row index out of bounds in hammingDistance_SIMD.");
-    }
-
-    int dist = 0;
-    size_t k = 0;
-
-    // SIMD block
-    for (; k + 4 <= _packed_cols; k += 4) {
-        __m256i a = _mm256_loadu_si256((__m256i const*)&_packed_matrix[i][k]);
-        __m256i b = _mm256_loadu_si256((__m256i const*)&_packed_matrix[j][k]);
-        __m256i xor_result = _mm256_xor_si256(a, b);
-
-        // horizontal popcount on 4x 64bit integers
-        uint64_t chunks[4];
-        _mm256_storeu_si256((__m256i*)chunks, xor_result);
-        dist += __builtin_popcountll(chunks[0]) + __builtin_popcountll(chunks[1]) +
-                __builtin_popcountll(chunks[2]) + __builtin_popcountll(chunks[3]);
-
-        if (dist > epsilon) {
-            return dist;   // early break where epsilon is exceeded
-        }
-    }
-
-    // cover the non 32 chunk tail
-    for (; k < _packed_cols; ++k) {
-        uint64_t xor_chunk = _packed_matrix[i][k] ^ _packed_matrix[j][k];
-        dist += __builtin_popcountll(xor_chunk);
-    }
-    return dist;
-}
-
-
-/****************************************************************************************************
  * ardal::BitMatrix::innerProductNeighbourhood
  *
  * Find all rows which share at least ip_epsilon alleles with row_idx.
@@ -649,7 +493,7 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
     if (ip_epsilon < 0) {
         throw std::runtime_error("ip_epsilon must be non-negative.");
         }
-    if (row_idx < 0) {
+    if (row_idx < 0) {  
         throw std::runtime_error("Row index must be non-negative.");
         }
     if (row_idx >= _n_rows) {
@@ -663,6 +507,16 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
         return ipe_n;
     }
 
+    // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
+    using InnerProductFunc = int(*)(const uint64_t*, const uint64_t*, size_t);
+
+    InnerProductFunc ip_neighbourhood_func;
+    #ifdef __AVX2__
+        ip_neighbourhood_func = use_simd ? &simd_utils::inner_product_avx2 : &simd_utils::inner_product_scalar;
+    #else
+        ip_neighbourhood_func = &simd_utils::inner_product_scalar;
+    #endif
+
     // iterate through other rows
     for (size_t i = 0; i < _n_rows; ++i) {
         if (i == row_idx) {
@@ -674,97 +528,13 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
             continue;
         }
 
-        int inner_product;   // initialise inner product
-        if (use_simd) {
-            inner_product = innerProduct_SIMD(row_idx, i);
-        } else {
-            inner_product = innerProduct_scalar(row_idx, i);
-        }
+        int inner_product = ip_neighbourhood_func(&_packed_matrix[row_idx][0], &_packed_matrix[i][0], _packed_cols);
         
         if (inner_product >= ip_epsilon) {
             ipe_n.append(py::make_tuple(i, inner_product));
         }
     }
     return ipe_n;
-}
-
-
-/****************************************************************************************************
- * ardal::BitMatrix::innerProduct_scalar
- *
- * Calculates the inner product (number of shared set bits) between two rows of the bit-packed matrix
- * using scalar operations.
- * This function iterates through each byte of the packed rows, performs a bitwise AND, and then
- * counts the set bits (popcount) in the result.
- *
- * This is a private helper function used by `innerProductNeighbourhood`.
- *
- * INPUT:
- *  i (size_t) : The row index of the first allele sequence.
- *  j (size_t) : The row index of the second allele sequence.
- *
- * OUTPUT:
- *  int : The inner product between the two specified rows.
- *
- * EXCEPTIONS:
- *  std::out_of_range : If i or j are not smaller than _n_rows
- ****************************************************************************************************/
- 
-int BitMatrix::innerProduct_scalar( size_t i, size_t j ) const {
-    int ip = 0;
-    for (size_t k = 0; k < _packed_cols; ++k) {
-        uint64_t and_chunk = _packed_matrix[i][k] & _packed_matrix[j][k];
-        ip += __builtin_popcountll(and_chunk);
-    }
-    return ip;
-}
-
-
-/****************************************************************************************************
- * ardal::BitMatrix::innerProduct_SIMD
- *
- * Calculates the inner product (number of shared set bits) between two rows of the bit-packed matrix
- * using SIMD (AVX2) intrinsics for optimized performance.
- * The function processes the packed bytes in chunks of 32 bytes (256 bits) using AVX2 instructions
- * to perform bitwise AND and then uses `__builtin_popcount` on 32-bit lanes to sum the common bits.
- * A remainder loop handles any bytes not fitting into 32-byte chunks.
- *
- * This is a private helper function used by `innerProductNeighbourhood`.
- *
- * INPUT:
- *  i (size_t) : The row index of the first allele sequence.
- *  j (size_t) : The row index of the second allele sequence.
- *
- * OUTPUT:
- *  int : The inner product between the two specified rows.
- *
- * EXCEPTIONS:
- *  std::out_of_range : If i or j are not smaller than _n_rows
- ****************************************************************************************************/
- 
-int BitMatrix::innerProduct_SIMD( size_t i, size_t j ) const {
-    int ip = 0;
-    size_t k = 0;
-
-    // SIMD block
-    for (; k + 4 <= _packed_cols; k += 4) {
-        __m256i a = _mm256_loadu_si256((__m256i const*)&_packed_matrix[i][k]);
-        __m256i b = _mm256_loadu_si256((__m256i const*)&_packed_matrix[j][k]);
-        __m256i and_result = _mm256_and_si256(a, b);
-
-        // horizontal popcount on 4x 64-bit integers
-        uint64_t chunks[4];
-        _mm256_storeu_si256((__m256i*)chunks, and_result);
-        ip += __builtin_popcountll(chunks[0]) + __builtin_popcountll(chunks[1]) +
-              __builtin_popcountll(chunks[2]) + __builtin_popcountll(chunks[3]);
-    }
-
-    // cover the non 32 chunk tail
-    for (; k < _packed_cols; ++k) {
-        uint64_t and_chunk = _packed_matrix[i][k] & _packed_matrix[j][k];
-        ip += __builtin_popcountll(and_chunk);
-    }
-    return ip;
 }
 
 

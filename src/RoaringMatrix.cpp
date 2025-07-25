@@ -86,9 +86,6 @@ RoaringMatrix::RoaringMatrix( py::array_t<uint8_t> input_matrix,
  *                     where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
 py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
-
-    std::cout << "Calculating hamming" << std::endl;
-
     const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);     
     {
@@ -98,11 +95,11 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
         auto dist_ptr = dist_matrix.mutable_data();
 
         #pragma omp parallel for schedule(guided)
-        for (size_t pair_idx = 0; pair_idx < total_pairs; ++pair_idx) {
-            size_t i = floor((2.0 * _n_rows - 1 - sqrt(pow(2.0 * _n_rows - 1, 2) - 8.0 * pair_idx)) / 2.0);
-            size_t j = pair_idx + i + 1 - _n_rows * i + i * i / 2;
-
-            dist_ptr[pair_idx] = hammingDistance(i, j);
+        for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t j = i + 1; j < _n_rows; ++j) {
+                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+                dist_ptr[idx] = hammingDistance(i, j);
+            }
         }
     }     
     return dist_matrix;
@@ -184,7 +181,22 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
 
 
 py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
-    py::array_t<int> inner_product_matrix;
+    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
+    py::array_t<int> inner_product_matrix(total_pairs);
+    {
+        py::gil_scoped_release release;
+        omp_set_num_threads(threads);
+
+        auto inner_product_ptr = inner_product_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(guided)
+        for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t j = i + 1; j < _n_rows; ++j) {
+                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+                inner_product_ptr[idx] = innerProductRowwise(i, j);
+            }
+        }
+    }
     return inner_product_matrix;
 }
 
@@ -229,25 +241,12 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
         }
     }   // GIL reestablished here
 
-    // count total neighbours to preallocate np array
-    size_t total_neighbours = 0;
-    for (const auto& vec : thread_results) {
-        total_neighbours += vec.size();
-    }
-
-    // create result np array of shape (total_neighbours, 2)
-    py::array_t<int64_t> ipe_n({total_neighbours, (size_t)2});
-    auto result_ptr = ipe_n.mutable_data();
-
-    // populate array with (idex, dist) pairs
-    size_t curr_idx = 0;
+    py::list ipe_n;
     for (const auto& vec : thread_results) {
         for (const auto& [idx, dist] : vec) {
-            result_ptr[curr_idx * 2 + 0] = idx;
-            result_ptr[curr_idx * 2 + 1] = dist;
-            curr_idx++;
+            ipe_n.append(py::make_tuple(idx, dist));
         }
-    }       
+    }
     return ipe_n;
 }
 

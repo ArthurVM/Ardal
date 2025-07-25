@@ -31,7 +31,7 @@ target_include_directories(_ardal PRIVATE
 # Add compile options from your setup.py
 target_compile_options(_ardal PRIVATE
     -O3
-    -march=native
+    -mavx2
     -ffast-math
 )
 

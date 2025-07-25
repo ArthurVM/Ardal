@@ -50,7 +50,7 @@ double HybridMatrix::getDensity() const {
 }
 
 
-py::array_t<int> HybridMatrix::hamming( bool use_simd, int threads, bool force_bit_backend ) const {
+py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd, int threads, bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->hamming(threads);
     } else {

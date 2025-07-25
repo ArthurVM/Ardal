@@ -19,7 +19,7 @@ ext_modules = [
             os.path.abspath(os.path.dirname(__file__))
         ],
         language='c++',
-        extra_compile_args=['-O3', '-march=native', '-ffast-math', '-fopenmp'],
+        extra_compile_args=['-O3', '-mavx2', '-ffast-math', '-fopenmp'],
         extra_link_args=['-O3', '-fopenmp']
     )
 ]

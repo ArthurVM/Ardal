@@ -1,12 +1,20 @@
+""" ArdalIO.py
+This module provides functionality for reading and writing allele matrices in the Ardal framework.
+"""
+
 import pandas as pd
 import json
 import os
 import numpy as np
 from collections import defaultdict
 
+from .utilities import *
 
-# core/IO.py
+
+# core/ArdalIO.py
 class ArdalIO:
+    """ Class for reading and writing allele matrices in the Ardal framework.
+    """
 
     def __init__(self, headers, hybrid_matrix, roaring_enabled):
 
@@ -18,7 +26,7 @@ class ArdalIO:
     def toDataFrame( self ) -> pd.DataFrame:
         """ Return the allele matrix as a Pandas DataFrame.
         """
-        return pd.DataFrame(self.__hybrid_matrix.getBitMatrix(), index=self.__headers["guids"], columns=self.__headers["alleles"])
+        return pd.DataFrame(self._matrix.getBitMatrix(), index=self._headers["guids"], columns=self._headers["alleles"])
 
 
     def toDict( self,
@@ -26,8 +34,8 @@ class ArdalIO:
         """ Return a dictionary containing present allele IDs mapped to their guid.
         """
         allele_dict = defaultdict(list)
-        for guid_idx, guid_name in enumerate(self.__headers["guids"]):
-            snp_indices = self.__hybrid_matrix.getSetBitIndices(guid_idx, force_bit_backend=force_bit_backend)
+        for guid_idx, guid_name in enumerate(self._headers["guids"]):
+            snp_indices = self._matrix.getSetBitIndices(guid_idx, force_bit_backend=force_bit_backend)
             for snp_idx in snp_indices:
                 allele_dict[guid_name].append(self._decodeAllele(snp_idx))
         return dict(allele_dict)
@@ -52,6 +60,6 @@ class ArdalIO:
         if os.path.exists(matrix_out_path):
             raise ValueError(f"File '{matrix_out_path}' already exists.")
 
-        np.save(matrix_out_path, self.__hybrid_matrix.getMatrix())
+        np.save(matrix_out_path, self._matrix.getMatrix())
         with open(os.path.join(file_path, output_prefix + "_headers.json")) as fout:
-            json.dump(self.__headers, fout, indent=4)
+            json.dump(self._headers, fout, indent=4)
