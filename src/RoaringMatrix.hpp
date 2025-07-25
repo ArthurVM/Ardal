@@ -28,6 +28,7 @@ public:
 
     // distance functions
     py::array_t<uint32_t> hamming( int threads = 1 ) const;
+    py::array_t<double> jaccard( int threads = 1 ) const;
     py::array_t<int> innerProduct( int threads = 1 ) const;
  
     // neighbourhood functions
@@ -57,6 +58,7 @@ private:
 
     // distance functions
     uint32_t hammingDistance( size_t i, size_t j ) const;
+    double jaccardIndex( size_t i, size_t j ) const;
     uint32_t innerProductRowwise( size_t i, size_t j ) const;
 
     // utility functions

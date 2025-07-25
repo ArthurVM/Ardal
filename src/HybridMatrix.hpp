@@ -21,7 +21,11 @@ public:
     py::array_t<uint32_t> hamming( bool use_simd = true,
                                    int threads = 1,
                                    bool force_bit_backend = false ) const;
-
+    
+    py::array_t<double> jaccard( bool use_simd = true,
+                                   int threads = 1,
+                                   bool force_bit_backend = false ) const;
+                                   
     py::array_t<int> innerProduct( bool use_simd = true,
                                    int threads = 1,
                                    bool force_bit_backend = false ) const;

@@ -111,6 +111,61 @@ uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
 }
 
 
+/****************************************************************************************************
+ * ardal::RoaringMatrix::jaccard
+ *
+ * Calculates the Jaccard index between all pairs of rows using Roaring bitmaps.
+ *
+ * This function calculates the pairwise Jaccard index between all rows of the matrix.
+ * The Jaccard index between two rows (Roaring bitmaps) is computed as the ratio of
+ * the cardinality of their intersection (AND) and union.
+ *              JD = |A ∩ B| / |A ∪ B|
+ *
+ * INPUT:
+ *  None (operates on the private member _roaring_matrix)
+ *
+ * PARAMETERS:
+ *  threads (int) : The number of threads to use for parallel computation.
+ *
+ * OUTPUT:
+ *  py::array_t<double> : A 1D NumPy array representing the condensed distance matrix containing
+ *                     the pairwise Jaccard distances. The length of the array is n*(n-1)/2,
+ *                     where 'n' is the number of rows in the matrix.
+ ****************************************************************************************************/
+py::array_t<double> RoaringMatrix::jaccard( int threads ) const {
+    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
+    py::array_t<double> dist_matrix(total_pairs);     
+    {
+        py::gil_scoped_release release;
+        omp_set_num_threads(threads);
+
+        auto dist_ptr = dist_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(guided)
+        for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t j = i + 1; j < _n_rows; ++j) {
+                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+                dist_ptr[idx] = jaccardIndex(i, j);
+            }
+        }
+    }     
+    return dist_matrix;
+}
+
+
+double RoaringMatrix::jaccardIndex( size_t i, size_t j ) const {
+    const double intersection_size = (_roaring_matrix[i] & _roaring_matrix[j]).cardinality();
+    const double union_size = _row_masses[i] + _row_masses[j] - intersection_size;
+
+    if (union_size == 0) {
+        // if union is 0, both sets are empty and thus identical. Distance is 0.
+        return 0.0;
+    }
+    const double jaccard_index = intersection_size / union_size;
+    return jaccard_index;
+}
+
+
 py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, int threads ) const {
     // do some data cleanliness
     if (epsilon < 0) {

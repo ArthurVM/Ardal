@@ -59,6 +59,16 @@ py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd, int threads, bool fo
 }
 
 
+py::array_t<double> HybridMatrix::jaccard( bool use_simd, int threads, bool force_bit_backend ) const {
+    if (roaring_enabled && !force_bit_backend) {
+        return roaring_backend->jaccard(threads);
+    } else {
+        // return bit_backend->jaccard(false, use_simd, threads);
+        std::runtime_error("Jaccard distance is not currently supported in BitMatrix backend.");
+    }
+}
+
+
 py::array_t<int> HybridMatrix::innerProduct( bool use_simd, int threads, bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->innerProduct(threads);

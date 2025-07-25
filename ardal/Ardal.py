@@ -14,7 +14,7 @@ from .core.ArdalParser import ArdalParser
 from .core.ArdalIO import ArdalIO
 from .core.ArdalGet import ArdalGet
 from .core.ArdalAllele import ArdalAllele
-from .core.ArdalDistance import ArdalDistance
+from .core.ArdalCompare import ArdalCompare
 from .core.ArdalStats import ArdalStats
 from .core.utilities import *
 
@@ -59,7 +59,7 @@ class Ardal(object):
         self.io = ArdalIO(self.__headers, self.__hybrid_matrix, self.roaring)
         self.get = ArdalGet(self.__headers, self.__hybrid_matrix, self.roaring)
         self.allele = ArdalAllele(self.__headers, self.__hybrid_matrix, self.roaring)
-        self.distance = ArdalDistance(self.__headers, self.__hybrid_matrix, self.roaring)
+        self.compare = ArdalCompare(self.__headers, self.__hybrid_matrix, self.roaring)
         self.stats = ArdalStats(self.__headers, self.__hybrid_matrix, self.roaring)
 
         self.get.matrixStats(print_stats=True)

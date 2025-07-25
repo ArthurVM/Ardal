@@ -7,8 +7,8 @@ import pandas as pd
 from .utilities import *
 
 
-# core/ArdalDistance.py
-class ArdalDistance:
+# core/ArdalCompare.py
+class ArdalCompare:
 
     def __init__(self, headers, hybrid_matrix, roaring_enabled):
 
@@ -49,18 +49,23 @@ class ArdalDistance:
         
         ## calculate the distance matrix using _ardal
         if metric == "jaccard":
-            # dist_tri = self._matrix.jaccard()
-            raise NotImplementedError("Jaccard distance is not yet implemented.")
+            dist_tri = self._matrix.jaccard(use_simd=use_simd,
+                                            threads=threads,
+                                            force_bit_backend=force_bit_backend)
+            dist_matrix = np.array(squareform(dist_tri), dtype=np.float32)
+
         elif metric == "hamming":
             dist_tri = self._matrix.hamming(use_simd=use_simd,
                                             threads=threads,
-                                             force_bit_backend=force_bit_backend)
+                                            force_bit_backend=force_bit_backend)
+            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
+
         elif metric == "inner_product":
             dist_tri = self._matrix.innerProduct(use_simd=use_simd,
                                                  threads=threads,
                                                  force_bit_backend=force_bit_backend)
+            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
         
-        dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
         dist_df = pd.DataFrame(dist_matrix, columns=self._headers["guids"], index=self._headers["guids"])
         
         return dist_df
