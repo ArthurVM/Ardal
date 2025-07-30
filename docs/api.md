@@ -1,254 +1,184 @@
 # Ardal API Documentation
 
-This document provides detailed API documentation for the `ardal` package, including the `Ardal`, `ArdalParser`, and `AlleleMatrix` classes.
-
-## Ardal Class
-
-The `Ardal` class is the main interface for interacting with allele matrix data. It provides methods for calculating distances, identifying core and accessory alleles, and performing other common operations.
-
-### `__init__(data_source, __ref=False, file_format=None)`
-
-*   **Description:** Constructor for the `Ardal` class. Initializes an `Ardal` object from a data source.
-*   **Parameters:**
-    *   `data_source` (str or list): The path to the data file or a list containing the headers and matrix.
-    *   `__ref` (bool, optional): A flag (currently unused). Defaults to `False`.
-    *   `file_format` (str, optional): The format of the data file (e.g., "csv", "parquet", "npy", "json"). If `None`, the format is inferred from the file extension. Defaults to `None`.
-*   **Raises:**
-    *   `ValueError`: If parsing fails.
-
-### `pairwise(guids=[], metric="hamming", chunk_size=100)`
-
-*   **Description:** Calculates the pairwise distance matrix between the specified GUIDs.
-*   **Parameters:**
-    *   `guids` (list, optional): A list of GUIDs to compare. If empty, all GUIDs are compared. Defaults to `[]`.
-    *   `metric` (str, optional): The distance metric to use ("hamming" or "jaccard"). Defaults to `"hamming"`.
-    * `chunk_size` (int, optional): The chunk size to use when calculating the pairwise distance. Defaults to `100`.
-*   **Returns:**
-    *   `pd.DataFrame`: A Pandas DataFrame representing the distance matrix.
-*   **Raises:**
-    *   `ValueError`: If an invalid distance function is specified.
-
-### `neighbourhood(guid, n, simd=True)`
-
-*   **Description:** Gets the SNP neighborhood of a GUID.
-*   **Parameters:**
-    *   `guid` (str): The target GUID.
-    *   `n` (int): The maximum Hamming distance.
-    *   `simd` (bool, optional): Whether to use SIMD acceleration. Defaults to `True`.
-*   **Returns:**
-    *   `dict`: A dictionary where keys are neighboring GUIDs and values are their Hamming distances to the target GUID.
-* **Raises:**
-    * `ValueError`: If the guid is not found.
-
-### `unique(guids)`
-
-*   **Description:** Finds the set of SNPs unique to a given set of GUIDs. A SNP is considered unique if it is present in all of the specified GUIDs and absent in all other GUIDs.
-*   **Parameters:**
-    *   `guids` (list): A list of GUIDs.
-*   **Returns:**
-    *   `set`: A set of unique SNPs.
-*   **Raises:**
-    *   `ValueError`: If `guids` is not a list, if `guids` is empty, or if any GUID is not found.
-
-### `core(guids, missingness=0.0, return_counts=False)`
+The Ardal framework provides modular, high-performance operations for binary SNP matrices and associated metadata in pathogen genomics. The following API documentation outlines the purpose and usage of each core module.
 
-*   **Description:** Takes a set of GUIDs and returns alleles common to this subset.
-*   **Parameters:**
-    *   `guids` (list): A list of GUIDs.
-    *   `missingness` (float, optional): The maximum proportion of missingness allowed (between 0.0 and 1.0). Defaults to `0.0`.
-    * `return_counts` (bool, optional): Whether to return a dictionary containing counts on the number of guids which exhibit this allele. Defaults to `False`.
-*   **Returns:**
-    *   `set`: A set of core alleles.
-*   **Raises:**
-    *   `ValueError`: If `guids` is not a list or set, if `guids` is empty, if any GUID is not found, or if `missingness` is not between 0 and 1.
-
-### `accessory(guids, missingness=0.0, return_counts=False)`
+---
 
-*   **Description:** Takes a set of GUIDs and returns the accessory alleles (the symmetric set of the core alleles).
-*   **Parameters:**
-    *   `guids` (list): A list of GUIDs.
-    *   `missingness` (float, optional): The maximum proportion of missingness allowed (between 0.0 and 1.0). Defaults to `0.0`.
-    * `return_counts` (bool, optional): Whether to return a dictionary containing counts on the number of guids which exhibit this allele. Defaults to `False`.
-*   **Returns:**
-    *   `set`: A set of accessory alleles.
-*   **Raises:**
-    *   `ValueError`: If `guids` is not a list or set, if `guids` is empty, if any GUID is not found, or if `missingness` is not between 0 and 1.
+## `Ardal`
+**Purpose**: Main user-facing interface to the Ardal API. Constructs a wrapped `HybridMatrix` and exposes submodules for I/O, querying, statistics, and comparison.
 
-### `allele(alleles)`
+### Constructor:
+```python
+Ardal(data_source: str,
+      use_roaring_if_sparse: bool = True,
+      density_threshold: float = 0.02,
+      force_roaring: bool = False,
+      __ref: bool = False,
+      file_format: str = None)
+```
 
-*   **Description:** Takes a set of alleles and returns all GUIDs containing all of those alleles.
-*   **Parameters:**
-    *   `alleles` (list): A list of alleles.
-*   **Returns:**
-    *   `set`: A set of GUIDs.
-*   **Raises:**
-    *   `ValueError`: If `alleles` is not a list or set, if `alleles` is empty, or if any allele is not found.
+### Attributes:
+- `.io`: Instance of `ArdalIO` for data export/import
+- `.get`: Instance of `ArdalGet` for matrix subsetting and introspection
+- `.allele`: Instance of `ArdalAllele` for SNP querying
+- `.compare`: Instance of `ArdalCompare` for pairwise distances and neighbourhoods
+- `.stats`: Instance of `ArdalStats` for statistical analysis
 
-### `matchAlleleNames(expression)`
-
-*   **Description:** Returns all allele names that match the given expression with wildcards.
-*   **Parameters:**
-    *   `expression` (str): A string containing the expression to match (e.g., "SNP*", "SNP1", "SNP[1-5]").
-*   **Returns:**
-    *   `set`: A set of matching allele names.
-*   **Raises:**
-    *   `ValueError`: If `expression` is not a string.
-
-### `subsetbyGUID(guid_list)`
+**Notes**:
+- Internally uses `HybridMatrix` from the `_ardal` C++ backend.
+- Automatically detects and constructs Roaring or bitpacked representations.
+- Performs an initial `matrixStats()` printout for user feedback.
 
-*   **Description:** Takes a list of GUIDs and subsets the allele matrix to include only these GUIDs, allowing for standard operations. Returns an Ardal object with the subsetted matrix.
-*   **Parameters:**
-    * `guid_list` (list): A list of GUIDs.
-* **Returns:**
-    * `None`: This function is not yet implemented.
+---
 
-### `toDict()`
+## `ArdalAllele`
+**Purpose**: Provides allele-centric queries on the binary SNP matrix.
 
-*   **Description:** Returns a dictionary containing present allele IDs mapped to their GUID.
-* **Returns:**
-    * `None`: This function is not yet implemented.
+### Methods:
 
-### `stats()`
+#### `unique(guids: list, force_bit_backend: bool = False) -> dict`
+Find SNPs unique to each GUID (present in one, absent in all others).
+- **Input**: list of GUIDs
+- **Returns**: `{guid: set of unique SNPs}`
+- **Raises**: `ValueError` on invalid input
 
-*   **Description:** Returns a dictionary containing information about the database and its size in memory.
-*   **Returns:**
-    *   `dict`: A dictionary containing statistics about the `Ardal` object, including:
-        *   `n_guids`: The number of GUIDs.
-        *   `n_alleles`: The number of alleles.
-        *   `matrix_size`: The size of the allele matrix in memory (human-readable format).
+#### `guidsWithAlleles(alleles: list, force_bit_backend: bool = False) -> set`
+Find GUIDs that contain *all* specified alleles.
+- **Input**: list/set of allele IDs
+- **Returns**: set of GUIDs
 
-### `getMatrix()`
+#### `matchNames(expression: str) -> set`
+Wildcard pattern match on allele names.
+- `*` is used for globbing
 
-*   **Description:** Returns the allele matrix.
-*   **Returns:**
-    *   `np.array`: The allele matrix as a NumPy array.
+---
 
-### `getHeaders()`
+## `ArdalCompare`
+**Purpose**: Distance and neighbourhood computation.
 
-*   **Description:** Returns the headers.
-*   **Returns:**
-    *   `dict`: The headers as a dictionary.
+### Methods:
 
-### `snpCount()`
+#### `pairwise(metric='hamming', use_simd=True, threads=1, force_bit_backend=False) -> pd.DataFrame`
+Calculate all-vs-all distance matrix.
+- **Metrics**: `'hamming'`, `'jaccard'`, `'inner_product'`
+- **Returns**: `pandas.DataFrame`
+- **Raises**: `MemoryError`, `ValueError`
 
-*   **Description:** Returns a dictionary of SNP counts for each GUID.
-*   **Returns:**
-    *   `dict`: A dictionary where keys are GUIDs and values are their SNP counts.
+#### `snvNeighbourhood(guid: str, n: int) -> dict`
+Find GUIDs within `n` differing SNP positions (by parsed string position).
+- **Warning**: Not production ready, assumes `{ref}{pos}{alt}` allele ID format
 
-### `toDataFrame()`
+#### `neighbourhood(guid: str, n: int, use_simd=True, threads=1, force_bit_backend=False) -> dict`
+Hamming-distance neighbourhood within `n` allelic differences.
 
-*   **Description:** Returns the allele matrix as a Pandas DataFrame.
-*   **Returns:**
-    *   `pd.DataFrame`: The allele matrix as a Pandas DataFrame.
+---
 
-### `flushCache()`
+## `ArdalGet`
+**Purpose**: Matrix subsetting, conversion, and summarisation.
 
-*   **Description:** Flushes the distance cache.
+### Methods:
 
-## ArdalParser Class
+#### `subset(guid_list=[], allele_list=[]) -> list[np.ndarray, dict]`
+Subset matrix by GUID and/or allele.
+- **Returns**: `[new_matrix, new_headers]`
+- **Raises**: `ParameterError`, `InvalidGUIDQueryError`, `InvalidAlleleQueryError`
 
-The `ArdalParser` class is responsible for parsing allele matrix data from various file formats.
+#### `matrixStats(print_stats=False) -> dict`
+Return metadata and memory stats for the matrix.
 
-### `__init__(input_file_structure, file_format=None, prefix=None)`
+#### `density() -> float`
+Return sparsity ratio of the matrix.
 
-*   **Description:** Constructor for the `ArdalParser` class.
-*   **Parameters:**
-    *   `input_file_structure` (str or list): The path to the data file or a list containing the headers and matrix.
-    *   `file_format` (str, optional): The format of the data file (e.g., "csv", "parquet", "npy", "json"). If `None`, the format is inferred from the file extension. Defaults to `None`.
-    *   `prefix` (str, optional): A prefix (currently unused). Defaults to `None`.
-* **Raises:**
-    * `ValueError`: If the file format is invalid, or if the input file structure is invalid.
+#### `bitMatrix() -> np.ndarray`
+Return matrix as dense bit array.
 
-## AlleleMatrix Class
+#### `roaringMatrix(decode=True) -> dict`
+Return roaring bitmap matrix.
+- **Raises**: `RoaringError` if not initialised with roaring
 
-The `AlleleMatrix` class is a C++ class (with Python bindings) that efficiently stores and manipulates the allele matrix data. It is primarily used internally by the `Ardal` class.
+#### `headers() -> dict`
+Return headers (metadata) dictionary.
 
-### `__init__(matrix)`
+#### `snpCount() -> dict`
+Return SNP count per GUID.
 
-*   **Description:** Constructor for the `AlleleMatrix` class.
-*   **Parameters:**
-    *   `matrix` (`pybind11::array_t<uint8_t>`): A 2D NumPy array representing the allele matrix.
-*   **Raises:**
-    *   `std::runtime_error`: If the matrix is not 2D, if the matrix dimensions are too large, or if the matrix data type is not `uint8`.
+---
 
-### `access(coords)`
+## `ArdalIO`
+**Purpose**: Matrix I/O, conversion to formats.
 
-*   **Description:** Accesses elements in the matrix at specified coordinates.
-*   **Parameters:**
-    *   `coords` (`pybind11::array_t<size_t>`): A 2D NumPy array of coordinates (shape (k, 2)), where each row represents a (row, col) coordinate pair.
-*   **Returns:**
-    *   `pybind11::array_t<uint8_t>`: A 1D NumPy array containing the elements at the specified coordinates.
-*   **Raises:**
-    *   `std::runtime_error`: If the coordinates array is not 2D or does not have a shape of (k, 2), or if any coordinate is out of bounds.
+### Methods:
 
-### `accessGUID(guid_index)`
+#### `toDataFrame() -> pd.DataFrame`
+Convert matrix to Pandas DataFrame.
 
-*   **Description:** Accesses the set of SNPs for a given GUID.
-*   **Parameters:**
-    *   `guid_index` (int): The index of the GUID (row) in the matrix.
-*   **Returns:**
-    *   `std::set<int>`: A set containing the indices of the SNPs present in the specified GUID.
+#### `toDict(force_bit_backend=False) -> dict`
+Return dictionary `{guid: list of alleles}`
 
-### `getMatrix()`
+#### `write(file_path, output_prefix, npz=False)`
+Save matrix to disk (as `.npy` or `.npz` + headers).
+- **Raises**: `MatrixWriteError`
 
-*   **Description:** Returns the allele matrix.
-*   **Returns:**
-    *   `pybind11::array_t<uint8_t>`: A 2D NumPy array representing the allele matrix.
+#### `makeFastas(guids=[], ref=None, allele_id_format="{ref}.{chr}.{start}.{alt}")`
+Experimental. Generate simulated FASTA per sample using SNPs.
 
-### `getMass()`
+---
 
-*   **Description:** Returns the mass of each row in the matrix.
-*   **Returns:**
-    *   `std::vector<int>`: A vector containing the mass of each row in the matrix.
+## `ArdalStats`
+**Purpose**: Statistical measures on SNP distribution.
 
-### `hamming()`
+### Methods:
 
-*   **Description:** Calculates the Hamming distances between all pairs of rows.
-*   **Returns:**
-    *   `pybind11::array_t<int>`: A 1D NumPy array representing the condensed distance matrix containing the pairwise Hamming distances.
+#### `af(guids=[]) -> dict`
+Compute allele frequency across provided GUIDs (or all).
 
-### `jaccard()`
+#### `alleleEntropy() -> dict`
+Shannon entropy for each allele.
 
-*   **Description:** Calculates the Jaccard distances between all pairs of rows.
-*   **Returns:**
-    *   `pybind11::array_t<double>`: A 1D NumPy array representing the condensed distance matrix containing the pairwise Jaccard distances.
+#### `alleleCooc(allele_indices=[], threshold=0.95, threads=1) -> dict`
+Return alleles co-occurring above threshold with specified alleles (or all).
 
-### `neighbourhood(row_coord, epsilon)`
+#### `snpInform(guids, metric='kullbackleibler') -> dict`
+Score SNPs by in-group vs out-group discriminative power.
+- **Metrics**: `'kullbackleibler'`, `'jensenshannon'`, `'informationgain'`
 
-*   **Description:** Finds the epsilon-neighborhood of a row using Hamming distance.
-*   **Parameters:**
-    *   `row_coord` (size_t): The index of the target row.
-    *   `epsilon` (int): The maximum Hamming distance threshold.
-*   **Returns:**
-    *   `pybind11::array_t<int>`: A 1D NumPy array containing the indices of the rows that are within the epsilon-neighborhood of the target row.
-*   **Raises:**
-    *   `std::runtime_error`: If `row_coord` is out of range, or if `epsilon` is negative.
+#### `testSnpAssociations(...)`
+Stub for future statistical tests (chi2, Fisher’s exact).
 
-### `neighbourhoodSIMD(row_coord, epsilon)`
+---
 
-*   **Description:** Finds the epsilon-neighborhood of a row using Hamming distance (SIMD optimized).
-*   **Parameters:**
-    *   `row_coord` (size_t): The index of the target row.
-    *   `epsilon` (int): The maximum Hamming distance threshold.
-*   **Returns:**
-    *   `pybind11::list`: A list of tuples, where each tuple contains the index of a neighboring row and its Hamming distance to the target row.
-*   **Raises:**
-    *   `std::runtime_error`: If `row_coord` is out of range, or if `epsilon` is negative.
+## `ArdalParser`
+**Purpose**: Load matrix + headers from disk or memory.
 
-### `gatherSNPs(guid_indices)`
+### Constructor:
+```python
+ArdalParser(input_data_structure, file_format=None, prefix=None)
+```
+- Supports CSV, Parquet, NPY/JSON pair, or in-memory `[np.ndarray, dict]`
 
-*   **Description:** Gathers SNPs from multiple GUIDs.
-*   **Parameters:**
-    *   `guid_indices` (`const pybind11::array_t<int>`): A NumPy array containing the indices of the GUIDs.
-*   **Returns:**
-    *   `std::vector<int>`: A vector containing the indices of all SNPs present in the specified GUIDs.
+### Attributes:
+- `matrix`: ndarray allele matrix
+- `headers`: dict with keys `guids`, `alleles`
 
-### `getMass()`
+---
 
-*   **Description:** Gets the mass of each row in the matrix.
-*   **Returns:**
-    *   `std::vector<int>`: A vector containing the mass of each row in the matrix.
+## Utility Functions (from `utilities.py`)
 
-### `flushCache()`
+- `checkGUIDs(guids, headers, filter=False)`
+- `checkAlleles(alleles, headers, filter=False)`
+- `encodeGuid(guid, headers) -> int`
+- `decodeGuid(index, headers) -> str`
+- `encodeAllele(allele, headers) -> int`
+- `decodeAllele(index, headers) -> str`
+- `decodeAlleleID(allele_id, allele_id_format) -> tuple`
 
-*   **Description:** Clears (flushes) the Hamming distance cache.
+---
+
+## Notes
+- All methods assume headers contain correct `guids` and `alleles` keys.
+- BitMatrix backend is used by default unless RoaringMatrix is enabled and appropriate.
+- Roaring matrix must be explicitly enabled at object creation.
+
+---
+
+For advanced usage and performance tuning (e.g. SIMD, multi-threading, cache tuning), refer to the `BitMatrix` and `HybridMatrix` C++ bindings exposed in the backend.

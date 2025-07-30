@@ -31,32 +31,24 @@ class ArdalGet:
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
         ## check input
-        if not isinstance(guid_list, list):
-            raise ValueError("guid_list must be a list.")
-        if not isinstance(allele_list, list):
-            raise ValueError("allele_list must be a list.")
         if len(guid_list) == 0 and len(allele_list) == 0:
-            raise ValueError("guid_list and allele_list cannot both be empty.")
+            raise ParameterError("guid_list and allele_list cannot both be empty.")
 
         ## check GUIDs
         if guid_list:
-            final_guids = checkGUIDs(guid_list, self._headers)
-            if not final_guids:
-                raise ValueError("None of the provided GUIDs were found in the matrix.")
+            checkGUIDs(guid_list, self._headers)
         else:
-            final_guids =  self._headers["guids"]
+            guid_list = self._headers["guids"]
 
         ## check alleles
         if allele_list:
-            final_alleles = self._checkAlleles(allele_list)
-            if not final_alleles:
-                raise ValueError("None of the provided alleles were found in the matrix.")
+            checkAlleles(allele_list, self._headers)
         else:
-            final_alleles =  self._headers["alleles"]
+            allele_list = self._headers["alleles"]
 
         ## subset the DataFrame
         ## TODO: this is pretty grim, could be done better in C++
-        subset_df = pd.DataFrame(self._matrix.getBitMatrix(), index=self._headers["guids"], columns=self._headers["alleles"]).loc[final_guids, final_alleles]
+        subset_df = pd.DataFrame(self._matrix.getBitMatrix(), index=self._headers["guids"], columns=self._headers["alleles"]).loc[guid_list, allele_list]
 
         ## create new headers and matrix for the new Ardal object
         new_headers = {"guids": subset_df.index.tolist(), "alleles": subset_df.columns.tolist()}
@@ -142,7 +134,7 @@ class ArdalGet:
                 return rormat
                 
         else:
-            raise ValueError("Ardal object was instantialised with 'use_roaring_if_sparse=False'. Cannot retrieve roaring matrix.")
+            raise RoaringError("Ardal object was instantialised with 'use_roaring_if_sparse=False'. Cannot retrieve roaring matrix.")
     
 
 

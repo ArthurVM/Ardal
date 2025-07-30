@@ -128,7 +128,7 @@ class ArdalStats:
                        guids : list ) -> dict:
         """ Computes the Kullbeck Liebler divergence between the in group (input guids) and out group (all others)
         allele frequency distributions for each allele in the matrix.
-        D_{kl}(P||Q) = sum_{x\inX}(P(x) * log2(P(x)/Q(x)))
+        D_{kl}(P||Q) = sum_{x in X}(P(x) * log2(P(x)/Q(x)))
         """
         guid_coords = [encodeGuid(guid, self._headers) for guid in guids]
         kl_divergence = self._matrix.klDivergence(guid_coords)

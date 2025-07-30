@@ -1,15 +1,3 @@
-import re
-import os
-import json
-import pandas as pd
-import numpy as np
-from humanize import naturalsize
-from sys import stdout, stderr, getsizeof
-from scipy.spatial.distance import pdist, squareform
-from collections import defaultdict, namedtuple
-from typing import List, Union
-
-from . import _ardal
 from .core.ArdalParser import ArdalParser
 from .core.ArdalIO import ArdalIO
 from .core.ArdalGet import ArdalGet
@@ -17,6 +5,7 @@ from .core.ArdalAllele import ArdalAllele
 from .core.ArdalCompare import ArdalCompare
 from .core.ArdalStats import ArdalStats
 from .core.utilities import *
+from .exceptions.exceptions import *
 
 
 class Ardal(object):
@@ -32,6 +21,8 @@ class Ardal(object):
                   file_format : str=None ):
         """ Ardal constructor
         """
+        from . import _ardal
+
         super(Ardal, self).__init__()
 
         self.__hybrid_matrix = None
@@ -52,7 +43,7 @@ class Ardal(object):
             self.__headers = parser.headers
         else:
             ## raise an error if parsing fails to prevent unexpected behaviour down the line
-            raise ValueError(f"Failed to parse data from: {data_source}") 
+            raise MatrixParseError(f"Failed to parse data from: {data_source}") 
         
         self.roaring = self.__hybrid_matrix.roaringEnabled()
 

@@ -2,12 +2,18 @@
 This module provides utility functions for working with GUIDs and alleles in the Ardal framework.
 """
 
+from ..exceptions.exceptions import *
+
 
 def checkGUIDs( guids : list,
                 headers : dict,
                 filter : bool = False ) -> list:
     """ Check guids are present within the matrix and construct a list of present guids to proceed with
     """
+    ## check input
+    if not isinstance(guids, list):
+        raise InvalidTypeError("guid_list must be a list.")
+    
     absent_guids = []
     present_guids = []
     for id in guids:
@@ -20,7 +26,7 @@ def checkGUIDs( guids : list,
         return present_guids
 
     if len(absent_guids) > 0:
-        raise ValueError(f"guids {absent_guids} not found in allele matrix.")
+        raise InvalidGUIDQueryError(f"guids {absent_guids} not found in allele matrix.")
 
 
 def checkAlleles( alleles : list,
@@ -28,6 +34,10 @@ def checkAlleles( alleles : list,
                   filter : bool = False ) -> list:
     """ Check alleles are present within the matrix and construct a list of present alleles to proceed with
     """
+    ## check input
+    if not isinstance(alleles, list):
+        raise InvalidTypeError("allele_list must be a list.")
+    
     absent_alleles = []
     present_alleles = []
     for allele_id in alleles:
@@ -40,7 +50,7 @@ def checkAlleles( alleles : list,
         return present_alleles
     
     if len(absent_alleles) > 0:
-        raise ValueError(f"alleles {absent_alleles} not found in allele matrix.")
+        raise InvalidAlleleQueryError(f"alleles {absent_alleles} not found in allele matrix.")
 
 
 def encodeGuid( guid : str,
@@ -69,3 +79,22 @@ def decodeAllele( col_coord : int,
     """ Decode a column coordinate to its corresponding allele in the headers dictionary.
     """
     return headers["alleles"][col_coord]
+
+
+def decodeAlleleID( allele_id : str,
+                    allele_id_format : str ) -> tuple:
+    """ Decodes an allele ID string into its constituent parts based on a format string.
+
+    Args:
+        allele_id (str): The allele ID string to decode (e.g., "A.chr1.100.T").
+        allele_id_format (str): The format string defining the structure of the allele ID,
+                                 using placeholders like {ref}, {chr}, {start}, {end}, {alt}.
+                                 (e.g., "{ref}.{chr}.{start}.{alt}").
+
+    Returns:
+        tuple: A tuple containing the decoded positional tuple [chr, start, end, ref, alt].
+
+    Raises:
+        ValueError: If the allele_id does not match the allele_id_format.
+    """
+    None
