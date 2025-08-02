@@ -1,10 +1,10 @@
 import numpy as np
 import os
-from scipy.spatial.distance import squareform
-from humanize import naturalsize
+from collections import defaultdict
 import pandas as pd
 
 from .utilities import *
+from ..exceptions.exceptions import *
 
 
 # core/ArdalCompare.py
@@ -17,37 +17,101 @@ class ArdalCompare:
         self.roaring = roaring_enabled
 
     def pairwise( self,
+                  guid_ids : list = None,
+                  allele_ids : list = None,
+                  intervals : list = None,
+                  coords_bed : str = None,
                   metric: str = "hamming",
                   use_simd : bool=True,
                   threads : int=1,
-                  force_bit_backend: bool=False ) -> pd.DataFrame:
-        """ Calculates a pairwise distance matrix.
+                  force_bit_backend: bool=False,
+                  allele_id_format : str = "{chr}.{start}.{ref}.{alt}") -> pd.DataFrame:
+        """ Calculates the distance between pairs of guids. If guids_ids are provided then it will only compute distances between
+        specified guids. If allele_ids are provided then it will only compute using specified alleles. If intervals are provided then
+        it will find alleles which fall within the given genomic intervals and only compute using these alleles.
+
         Pairwise distance can be calculated using Hamming, Jaccard, or Inner Product (number of shared SNPs) functions.
         If an empty list if provided (as by default) then the pairwise distance of all samples within the matrix will be calculated.
-        """
+        """    
+        naturalsize = require_package("humanize", attr="naturalsize")
+    
         if not isinstance(metric, str):
-            raise ValueError("metric must be a string.")
+            raise TypeError("metric must be a string.")
         if not isinstance(use_simd, bool):
-            raise ValueError("use_simd must be a boolean.")
+            raise TypeError("use_simd must be a boolean.")
         if not isinstance(threads, int):
-            raise ValueError("threads must be an integer.")
+            raise TypeError("threads must be an integer.")
         if not isinstance(force_bit_backend, bool):
-            raise ValueError("force_bit_backend must be a boolean.")
+            raise ParameterError("force_bit_backend must be a boolean.")
         if threads < 1:
-            raise ValueError("threads must be at least 1.")
+            raise ParameterError("threads must be at least 1.")
+        
+        kwargs = { "metric" : metric,
+                   "use_simd" : use_simd,
+                   "threads" : threads,
+                   "force_bit_backend" : force_bit_backend }
+        
+        ## specify whether to run local mode
+        local_flag = False
+
+        ## local params
+        if allele_ids and intervals:
+            raise ParameterError("Cannot run pairwise using both allele_ids and intervals kwargs. Please provide only one.")
+        
+        if coords_bed and not intervals:
+            raise ParameterError("Please provide a set of intervals when using bed allele coordinates.")
+
+        local_args = defaultdict(list)
+        
+        ## check for local mode
+        if guid_ids or allele_ids or intervals:
+            local_flag = True
+
+        ## get guids to run on
+        if guid_ids:
+            checkGUIDs(guid_ids, self._headers)
+            local_args["guid_ids"] = guid_ids
+        else:
+            guid_ids = self._headers['guids']
+            local_args["guid_ids"] = guid_ids
+
+        ## get alleles to run on
+        if allele_ids:
+            checkAlleles(allele_ids, self._headers)
+            local_args["allele_ids"] = allele_ids
+        else:
+            local_args["allele_ids"] = self._headers['alleles']
+
+        if intervals:
+            allele_ids = getIntervalAlleles(intervals, self._headers, allele_id_format, coords_bed)
+            local_args["allele_ids"] = allele_ids
 
         ## check there is enough memory to store the pairwise matrix
-        mat_size = len(self._headers["guids"])**2
+        mat_size = len(guid_ids)**2
         total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
         if mat_size * 8 > total_memory * 0.8: ## 8 bytes per float64, 80% of total memory
-            raise MemoryError(f"Pairwise distance matrix of scale {len(self._headers['guids'])}x{len(self._headers['guids'])} will requre {naturalsize(mat_size * 8, binary=True)} memory and will exceed system memory limits. Please subset your data.")
+            raise MemoryError(f"Pairwise distance matrix of scale {len(guid_ids)}x{len(guid_ids)} will requre {naturalsize(mat_size * 8, binary=True)} memory and will exceed system memory limits. Please subset your data.")
 
         ## check the specified distance function is valid
         accepted_dist_functions = ["jaccard", "hamming", "inner_product"]
         if metric not in accepted_dist_functions:
-            raise ValueError(f"{metric} not an accepted distance function. Accepted distance functions: {accepted_dist_functions}")
+            raise ParameterError(f"{metric} not an accepted distance function. Accepted distance functions: {accepted_dist_functions}")
         
-        ## calculate the distance matrix using _ardal
+        if not local_flag:
+            return self._pairwise_global( **kwargs )
+
+        if local_flag:
+            return self._pairwise_local( **local_args,
+                                         **kwargs )
+    
+
+    def _pairwise_global( self,
+                         metric: str = "hamming",
+                         use_simd : bool=True,
+                         threads : int=1,
+                         force_bit_backend: bool=False ) -> pd.DataFrame:
+        squareform = require_package("scipy", "scipy.spatial.distance", attr="squareform")
+        
         if metric == "jaccard":
             dist_tri = self._matrix.jaccard(use_simd=use_simd,
                                             threads=threads,
@@ -66,9 +130,46 @@ class ArdalCompare:
                                                  force_bit_backend=force_bit_backend)
             dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
         
-        dist_df = pd.DataFrame(dist_matrix, columns=self._headers["guids"], index=self._headers["guids"])
+        return pd.DataFrame(dist_matrix, columns=self._headers["guids"], index=self._headers["guids"])
+
+
+    def _pairwise_local( self,
+                         guid_ids : list = None,
+                         allele_ids : list = None,
+                         metric: str = "hamming",
+                         use_simd : bool=True,
+                         threads : int=1,
+                         force_bit_backend: bool=False ) -> pd.DataFrame:
+        squareform = require_package("scipy", "scipy.spatial.distance", attr="squareform")
         
-        return dist_df
+        row_indices = [encodeGuid(g, self._headers) for g in guid_ids]
+        col_indices = [encodeAllele(a, self._headers) for a in allele_ids]
+        
+        if metric == "jaccard":
+            dist_tri = self._matrix.jaccard_subset(row_indices=row_indices,
+                                                   col_indices=col_indices,
+                                                   use_simd=use_simd,
+                                                   threads=threads,
+                                                   force_bit_backend=force_bit_backend)
+            dist_matrix = np.array(squareform(dist_tri), dtype=np.float32)
+
+        elif metric == "hamming":
+            dist_tri = self._matrix.hamming_subset(row_indices=row_indices,
+                                                   col_indices=col_indices,
+                                                   use_simd=use_simd,
+                                                   threads=threads,
+                                                   force_bit_backend=force_bit_backend)
+            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
+
+        elif metric == "inner_product":
+            dist_tri = self._matrix.innerProduct_subset(row_indices=row_indices,
+                                                        col_indices=col_indices,
+                                                        use_simd=use_simd,
+                                                        threads=threads,
+                                                        force_bit_backend=force_bit_backend)
+            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
+        
+        return pd.DataFrame(dist_matrix, columns=guid_ids, index=guid_ids)
     
 
     def snvNeighbourhood( self,
@@ -106,11 +207,11 @@ class ArdalCompare:
         """
 
         if not isinstance(guid, str):
-            raise ValueError("guid must be a string.")
+            raise TypeError("guid must be a string.")
         if not isinstance(n, int):
-            raise ValueError("n must be an integer.")
+            raise TypeError("n must be an integer.")
         if n < 0:
-            raise ValueError("n must be non-negative.")
+            raise ParameterError("n must be non-negative.")
         if n == 0:
             return {}
         

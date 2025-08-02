@@ -35,18 +35,33 @@ public:
     BitMatrix( py::array_t<uint8_t> input_matrix );
 
     // distance functions
-    py::array_t<uint32_t> hamming( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
-    py::array_t<int> innerProduct( bool fill_cache = false, bool use_simd = true, int threads = 1 ) const;
+    py::array_t<uint32_t> hamming( bool fill_cache = false,
+                                   bool use_simd = true,
+                                   int threads = 1 ) const;
+    py::array_t<uint32_t> hamming_subset( const std::vector<size_t>& row_indices,
+                                          const std::vector<size_t>& col_indices,
+                                          bool use_simd,
+                                          int threads ) const;
+    py::array_t<int> innerProduct( bool fill_cache = false,
+                                   bool use_simd = true,
+                                   int threads = 1 ) const;
  
     // neighbourhood functions
-    py::array_t<int64_t> neighbourhood( size_t row_idx, int epsilon, bool use_simd = true, int threads = 1 ) const;
-    py::list innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd = true ) const;
+    py::array_t<int64_t> neighbourhood( size_t row_idx,
+                                        int epsilon,
+                                        bool use_simd = true,
+                                        int threads = 1 ) const;
+    py::list innerProductNeighbourhood( size_t row_idx,
+                                        int ip_epsilon,
+                                        bool use_simd = true ) const;
 
     // set operation functions
-    std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd = true ) const;
+    std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices,
+                                          bool use_simd = true ) const;
 
     // statistical functions
-    py::dict bitCooccurrence( double threshold = 0.95, int threads = 1 ) const;
+    // py::dict bitCooccurrence( double threshold = 0.95,
+    //                           int threads = 1 ) const;
     py::array_t<double> colFrequency( std::vector<size_t>& row_indices ) const;
     py::array_t<double> columnEntropy( void ) const;
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
@@ -60,6 +75,8 @@ public:
     py::array_t<int> getColumnMasses( void );
     double getDensity( void ) const;
     py::array_t<uint8_t> getBitMatrix( void ) const;
+    py::array_t<uint64_t> getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
+                                                 const std::vector<size_t>& col_indices ) const;
 
 private:
     // bit-packed matrix
@@ -77,16 +94,24 @@ private:
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
     std::vector<uint64_t> getColumnVector(size_t col_idx) const;
     std::vector<size_t> getColSetBitIndices( size_t col_idx ) const;
+    std::vector<std::vector<uint64_t>> subsetPackedMatrix( const std::vector<size_t>& row_indices,
+                                                           const std::vector<size_t>& col_indices ) const;
 
     // distance functions
     uint32_t hammingDistance_scalar( size_t i, size_t j ) const;
     uint32_t hammingDistance_SIMD( size_t i, size_t j ) const;
 
     // neighbourhood functions
-    int epsilonNeighbourhood_scalar( size_t i, size_t j, int epsilon ) const;
-    int epsilonNeighbourhood_SIMD( size_t i, size_t j, int epsilon ) const;
-    int innerProduct_scalar( size_t i, size_t j ) const;
-    int innerProduct_SIMD( size_t i, size_t j ) const;
+    int epsilonNeighbourhood_scalar( size_t i,
+                                     size_t j,
+                                     int epsilon ) const;
+    int epsilonNeighbourhood_SIMD( size_t i,
+                                   size_t j,
+                                   int epsilon ) const;
+    int innerProduct_scalar( size_t i,
+                             size_t j ) const;
+    int innerProduct_SIMD( size_t i,
+                           size_t j ) const;
 
     // statistics helper functions
     double density( void ) const;

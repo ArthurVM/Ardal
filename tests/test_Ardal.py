@@ -7,51 +7,51 @@ from ardal import Ardal, ArdalParser
 from .conftest import *
 
 
-def test_unique(ardal_object):
+def test_uniqueCore(ardal_object):
     """
     Tests the unique method of the ardal class.
     """
 
     ## test case 1: SNPs unique to GUID1 and GUID2
-    unique_snps1 = ardal_object.unique(["GUID1", "GUID2"])
+    unique_snps1 = ardal_object.allele.uniqueCore(["GUID1", "GUID2"])
     assert unique_snps1 == {"SNP1"}
 
     ## test case 2: SNPs unique to GUID3, GUID4, and GUID5
-    unique_snps2 = ardal_object.unique(["GUID3", "GUID4", "GUID5"])
+    unique_snps2 = ardal_object.allele.uniqueCore(["GUID3", "GUID4", "GUID5"])
     assert unique_snps2 == {"SNP2"}
 
     ## test case 3: SNPs unique to GUID6 and GUID7
-    unique_snps3 = ardal_object.unique(["GUID6", "GUID7"])
+    unique_snps3 = ardal_object.allele.uniqueCore(["GUID6", "GUID7"])
     assert unique_snps3 == {"SNP3"}
 
     ### test case 4: SNPs unique to GUID8, GUID9, and GUID10
-    unique_snps4 = ardal_object.unique(["GUID8", "GUID9", "GUID10"])
+    unique_snps4 = ardal_object.allele.uniqueCore(["GUID8", "GUID9", "GUID10"])
     assert unique_snps4 == {"SNP4"}
 
     ## test case 5: SNPs unique to GUID1, GUID2, GUID3, GUID4, GUID5, GUID6, GUID7
-    unique_snps5 = ardal_object.unique(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7"])
+    unique_snps5 = ardal_object.allele.uniqueCore(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7"])
     assert unique_snps5 == {"SNP6"}
 
     ## test case 6: SNPs unique to GUID6, GUID7, GUID8, GUID9, GUID10
-    unique_snps6 = ardal_object.unique(["GUID6", "GUID7", "GUID8", "GUID9", "GUID10"])
+    unique_snps6 = ardal_object.allele.uniqueCore(["GUID6", "GUID7", "GUID8", "GUID9", "GUID10"])
     assert unique_snps6 == {"SNP9"}
 
     ## test case 7: SNPs unique to GUID1, GUID2, GUID3, GUID4, GUID5, GUID6, GUID7, GUID8, GUID9, GUID10
-    unique_snps7 = ardal_object.unique(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"])
+    unique_snps7 = ardal_object.allele.uniqueCore(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"])
     assert unique_snps7 == {"SNP5", "SNP7"}
 
     ## test case 8: No unique SNPs
-    unique_snps8 = ardal_object.unique(["GUID1", "GUID5"])
+    unique_snps8 = ardal_object.allele.uniqueCore(["GUID1", "GUID5"])
     assert unique_snps8 == set()
 
 
-def test_pairwise(ardal_object):
+def test_pairwise(compare_component):
     """
     Tests the pairwise method of the ardal class.
     """
 
     ## test case 1: Hamming distance
-    dist_matrix = ardal_object.pairwise(metric="hamming")
+    dist_matrix = compare_component.pairwise(metric="hamming")
     assert isinstance(dist_matrix, pd.DataFrame)
     assert dist_matrix.shape == (10, 10)
     assert dist_matrix.to_dict() == {'GUID1': {'GUID1': 0, 'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2, 'GUID6': 4, 'GUID7': 4, 'GUID8': 5, 'GUID9': 5, 'GUID10': 6},
@@ -66,168 +66,154 @@ def test_pairwise(ardal_object):
                                      'GUID10': {'GUID1': 6, 'GUID2': 6, 'GUID3': 6, 'GUID4': 6, 'GUID5': 6, 'GUID6': 4, 'GUID7': 4, 'GUID8': 1, 'GUID9': 1, 'GUID10': 0}}
 
     ## test case 2: Jaccard distance
-    # dist_matrix = ardal_object.pairwise(metric="jaccard")
-    # assert isinstance(dist_matrix, pd.DataFrame)
-    # assert dist_matrix.shape == (10, 10)
+    dist_matrix = compare_component.pairwise(metric="jaccard")
+    assert isinstance(dist_matrix, pd.DataFrame)
+    assert dist_matrix.shape == (10, 10)
 
     ## test case 3: Invalid metric
     with pytest.raises(ValueError):
-        ardal_object.pairwise(metric="invalid")
+        compare_component.pairwise(metric="invalid")
 
 
-def test_neighbourhood(ardal_object):
+def test_neighbourhood(compare_component):
     """
     Tests the neighbourhood method of the ardal class.
     """
 
     ## test case 1: SIMD
-    neighbourhood = ardal_object.neighbourhood("GUID1", n=2, simd=True)
+    neighbourhood = compare_component.neighbourhood("GUID1", n=2, simd=True)
     assert isinstance(neighbourhood, dict)
     assert neighbourhood == {'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2}
 
     ## test case 2: Non-SIMD
-    neighbourhood = ardal_object.neighbourhood("GUID1", n=2, simd=False)
+    neighbourhood = compare_component.neighbourhood("GUID1", n=2, simd=False)
     assert isinstance(neighbourhood, dict)
     assert neighbourhood == {'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2}
 
     ## test case 3: Invalid GUID
     with pytest.raises(ValueError):
-        ardal_object.neighbourhood("INVALID", n=2)
+        compare_component.neighbourhood("INVALID", n=2)
 
 
-def test_core(ardal_object):
+def test_core(allele_component):
     """
     Tests the core method of the ardal class.
     """
 
     ## test case 1: Core alleles
-    core_alleles = ardal_object.core(["GUID1", "GUID2"])
+    core_alleles = allele_component.core(["GUID1", "GUID2"])
     assert isinstance(core_alleles, set)
 
     ## test case 2: Invalid GUID
     with pytest.raises(ValueError):
-        ardal_object.core(["INVALID"])
+        allele_component.core(["INVALID"])
 
 
-def test_accessory(ardal_object):
-    """
-    Tests the accessory method of the ardal class.
-    """
-
-    ## test case 1: Accessory alleles
-    accessory_alleles = ardal_object.accessory(["GUID1", "GUID2"])
-    assert isinstance(accessory_alleles, set)
-
-    ## test case 2: Invalid GUID
-    with pytest.raises(ValueError):
-        ardal_object.accessory(["INVALID"])
-
-
-def test_allele(ardal_object):
+def test_allele(allele_component):
     """
     Tests the allele method of the ardal class.
     """
 
     ## test case 1: SNP1
-    alleles = ardal_object.allele(["SNP1"])
+    alleles = allele_component.allele(["SNP1"])
     assert alleles == {"GUID1", "GUID2"}
 
     ## test case 2: SNP2
-    alleles = ardal_object.allele(["SNP2"])
+    alleles = allele_component.allele(["SNP2"])
     assert alleles == {"GUID3", "GUID4", "GUID5"}
 
     ## test case 3: SNP3
-    alleles = ardal_object.allele(["SNP3"])
+    alleles = allele_component.allele(["SNP3"])
     assert alleles == {"GUID6", "GUID7"}
 
     ## test case 4: SNP4
-    alleles = ardal_object.allele(["SNP4"])
+    alleles = allele_component.allele(["SNP4"])
     assert alleles == {"GUID8", "GUID9", "GUID10"}
 
     ## test case 5: SNP5
-    alleles = ardal_object.allele(["SNP5"])
+    alleles = allele_component.allele(["SNP5"])
     assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"}
 
     ## test case 6: SNP6
-    alleles = ardal_object.allele(["SNP6"])
+    alleles = allele_component.allele(["SNP6"])
     assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7"}
 
     ## test case 7: SNP7
-    alleles = ardal_object.allele(["SNP7"])
+    alleles = allele_component.allele(["SNP7"])
     assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"}
 
     ## test case 8: SNP8
-    alleles = ardal_object.allele(["SNP8"])
+    alleles = allele_component.allele(["SNP8"])
     assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5"}
 
     ## test case 9: SNP9
-    alleles = ardal_object.allele(["SNP9"])
+    alleles = allele_component.allele(["SNP9"])
     assert alleles == {"GUID6", "GUID7", "GUID8", "GUID9", "GUID10"}
 
     ## test case 10: SNP10
-    alleles = ardal_object.allele(["SNP10"])
+    alleles = allele_component.allele(["SNP10"])
     assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9"}
 
     ## test case 10: SNP10
-    alleles = ardal_object.allele(["SNP5", "SNP10"])
+    alleles = allele_component.allele(["SNP5", "SNP10"])
     assert alleles == {'GUID6', 'GUID9', 'GUID2', 'GUID8', 'GUID1', 'GUID3', 'GUID5', 'GUID7', 'GUID4'}
 
     ## test case 11: Invalid Allele
     with pytest.raises(ValueError):
-        ardal_object.allele(["INVALID"])
+        allele_component.allele(["INVALID"])
 
 
-def test_matchAlleleNames(ardal_object):
+def test_matchAlleleNames(allele_component):
     """
     Tests the matchAlleleNames method of the ardal class.
     """
 
     ## test case 1: Match Allele Names
-    matched_alleles = ardal_object.matchAlleleNames("SNP*")
+    matched_alleles = allele_component.matchAlleleNames("SNP*")
     assert isinstance(matched_alleles, set)
 
     ## test case 2: Invalid Input
     with pytest.raises(ValueError):
-        ardal_object.matchAlleleNames(1)
+        allele_component.matchAlleleNames(1)
 
 
-def test_stats(ardal_object):
+def test_stats(get_component):
     """
     Tests the stats method of the ardal class.
     """
 
     ## test case 1: Stats
-    stats = ardal_object.stats()
+    stats = get_component.matrixStats()
     assert isinstance(stats, dict)
 
 
-def test_getMatrix(ardal_object):
+def test_getMatrix(get_component):
     """
     Tests the getMatrix method of the ardal class.
     """
 
     ## test case 1: Get Matrix
-    matrix = ardal_object.getMatrix()
+    matrix = get_component.getMatrix()
     assert isinstance(matrix, np.ndarray)
 
 
-def test_getHeaders(ardal_object):
+def test_getHeaders(get_component):
     """
     Tests the getHeaders method of the ardal class.
     """
 
     ## test case 1: Get Headers
-    headers = ardal_object.getHeaders()
+    headers = get_component.getHeaders()
     assert isinstance(headers, dict)
 
 
-def test_snpCount(ardal_object):
+def test_snpCount(get_component):
     """
     Tests the snpCount method of the ardal class.
     """
 
     ## test case 1: Snp Count
-    snp_count = ardal_object.snpCount()
+    snp_count = get_component.snpCount()
     assert snp_count == {'GUID1': 6,
                          'GUID2': 6,
                          'GUID3': 6,
@@ -240,20 +226,11 @@ def test_snpCount(ardal_object):
                          'GUID10': 4}
 
 
-def test_toDataFrame(ardal_object):
+def test_toDataFrame(get_component):
     """
     Tests the toDataFrame method of the ardal class.
     """
 
     ## test case 1: To Data Frame
-    df = ardal_object.toDataFrame()
+    df = get_component.toDataFrame()
     assert isinstance(df, pd.DataFrame)
-
-
-def test_flushCache(ardal_object):
-    """
-    Tests the flushCache method of the ardal class.
-    """
-
-    ## test case 1: Flush Cache
-    ardal_object.flushCache()

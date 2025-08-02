@@ -45,12 +45,14 @@ HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
 }
 
 
-double HybridMatrix::getDensity() const {
+double HybridMatrix::getDensity( void ) const {
     return density;
 }
 
 
-py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd, int threads, bool force_bit_backend ) const {
+py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd,
+                                             int threads,
+                                             bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->hamming(threads);
     } else {
@@ -59,7 +61,22 @@ py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd, int threads, bool fo
 }
 
 
-py::array_t<double> HybridMatrix::jaccard( bool use_simd, int threads, bool force_bit_backend ) const {
+py::array_t<uint32_t> HybridMatrix::hamming_subset( const std::vector<size_t> row_indices,
+                                                    const std::vector<size_t> col_indices,
+                                                    bool use_simd,
+                                                    int threads,
+                                                    bool force_bit_backend ) const {
+    if (roaring_enabled && !force_bit_backend) {
+        return roaring_backend->hamming_subset(row_indices, col_indices, threads);
+    } else {
+        return bit_backend->hamming_subset(row_indices, col_indices, use_simd, threads);
+    }
+}
+
+
+py::array_t<double> HybridMatrix::jaccard( bool use_simd,
+                                           int threads,
+                                           bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->jaccard(threads);
     } else {
@@ -69,7 +86,9 @@ py::array_t<double> HybridMatrix::jaccard( bool use_simd, int threads, bool forc
 }
 
 
-py::array_t<int> HybridMatrix::innerProduct( bool use_simd, int threads, bool force_bit_backend ) const {
+py::array_t<int> HybridMatrix::innerProduct( bool use_simd,
+                                             int threads,
+                                             bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->innerProduct(threads);
     } else {
@@ -78,7 +97,11 @@ py::array_t<int> HybridMatrix::innerProduct( bool use_simd, int threads, bool fo
 }
 
 
-py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row, int epsilon, bool use_simd, int threads, bool force_bit_backend )  const {
+py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
+                                                  int epsilon,
+                                                  bool use_simd,
+                                                  int threads,
+                                                  bool force_bit_backend )  const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->neighbourhood(row, epsilon, threads);
     } else {
@@ -87,7 +110,10 @@ py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row, int epsilon, bool 
 }
 
 
-py::list HybridMatrix::innerProductNeighbourhood( size_t row, int ip_epsilon, bool use_simd, bool force_bit_backend ) const {
+py::list HybridMatrix::innerProductNeighbourhood( size_t row,
+                                                  int ip_epsilon,
+                                                  bool use_simd,
+                                                  bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->innerProductNeighbourhood(row, ip_epsilon);
     } else {
@@ -96,12 +122,15 @@ py::list HybridMatrix::innerProductNeighbourhood( size_t row, int ip_epsilon, bo
 }
 
 
-std::vector<size_t> HybridMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices, bool use_simd, bool force_bit_backend ) const {
-    if (!force_bit_backend) {
-        return roaring_backend->uniqueSharedBits(row_indices);
-    } else {
-        return bit_backend->uniqueSharedBits(row_indices, use_simd);
-    }
+std::vector<size_t> HybridMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices,
+                                                    bool use_simd,
+                                                    bool force_bit_backend ) const {
+    // if (!force_bit_backend) {
+    //     return roaring_backend->uniqueSharedBits(row_indices);
+    // } else {
+    //     return bit_backend->uniqueSharedBits(row_indices, use_simd);
+    // }
+    return bit_backend->uniqueSharedBits(row_indices, use_simd);
 }
 
 
@@ -115,7 +144,8 @@ py::array_t<double> HybridMatrix::columnEntropy( void ) const {
 }
 
 
-py::dict HybridMatrix::bitCooccurrence_all( double threshold, int threads ) const {
+py::dict HybridMatrix::bitCooccurrence_all( double threshold,
+                                            int threads ) const {
     
     if (roaring_enabled) {
         return roaring_backend->bitCooccurrence_all(threshold, threads);
@@ -125,7 +155,9 @@ py::dict HybridMatrix::bitCooccurrence_all( double threshold, int threads ) cons
 }
 
 
-py::dict HybridMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const {
+py::dict HybridMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_indices,
+                                               double threshold,
+                                               int threads ) const {
     
     if (roaring_enabled) {
         return roaring_backend->bitCooccurrence_subset(col_indices, threshold, threads);
@@ -150,7 +182,8 @@ py::array_t<double> HybridMatrix::informationGain( const std::vector<size_t>& in
 }
 
 
-py::array_t<size_t> HybridMatrix::getSetBitIndices( size_t row_idx, bool force_bit_backend ) const {
+py::array_t<size_t> HybridMatrix::getSetBitIndices( size_t row_idx,
+                                                    bool force_bit_backend ) const {
     if (roaring_enabled && !force_bit_backend) {
         return roaring_backend->getSetBitIndices(row_idx);
     } else {
@@ -182,6 +215,5 @@ py::list HybridMatrix::getRoaringMatrix( void ) const {
 bool HybridMatrix::roaringEnabled( void ) const {
     return roaring_enabled;
 }
-
 
 } // namespace _ardal

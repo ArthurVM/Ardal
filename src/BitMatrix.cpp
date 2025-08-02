@@ -35,7 +35,7 @@ namespace _ardal {
  *   - If the matrix dimensions are too large, potentially causing an overflow.
  *   - If the input matrix contains values other than 0 or 1.
  ****************************************************************************************************/
-BitMatrix::BitMatrix(py::array_t<uint8_t> input_matrix) {
+BitMatrix::BitMatrix( py::array_t<uint8_t> input_matrix ) {
     auto buf = input_matrix.request();
 
     if (buf.ndim != 2) {
@@ -121,6 +121,23 @@ std::vector<size_t> BitMatrix::getRowSetBitIndices( size_t row_idx ) const {
 }
 
 
+/****************************************************************************************************
+ * ardal::BitMatrix::getColSetBitIndices
+ *
+ * Get the indices of set bits for a given column.
+ *
+ * This function retrieves the set of row indices that are present (i.e., have a value of 1)
+ * in a specified column of the matrix.
+ *
+ * INPUT:
+ *  col_idx (size_t) : The index of the column in the matrix.
+ *
+ * OUTPUT:
+ *  std::vector<size_t> : A vector containing the indices of the set bits in the specified column.
+ *
+ * EXCEPTIONS:
+ *  std::out_of_range : If the column index is out of bounds (via getBit).
+ ****************************************************************************************************/
 std::vector<size_t> BitMatrix::getColSetBitIndices( size_t col_idx ) const {
     std::vector<size_t> col_indices;
     col_indices.reserve(_col_masses[col_idx]);
@@ -153,7 +170,7 @@ std::vector<size_t> BitMatrix::getColSetBitIndices( size_t col_idx ) const {
  * EXCEPTIONS:
  *  std::out_of_range : If the column index is out of bounds.
  ****************************************************************************************************/
-std::vector<uint64_t> BitMatrix::getColumnVector(size_t col_idx) const {
+std::vector<uint64_t> BitMatrix::getColumnVector( size_t col_idx ) const {
     if (col_idx >= _n_cols) {
         throw std::out_of_range("Column index out of bounds.");
     }
@@ -295,6 +312,82 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
 
 
 /****************************************************************************************************
+ * ardal::BitMatrix::hamming_subset
+ *
+ * Calculate the Hamming distances between pairs of rows from a specified subset of rows and columns.
+ *
+ * This function first creates a sub-matrix based on the provided row and column indices. It then
+ * calculates the pairwise Hamming distances between all rows of this sub-matrix. The results
+ * are returned as a condensed distance matrix.
+ *
+ * INPUT:
+ *  row_indices (const std::vector<size_t>&) : A vector of row indices to include in the sub-matrix.
+ *  col_indices (const std::vector<size_t>&) : A vector of column indices to include in the sub-matrix.
+ *
+ * PARAMETERS:
+ *  use_simd (bool) : A boolean flag to specify whether to use SIMD for vectorised distance calculation.
+ *  threads (int)   : The number of threads to use for parallel computation.
+ *
+ * OUTPUT:
+ *  py::array_t<uint32_t> : A 1D NumPy array representing the condensed distance matrix.
+ *
+ * EXCEPTIONS:
+ *  std::runtime_error : If the thread count is not positive.
+ ****************************************************************************************************/
+py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_indices,
+                                                 const std::vector<size_t>& col_indices,
+                                                 bool use_simd,
+                                                 int threads ) const {
+    if (threads <= 0) {
+        throw std::runtime_error("Thread count must be positive.");
+    }
+
+    std::vector<std::vector<uint64_t>> submatrix = subsetPackedMatrix(row_indices, col_indices);
+    const size_t subm_n_rows = row_indices.size();
+    const size_t subm_n_cols = col_indices.size();
+    const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
+    const size_t total_pairs = subm_n_rows * (subm_n_rows - 1) / 2;
+    py::array_t<uint32_t> dist_matrix(total_pairs);
+
+    {
+        // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
+        using HammingFunc = uint32_t(*)(const uint64_t*, const uint64_t*, size_t);
+
+        HammingFunc hamming_func;
+        #ifdef __AVX2__
+            hamming_func = use_simd ? &simd_utils::hamming_avx2 : &simd_utils::hamming_scalar;
+        #else
+            hamming_func = &simd_utils::hamming_scalar;
+        #endif
+
+        // open mp thread stuff
+        py::gil_scoped_release release;   // release GIL for full parallel region
+        omp_set_num_threads(threads);
+
+        auto dist_ptr = dist_matrix.mutable_data();
+
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < subm_n_rows; ++i) {
+            for (size_t j = i + 1; j < subm_n_rows; ++j) {
+                size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
+
+                uint32_t dist = hamming_func(&submatrix[i][0], &submatrix[j][0], subm_packed_cols);
+
+                dist_ptr[idx] = dist;
+
+                // if (fill_cache) {
+                //     // currently not in action to save some headaches
+                //     #pragma omp critical
+                //     _hamming_cache[{i, j}] = dist;
+                // }
+            }
+        }
+    }   // GIL reestablished
+    return dist_matrix;
+}
+
+
+/****************************************************************************************************
  * ardal::BitMatrix::innerProduct
  * 
  * Calculate the Inner Product between all pairs of rows. SIMD optimised for vectorised distance
@@ -390,7 +483,10 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
  * EXCEPTIONS:
  *  std::runtime_error : If row_coord is out of range.
  ****************************************************************************************************/
-py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool use_simd, int threads ) const {
+py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx,
+                                               int epsilon,
+                                               bool use_simd,
+                                               int threads ) const {
     // do some input cleanliness
     if (epsilon < 0) {
         throw std::runtime_error("epsilon must be non-negative.");
@@ -488,7 +584,9 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx, int epsilon, bool
  * EXCEPTIONS:
  *  std::runtime_error : If query_guid_index is out of range or k_alleles is negative.
  ****************************************************************************************************/
-py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, bool use_simd ) const {
+py::list BitMatrix::innerProductNeighbourhood( size_t row_idx,
+                                               int ip_epsilon,
+                                               bool use_simd ) const {
      // do some data cleanliness
     if (ip_epsilon < 0) {
         throw std::runtime_error("ip_epsilon must be non-negative.");
@@ -552,7 +650,8 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, b
  * OUTPUT:
  *  std::vector<size_t> : A vector containing the column indices of the unique shared bits.
  ****************************************************************************************************/
-std::vector<size_t> BitMatrix::uniqueSharedBits(const std::vector<size_t>& row_indices, bool use_simd) const {
+std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices,
+                                                 bool use_simd ) const {
     if (row_indices.empty()) return {};
  
     const size_t ingroup_size = row_indices.size();
@@ -642,7 +741,7 @@ double BitMatrix::density( void ) const {
  * OUTPUT:
  *  py::array_t<double> : A 1D NumPy array of row frequencies, one for each column.
  ****************************************************************************************************/
-py::array_t<double> BitMatrix::colFrequency(std::vector<size_t>& row_indices) const {
+py::array_t<double> BitMatrix::colFrequency( std::vector<size_t>& row_indices ) const {
     py::array_t<double> frequencies(_n_cols);
     auto frequencies_ptr = frequencies.mutable_data();
 
@@ -688,7 +787,7 @@ py::array_t<double> BitMatrix::colFrequency(std::vector<size_t>& row_indices) co
  * column indices and their co-occurring partners.
  *
  * INPUT:
- *  threshold (double)   : The Jaccard threshold for co-occurrence.
+ *  threshold (double)   : The threshold for co-occurrence.
  *  use_simd (bool)      : A boolean flag to specify whether to use SIMD for vectorised distance
  *                         calculation.
  *  threads (int)        : The number of threads to use for parallel computation.
@@ -844,7 +943,7 @@ py::array_t<double> BitMatrix::colFrequency(std::vector<size_t>& row_indices) co
  * OUTPUT:
  *  py::array_t<double> : A 1D NumPy array of entropy values, one for each column.
  ****************************************************************************************************/
-py::array_t<double> BitMatrix::columnEntropy() const {
+py::array_t<double> BitMatrix::columnEntropy( void ) const {
     py::array_t<double> entropies(_n_cols);
     auto entropies_ptr = entropies.mutable_data();
 
@@ -877,7 +976,7 @@ py::array_t<double> BitMatrix::columnEntropy() const {
  * OUTPUT:
  *  py::array_t<double> : A 1D NumPy array of KL divergence scores, one for each column.
  ****************************************************************************************************/
-py::array_t<double> BitMatrix::klDivergence(const std::vector<size_t>& ingroup_indices) const {
+py::array_t<double> BitMatrix::klDivergence( const std::vector<size_t>& ingroup_indices ) const {
     const size_t ingroup_size = ingroup_indices.size();
     if (ingroup_size == 0 || ingroup_size == _n_rows) {
         // if ingroup is empty or all rows then discrimination is meaningless
@@ -1076,19 +1175,44 @@ py::array_t<double> BitMatrix::informationGain( const std::vector<size_t>& ingro
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::getDensity
+ * ardal::BitMatrix::subsetPackedMatrix
  *
- * Get the density of the matrix.
+ * Creates a new bit-packed matrix from a subset of rows and columns.
  *
- * This function returns the pre-calculated density of the matrix. The density is defined as the
- * proportion of set bits (1s) in the entire matrix.
+ * This is a helper function that extracts specified rows and columns from the main `_packed_matrix`
+ * and constructs a new, smaller, bit-packed matrix. This is used by functions that operate on
+ * a subset of the data, like `hamming_subset`.
  *
- * INPUT: 
- *  None (operates on the private member _density)
+ * INPUT:
+ *  row_indices (const std::vector<size_t>&) : A vector of original row indices to include.
+ *  col_indices (const std::vector<size_t>&) : A vector of original column indices to include.
  *
  * OUTPUT:
- *  double : The density of the matrix.
+ *  std::vector<std::vector<uint64_t>> : The new, smaller bit-packed matrix.
  ****************************************************************************************************/
+std::vector<std::vector<uint64_t>> BitMatrix::subsetPackedMatrix( const std::vector<size_t>& row_indices,
+                                                                  const std::vector<size_t>& col_indices ) const {
+    const size_t subm_n_rows = row_indices.size();
+    const size_t subm_n_cols = col_indices.size();
+    const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
+
+    std::vector<std::vector<uint64_t>> submatrix(subm_n_rows, std::vector<uint64_t>(subm_packed_cols, 0));
+
+    for (size_t i = 0; i < subm_n_rows; ++i) {
+        size_t orig_row_idx = row_indices[i];
+        for (size_t j = 0; j < subm_n_cols; ++j) {
+            size_t orig_col_idx = col_indices[j];
+            if (getBit(orig_row_idx, orig_col_idx)) {
+                size_t new_word_idx = j / 64;
+                size_t new_bit_idx = j % 64;
+                submatrix[i][new_word_idx] |= (1ULL << new_bit_idx);
+            }
+        }
+    }
+    return submatrix;
+}
+
+
  
 double BitMatrix::getDensity( void ) const {
     return _density;
@@ -1098,22 +1222,37 @@ double BitMatrix::getDensity( void ) const {
 /****************************************************************************************************
  * ardal::BitMatrix::getRowMasses
  *
- * Get the popcount of each row in the matrix.
+ * Get the popcount of each row in the matrix as a NumPy array.
  *
- * This function returns the pre-calculated popcount of each row in the matrix. The popcount of a row
- * represents the number of set bits (1s) present in that row.
+ * This function returns the pre-calculated popcount (mass) of each row in the matrix. The popcount
+ * of a row represents the number of set bits (1s) present in that row.
  *
- * INPUT: 
+ * INPUT:
  *  None (operates on the private member _row_masses)
  *
  * OUTPUT:
- *  std::vector<int> : A vector containing the popcount of each row in the matrix.
+ *  py::array_t<int> : A NumPy array containing the popcount of each row in the matrix.
  ****************************************************************************************************/
 py::array_t<int> BitMatrix::getRowMasses( void ) {
     return py::array_t<int>(_row_masses.size(), _row_masses.data());
 }
 
 
+/****************************************************************************************************
+ * ardal::BitMatrix::getRowMassesVector
+ *
+ * Get the popcount of each row in the matrix as a std::vector.
+ *
+ * This function returns a const reference to the internal vector storing the pre-calculated
+ * popcount (mass) of each row. This is primarily for efficient internal use, such as passing
+ * data to the RoaringMatrix backend without extra copies.
+ *
+ * INPUT:
+ *  None (operates on the private member _row_masses)
+ *
+ * OUTPUT:
+ *  const std::vector<int>& : A const reference to the vector of row masses.
+ ****************************************************************************************************/
 const std::vector<int>& BitMatrix::getRowMassesVector( void ) {
     return _row_masses;
 }
@@ -1125,16 +1264,48 @@ const std::vector<int>& BitMatrix::getRowMassesVector( void ) {
  * Get the popcount of each column in the matrix.
  *
  * This function returns the pre-calculated popcount of each column in the matrix. The popcount of a
- * columnn represents the number of set bits (1s) present in that column.
+ * column represents the number of set bits (1s) present in that column.
  *
- * INPUT: 
+ * INPUT:
  *  None (operates on the private member _col_masses)
  *
  * OUTPUT:
- *  std::vector<int> : A vector containing the popcount of each column in the matrix.
+ *  py::array_t<int> : A NumPy array containing the popcount of each column in the matrix.
  ****************************************************************************************************/
 py::array_t<int> BitMatrix::getColumnMasses( void ) {
     return py::array_t<int>(_col_masses.size(), _col_masses.data());
+}
+
+
+/****************************************************************************************************
+ * ardal::BitMatrix::getSubsetPackedMatrix
+ *
+ * Get a subset of the packed matrix as a NumPy array.
+ *
+ * This function creates a sub-matrix from the specified row and column indices and returns it
+ * as a 2D NumPy array of uint64_t, preserving the bit-packed format. This is mainly for
+ * debugging or specialized external use.
+ *
+ * INPUT:
+ *  row_indices (const std::vector<size_t>&) : A vector of row indices for the subset.
+ *  col_indices (const std::vector<size_t>&) : A vector of column indices for the subset.
+ *
+ * OUTPUT:
+ *  py::array_t<uint64_t> : A 2D NumPy array representing the packed sub-matrix.
+ ****************************************************************************************************/
+py::array_t<uint64_t> BitMatrix::getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
+                                                        const std::vector<size_t>& col_indices ) const {
+    const std::vector<std::vector<uint64_t>> submat = subsetPackedMatrix(row_indices, col_indices);
+    const size_t nrows = row_indices.size();
+    const size_t ncols = col_indices.size();
+
+    py::array_t<uint64_t> result({nrows, ncols});
+    auto buf = result.mutable_unchecked<2>();
+    for (size_t i = 0; i < nrows; ++i)
+        for (size_t j = 0; j < ncols; ++j)
+            buf(i, j) = submat[i][j];
+
+    return result;
 }
 
 } // namespace _ardal

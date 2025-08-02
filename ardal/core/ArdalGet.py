@@ -1,15 +1,13 @@
 """ ArdalGet.py
 This module provides functionality for retrieving and manipulating allele matrices in the Ardal framework.
 """
-
 import pandas as pd
-import json
-import os
 import numpy as np
 from collections import defaultdict
 from humanize import naturalsize
 
 from .utilities import *
+from ..exceptions.exceptions import *
 
 
 # core/ArdalGet.py
@@ -26,10 +24,12 @@ class ArdalGet:
     
     def subset( self,
                 guid_list : list = [],
-                allele_list : list = [] ) -> list[np.array, dict]:
+                allele_list : list = [] ):
         """ Take a list of GUIDs and subset the allele matrix to include only these GUIDs, allowing for standard operations.
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
+        from ..Ardal import Ardal
+
         ## check input
         if len(guid_list) == 0 and len(allele_list) == 0:
             raise ParameterError("guid_list and allele_list cannot both be empty.")
@@ -55,10 +55,9 @@ class ArdalGet:
         new_matrix = subset_df.values.astype(np.uint8)
         
         ## return the new subset matrix/JSON pair
-        return [new_matrix, new_headers]
+        return Ardal([new_matrix, new_headers], quiet=True)
         
     
-
     def matrixStats( self,
                      print_stats : bool = False ) -> dict:
         """ Return a dictionary containing information about the database and its size in memory.
@@ -112,11 +111,16 @@ class ArdalGet:
         """ Return the bit allele matrix.
         """
         return self._matrix.getBitMatrix()
-        
+    
+
+    def hybridMatrix( self ):
+        """ Return the hybridMatrix.
+        """
+        return self._matrix
 
     
     def roaringMatrix( self,
-                          decode : bool=True ) -> dict:
+                       decode : bool=True ) -> dict:
         """ Return the roaring allele matrix.
         """
         roaring_dict = defaultdict(list)
@@ -137,17 +141,24 @@ class ArdalGet:
             raise RoaringError("Ardal object was instantialised with 'use_roaring_if_sparse=False'. Cannot retrieve roaring matrix.")
     
 
-
     def headers( self ) -> dict:
         """ Return the allele _headers.
         """
         return self._headers
     
 
-
     def snpCount( self ) -> dict:
         """ Return a dictionary of SNP counts for each GUID.
         """
         guid_mass_vec = self._matrix.getRowMasses()
         return {guid : mass for guid, mass in zip(self._headers["guids"], guid_mass_vec)}
+    
+    
+    def intervalAlleles( self,
+                         intervals : list,
+                         coords_bed : str = None,
+                         allele_id_format : str = "{chr}.{start}.{ref}.{alt}" ) -> list:
+        """ Return a list of alleles which fall within the given genomic intervals.
+        """
+        return getIntervalAlleles(intervals, self._headers, allele_id_format, coords_bed)
     

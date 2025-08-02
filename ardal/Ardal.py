@@ -18,7 +18,8 @@ class Ardal(object):
                   density_threshold : float=0.02,
                   force_roaring : bool=False,
                   __ref : bool=False, 
-                  file_format : str=None ):
+                  file_format : str=None,
+                  quiet : bool = False ):
         """ Ardal constructor
         """
         from . import _ardal
@@ -53,4 +54,5 @@ class Ardal(object):
         self.compare = ArdalCompare(self.__headers, self.__hybrid_matrix, self.roaring)
         self.stats = ArdalStats(self.__headers, self.__hybrid_matrix, self.roaring)
 
-        self.get.matrixStats(print_stats=True)
+        if not quiet:
+            self.get.matrixStats(print_stats=True)

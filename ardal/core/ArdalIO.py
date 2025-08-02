@@ -1,11 +1,9 @@
 """ ArdalIO.py
 This module provides functionality for reading and writing allele matrices in the Ardal framework.
 """
-
-import pandas as pd
-import json
 import os
 import numpy as np
+import pandas as pd
 from collections import defaultdict
 
 from .utilities import *
@@ -50,6 +48,8 @@ class ArdalIO:
         Writes as a numpy/JSON pair.
         The npz flag writes the numpy matrix as a compressed npz.
         """
+        json = require_package("json", "json")
+
         if not os.path.exists(file_path):
             raise MatrixWriteError(f"Path '{file_path}' does not exist.")
 
@@ -67,9 +67,13 @@ class ArdalIO:
             np.savez_compressed(matrix_out_path, matrix=matrix_to_save)
         else:
             np.save(matrix_out_path, matrix_to_save)
+            
+        print(f"Wrote allele matrix to disk : {matrix_out_path}")
 
         with open(json_out_path, 'w') as fout:
             json.dump(self._headers, fout, indent=4)
+            
+        print(f"Wrote headers to disk : {json_out_path}")
 
 
     def makeFastas( self,
@@ -82,4 +86,5 @@ class ArdalIO:
 
         E.g. for the allele `A.chr1.100.101.T` would be decoded using the allele_id_format string `{ref}.{chr}.{start}.{end}.{alt}`.
         """
-        None
+        raise NotImplementedError("makeFastas function not yet implemented.")
+        return None

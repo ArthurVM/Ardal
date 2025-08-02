@@ -19,6 +19,7 @@ PYBIND11_MODULE(_ardal, m) {  // _ardal module and function bindings
 
         // BitMatrix and RoaringMatrix
         .def("hamming", &_ardal::HybridMatrix::hamming, py::arg("use_simd") = true, py::arg("threads") = 1, py::arg("force_bit_backend") = false)
+        .def("hamming_subset", &_ardal::HybridMatrix::hamming_subset, py::arg("row_indices"), py::arg("col_indices"), py::arg("use_simd") = true, py::arg("threads") = 1, py::arg("force_bit_backend") = false)
         .def("jaccard", &_ardal::HybridMatrix::jaccard, py::arg("use_simd") = true, py::arg("threads") = 1, py::arg("force_bit_backend") = false)
         .def("innerProduct", &_ardal::HybridMatrix::innerProduct, py::arg("use_simd") = true, py::arg("threads") = 1, py::arg("force_bit_backend") = false)
         .def("neighbourhood", &_ardal::HybridMatrix::neighbourhood, py::arg("row_idx"), py::arg("epsilon"), py::arg("use_simd") = true, py::arg("threads") = 1, py::arg("force_bit_backend") = false)

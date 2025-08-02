@@ -13,18 +13,24 @@ namespace _ardal {
 
 class HybridMatrix {
 public:
-    HybridMatrix(py::array_t<uint8_t> matrix,
-                 bool use_roaring_if_sparse = true,
-                 double density_threshold = 0.02);
+    HybridMatrix( py::array_t<uint8_t> matrix,
+                  bool use_roaring_if_sparse = true,
+                  double density_threshold = 0.02 );
 
     // distance functions: BitMatrix and RoaringMatrix
     py::array_t<uint32_t> hamming( bool use_simd = true,
                                    int threads = 1,
                                    bool force_bit_backend = false ) const;
     
+    py::array_t<uint32_t> hamming_subset( const std::vector<size_t> row_indices,
+                                          const std::vector<size_t> col_indices,
+                                          bool use_simd = true,
+                                          int threads = 1,
+                                          bool force_bit_backend = false ) const;
+    
     py::array_t<double> jaccard( bool use_simd = true,
-                                   int threads = 1,
-                                   bool force_bit_backend = false ) const;
+                                 int threads = 1,
+                                 bool force_bit_backend = false ) const;
                                    
     py::array_t<int> innerProduct( bool use_simd = true,
                                    int threads = 1,
@@ -55,9 +61,12 @@ public:
 
     py::array_t<double> columnEntropy( void ) const;
 
-    py::dict bitCooccurrence_all( double threshold = 0.95, int threads = 1 ) const;
+    py::dict bitCooccurrence_all( double threshold = 0.95,
+                                  int threads = 1 ) const;
 
-    py::dict bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const;
+    py::dict bitCooccurrence_subset( const std::vector<size_t>& col_indices,
+                                     double threshold,
+                                     int threads ) const;
 
     py::array_t<double> klDivergence( const std::vector<size_t>& ingroup_indices ) const;
 
@@ -67,7 +76,8 @@ public:
 
 
     // get functions: BitMatrix and RoaringMatrix
-    py::array_t<size_t> getSetBitIndices( size_t row_idx, bool force_bit_backend = false ) const;
+    py::array_t<size_t> getSetBitIndices( size_t row_idx, 
+                                          bool force_bit_backend = false ) const;
     
 
     // get functions: BitMatrix

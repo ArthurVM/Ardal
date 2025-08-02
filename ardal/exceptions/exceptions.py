@@ -1,11 +1,17 @@
 # ardal/Exceptions/exceptions.py
 
+import warnings
+
 class ArdalError(Exception):
     """Base class for all Ardal-specific exceptions."""
     pass
 
 
 ## I/O and file errors
+class MalformedInputError(ArdalError):
+    """Raised when the ardal matrix input is malformed."""
+    pass
+
 class FileFormatError(ArdalError):
     """Raised when a file format is unsupported or malformed."""
     pass
@@ -95,3 +101,25 @@ class InvalidTypeError(ArdalError):
 class ParameterError(ArdalError):
     """Raised when invalid parameters are passed to a function."""
     pass
+
+class LoadMatrixError(ArdalError):
+    """Raised when reading and constructing a contiguous array from the input matrix fails."""
+    pass
+
+class UnsupportedFormatError(ArdalError):
+    """Raised when attempting to load a database of an unsupported format."""
+    pass
+
+class IntervalError(ArdalError):
+    """Raised when an interval is malformed or invalid."""
+    pass
+
+class AllelePatternError(ArdalError):
+    """Raised when an allele pattern is malformed or invalid."""
+    pass
+
+
+## warnings
+
+def ardal_warn(msg: str, category=UserWarning):
+    warnings.warn(f"[Ardal] {msg}", category)

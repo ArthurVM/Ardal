@@ -11,9 +11,9 @@ from ardal.core.ArdalCompare import ArdalCompare
 
 
 @pytest.fixture(scope="session")
-def test_data():
+def test_data_mem():
     """
-    Creates a simulated test dataset for testing the Ardal.unique functionality.
+    Creates a simulated test dataset for testing the Ardal functionality.
 
     OUTPUT:
         tuple: A tuple containing the matrix (NumPy array) and headers (dictionary).
@@ -65,54 +65,53 @@ def test_data():
 
 
 @pytest.fixture(scope="session")
-def ardal_object(test_data):
+def ardal_object(test_data_mem):
     """
     Creates an Ardal object for testing.
     """
-    ardal_object = Ardal(data_source=test_data, use_roaring_if_sparse=True, density_threshold=0.02)
+    ardal_object = Ardal(data_source=test_data_mem, use_roaring_if_sparse=True, density_threshold=0.02, quiet=True)
     return ardal_object
 
 
-@pytest.fixture(scope="session")
-def hybrid_matrix(test_data, ardal_object):
-    """Creates a HybridMatrix object for testing."""
-    matrix, _ = test_data
-    # Assuming default parameters from the Ardal constructor
-    return ardal_object._hybrid_matrix
+# @pytest.fixture(scope="session")
+# def hybrid_matrix(test_data_mem, ardal_object):
+#     """Creates a HybridMatrix object for testing."""
+#     # Assuming default parameters from the Ardal constructor
+#     return ardal_object.get.hybridMatrix()
 
 
-@pytest.fixture(scope="session")
-def headers(test_data):
-    """Returns the headers dictionary from the test data."""
-    _, headers_dict = test_data
-    return headers_dict
+# @pytest.fixture(scope="session")
+# def headers(test_data_mem):
+#     """Returns the headers dictionary from the test data."""
+#     _, headers_dict = test_data_mem
+#     return headers_dict
 
 
-@pytest.fixture(scope="session")
-def io_component(headers, hybrid_matrix):
-    """Creates an ArdalIO component for unit testing."""
-    return ArdalIO(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
+# @pytest.fixture(scope="session")
+# def io_component(headers, hybrid_matrix):
+#     """Creates an ArdalIO component for unit testing."""
+#     return ArdalIO(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 
-@pytest.fixture(scope="session")
-def get_component(headers, hybrid_matrix):
-    """Creates an ArdalGet component for unit testing."""
-    return ArdalGet(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
+# @pytest.fixture(scope="session")
+# def get_component(headers, hybrid_matrix):
+#     """Creates an ArdalGet component for unit testing."""
+#     return ArdalGet(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 
-@pytest.fixture(scope="session")
-def stats_component(headers, hybrid_matrix):
-    """Creates an ArdalStats component for unit testing."""
-    return ArdalStats(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
+# @pytest.fixture(scope="session")
+# def stats_component(headers, hybrid_matrix):
+#     """Creates an ArdalStats component for unit testing."""
+#     return ArdalStats(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 
-@pytest.fixture(scope="session")
-def allele_component(headers, hybrid_matrix):
-    """Creates an ArdalAllele component for unit testing."""
-    return ArdalAllele(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
+# @pytest.fixture(scope="session")
+# def allele_component(headers, hybrid_matrix):
+#     """Creates an ArdalAllele component for unit testing."""
+#     return ArdalAllele(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 
-@pytest.fixture(scope="session")
-def compare_component(headers, hybrid_matrix):
-    """Creates an ArdalCompare component for unit testing."""
-    return ArdalCompare(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())
+# @pytest.fixture(scope="session")
+# def compare_component(headers, hybrid_matrix):
+#     """Creates an ArdalCompare component for unit testing."""
+#     return ArdalCompare(headers, hybrid_matrix, hybrid_matrix.roaringEnabled())

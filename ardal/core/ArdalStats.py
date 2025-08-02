@@ -2,10 +2,10 @@
 This module provides functionality for calculating statistics on allele matrices in the Ardal framework.
 """
 import numpy as np
-import os
 from collections import defaultdict
 
 from .utilities import *
+from ..exceptions.exceptions import *
 
 
 # core/ArdalStats.py
@@ -52,15 +52,15 @@ class ArdalStats:
         """ Computes the co-occurrence of pairs of alleles.
         """
         if not isinstance(allele_indices, list):
-            raise ValueError("allele_indices must be a list.")
+            raise TypeError("allele_indices must be a list.")
         if not isinstance(threshold, float):
-            raise ValueError("threshold must be a float.")
+            raise TypeError("threshold must be a float.")
         if not isinstance(threads, int):
-            raise ValueError("threads must be an integer.")
+            raise TypeError("threads must be an integer.")
         if threshold < 0 or threshold > 1:
-            raise ValueError("threshold must be between 0 and 1.")
+            raise ParameterError("threshold must be between 0 and 1.")
         if threads < 1:
-            raise ValueError("threads must be at least 1.")
+            raise ParameterError("threads must be at least 1.")
 
         if allele_indices != []:
             checkAlleles(allele_indices, self._headers)
@@ -109,10 +109,10 @@ class ArdalStats:
         ## input validation
         available_metrics = {'kullbackleibler', 'jensenshannon', 'informationgain'}
         if metric not in available_metrics:
-            raise ValueError(f"Metric '{metric}' is not supported. Available metrics: {list(available_metrics)}")
+            raise ParameterError(f"Metric '{metric}' is not supported. Available metrics: {list(available_metrics)}")
         
         if not isinstance(guids, list) or not guids:
-            raise ValueError("guids must be a non-empty list.")
+            raise EmptySelectionError("guids must be a non-empty list.")
         
         checkGUIDs(guids, self._headers)
 
