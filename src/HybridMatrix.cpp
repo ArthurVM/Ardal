@@ -34,6 +34,7 @@ HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
                             double density_threshold ) {
     bit_backend = std::make_unique<_ardal::BitMatrix>(matrix);
     density = bit_backend->getDensity();
+    _n_cols = bit_backend->getNCols();
 
     if (use_roaring_if_sparse && density < density_threshold) {
         roaring_enabled = true;
@@ -45,6 +46,16 @@ HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
 }
 
 
+HybridMatrix::BackendType HybridMatrix::selectBackend(size_t n_cols, double density) const {
+    // Example heuristic
+    if (n_cols > 20000 && density < 0.02) {
+        return BackendType::ROARING;
+    } else {
+        return BackendType::BIT;
+    }
+}
+
+
 double HybridMatrix::getDensity( void ) const {
     return density;
 }
@@ -52,8 +63,14 @@ double HybridMatrix::getDensity( void ) const {
 
 py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd,
                                              int threads,
-                                             bool force_bit_backend ) const {
-    if (roaring_enabled && !force_bit_backend) {
+                                             const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(_n_cols, density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->hamming(threads);
     } else {
         return bit_backend->hamming(false, use_simd, threads);
@@ -65,10 +82,20 @@ py::array_t<uint32_t> HybridMatrix::hamming_subset( const std::vector<size_t> ro
                                                     const std::vector<size_t> col_indices,
                                                     bool use_simd,
                                                     int threads,
-                                                    bool force_bit_backend ) const {
-    if (roaring_enabled && !force_bit_backend) {
+                                                    const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        // note: this assumes local density isnt significantly different from global
+        // not a terrible assumption but may not always be the case
+        chosen_backend = selectBackend(row_indices.size(), density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        py::print("[C++] Running Roaring::hamming_subset...");
         return roaring_backend->hamming_subset(row_indices, col_indices, threads);
     } else {
+        py::print("[C++] Running Bit::hamming_subset...");
         return bit_backend->hamming_subset(row_indices, col_indices, use_simd, threads);
     }
 }
@@ -76,20 +103,31 @@ py::array_t<uint32_t> HybridMatrix::hamming_subset( const std::vector<size_t> ro
 
 py::array_t<double> HybridMatrix::jaccard( bool use_simd,
                                            int threads,
-                                           bool force_bit_backend ) const {
-    if (roaring_enabled && !force_bit_backend) {
+                                           const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(_n_cols, density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->jaccard(threads);
     } else {
-        // return bit_backend->jaccard(false, use_simd, threads);
-        std::runtime_error("Jaccard distance is not currently supported in BitMatrix backend.");
+        throw std::runtime_error("Jaccard distance is not currently supported in BitMatrix backend.");
     }
 }
 
 
 py::array_t<int> HybridMatrix::innerProduct( bool use_simd,
                                              int threads,
-                                             bool force_bit_backend ) const {
-    if (roaring_enabled && !force_bit_backend) {
+                                             const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(_n_cols, density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->innerProduct(threads);
     } else {
         return bit_backend->innerProduct(false, use_simd, threads);
@@ -101,8 +139,14 @@ py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
                                                   int epsilon,
                                                   bool use_simd,
                                                   int threads,
-                                                  bool force_bit_backend )  const {
-    if (roaring_enabled && !force_bit_backend) {
+                                                  const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(_n_cols, density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->neighbourhood(row, epsilon, threads);
     } else {
         return bit_backend->neighbourhood(row, epsilon, use_simd, threads);
@@ -113,8 +157,14 @@ py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
 py::list HybridMatrix::innerProductNeighbourhood( size_t row,
                                                   int ip_epsilon,
                                                   bool use_simd,
-                                                  bool force_bit_backend ) const {
-    if (roaring_enabled && !force_bit_backend) {
+                                                  const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(_n_cols, density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->innerProductNeighbourhood(row, ip_epsilon);
     } else {
         return bit_backend->innerProductNeighbourhood(row, ip_epsilon, use_simd);
@@ -124,7 +174,8 @@ py::list HybridMatrix::innerProductNeighbourhood( size_t row,
 
 std::vector<size_t> HybridMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices,
                                                     bool use_simd,
-                                                    bool force_bit_backend ) const {
+                                                    const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
     // if (!force_bit_backend) {
     //     return roaring_backend->uniqueSharedBits(row_indices);
     // } else {
@@ -150,7 +201,7 @@ py::dict HybridMatrix::bitCooccurrence_all( double threshold,
     if (roaring_enabled) {
         return roaring_backend->bitCooccurrence_all(threshold, threads);
     } else { 
-        std::runtime_error("Bit co-occurrence is not supported in BitMatrix backend.");
+        throw std::runtime_error("Bit co-occurrence is not supported in BitMatrix backend.");
     }
 }
 
@@ -161,8 +212,8 @@ py::dict HybridMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_in
     
     if (roaring_enabled) {
         return roaring_backend->bitCooccurrence_subset(col_indices, threshold, threads);
-    } else { 
-        std::runtime_error("Bit co-occurrence is not supported in BitMatrix backend.");
+    } else {
+        throw std::runtime_error("Bit co-occurrence is not supported in BitMatrix backend.");
     }
 }
 
@@ -183,8 +234,14 @@ py::array_t<double> HybridMatrix::informationGain( const std::vector<size_t>& in
 
 
 py::array_t<size_t> HybridMatrix::getSetBitIndices( size_t row_idx,
-                                                    bool force_bit_backend ) const {
-    if (roaring_enabled && !force_bit_backend) {
+                                                    const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(_n_cols, density);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->getSetBitIndices(row_idx);
     } else {
         return bit_backend->getSetBitIndices(row_idx);

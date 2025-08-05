@@ -132,6 +132,8 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
         throw std::runtime_error("Thread count must be positive.");
     }
 
+    py::print("[C++] roaring subsetting...");
+
     // create matrix mask
     roaring::Roaring col_mask_bitmap;
     for (size_t col_idx : col_indices) {
@@ -148,11 +150,12 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
         if (row_idx >= _n_rows) {
             throw std::out_of_range("Row index in row_indices is out of bounds.");
         }
-        // Intersect the original row's bitmap with the column mask.
         submatrix.push_back(_roaring_matrix.at(row_idx) & col_mask_bitmap);
     }
 
-    // hamming distance
+    py::print("[C++] roaring hamming...");
+
+    // hamming distance stuff
     const size_t subm_n_rows = submatrix.size();
     if (subm_n_rows == 0) {
         return py::array_t<uint32_t>(0);
@@ -160,21 +163,20 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
     const size_t total_pairs = subm_n_rows * (subm_n_rows - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);
 
-    {
-        py::gil_scoped_release release;
-        omp_set_num_threads(threads);
+    py::gil_scoped_release release;   // release GIL for full parallel region
 
+    #pragma omp parallel num_threads(threads)
+    {
         auto dist_ptr = dist_matrix.mutable_data();
 
         #pragma omp parallel for schedule(guided)
         for (size_t i = 0; i < subm_n_rows; ++i) {
             for (size_t j = i + 1; j < subm_n_rows; ++j) {
                 size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
-                // The Hamming distance is the cardinality of the symmetric difference (XOR).
                 dist_ptr[idx] = (submatrix[i] ^ submatrix[j]).cardinality();
             }
         }
-    }
+    }   // end parallel region
     return dist_matrix;
 }
 
@@ -646,16 +648,17 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
     // thread local results maps
     std::vector<std::map<size_t, std::vector<size_t>>> thread_maps(threads);
 
+    py::gil_scoped_release release;   // release GIL for full parallel region
+
     #pragma omp parallel num_threads(threads)
     {
         int tid = omp_get_thread_num();
         auto& local_map = thread_maps[tid];
 
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(guided)
         for (size_t i = 0; i < n_cols - 1; ++i) {
             const auto& i_bitmap = colwise_roaring[i];
             for (size_t j = i + 1; j < n_cols; ++j) {
-                if (i == j) continue; // skip self-comparison
                 const auto& j_bitmap = colwise_roaring[j];
                 double intersection_size = (i_bitmap & j_bitmap).cardinality();
                 double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
@@ -733,12 +736,14 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
     // thread local results maps
     std::vector<std::map<size_t, std::vector<size_t>>> thread_maps(threads);
 
+    py::gil_scoped_release release;   // release GIL for full parallel region
+
     #pragma omp parallel num_threads(threads)
     {
         int tid = omp_get_thread_num();
         auto& local_map = thread_maps[tid];
 
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(guided)
         for (size_t i = 0; i < n_cols - 1; ++i) {
             // check if the column is in the subset
             if (std::find(col_indices.begin(), col_indices.end(), i) == col_indices.end()) {
@@ -747,8 +752,6 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
 
             const auto& i_bitmap = colwise_roaring[i];
             for (size_t j = i + 1; j < n_cols; ++j) {
-                if (i == j) continue; // skip self-comparison
-
                 // check if the column is in the subset
                 if (std::find(col_indices.begin(), col_indices.end(), j) == col_indices.end()) {
                     continue; // skip columns not in the subset

@@ -1,4 +1,9 @@
+""" Frontend for the Ardal allele matrix toolkit.
+"""
+from typing import Union
+
 from .core.ArdalParser import ArdalParser
+from .core.ArdalHeaderUtils import ArdalHeaderUtils
 from .core.ArdalIO import ArdalIO
 from .core.ArdalGet import ArdalGet
 from .core.ArdalAllele import ArdalAllele
@@ -8,17 +13,18 @@ from .core.utilities import *
 from .exceptions.exceptions import *
 
 
+## Ardal.py
 class Ardal(object):
     """ Class for handling Ardal-neighbourhood objects. """
 
 
     def __init__( self,
                   data_source : str,
-                  use_roaring_if_sparse : bool=True,
-                  density_threshold : float=0.02,
-                  force_roaring : bool=False,
-                  __ref : bool=False, 
-                  file_format : str=None,
+                  coords_bed : Union[str, None] = None,
+                  allele_id_format : Union[str, None] = None,
+                  roaring : Union[str, bool] = "auto",
+                  density_threshold : float = 0.02,
+                  file_format : Union[str, None] = None,
                   quiet : bool = False ):
         """ Ardal constructor
         """
@@ -26,33 +32,38 @@ class Ardal(object):
 
         super(Ardal, self).__init__()
 
-        self.__hybrid_matrix = None
-        self.__headers = None
-        self.__ref = __ref
+        self._hybrid_matrix = None
+        self._headers = None
 
         parser = ArdalParser(data_source, file_format)
 
         ## do some parameter fiddling to enforce the generation of a roaring matrix
-        if force_roaring:
+        roaring_param = validate_Ardal_roaring_param(roaring)
+        if roaring_param == "true":
             use_roaring_if_sparse = True
             density_threshold = 1.0
-
+        elif roaring_param == "auto":
+            use_roaring_if_sparse = True
+        elif roaring_param == "false":
+            use_roaring_if_sparse = False
+            
         if parser.matrix is not None:
-            self.__hybrid_matrix = _ardal.HybridMatrix(parser.matrix,
+            self._hybrid_matrix = _ardal.HybridMatrix(parser.matrix,
                                                        use_roaring_if_sparse=use_roaring_if_sparse,
                                                        density_threshold=density_threshold)
-            self.__headers = parser.headers
+            self._headers = parser.headers
         else:
             ## raise an error if parsing fails to prevent unexpected behaviour down the line
             raise MatrixParseError(f"Failed to parse data from: {data_source}") 
         
-        self.roaring = self.__hybrid_matrix.roaringEnabled()
-
-        self.io = ArdalIO(self.__headers, self.__hybrid_matrix, self.roaring)
-        self.get = ArdalGet(self.__headers, self.__hybrid_matrix, self.roaring)
-        self.allele = ArdalAllele(self.__headers, self.__hybrid_matrix, self.roaring)
-        self.compare = ArdalCompare(self.__headers, self.__hybrid_matrix, self.roaring)
-        self.stats = ArdalStats(self.__headers, self.__hybrid_matrix, self.roaring)
+        self.roaring = self._hybrid_matrix.roaringEnabled()
+        
+        self.headerUtils = ArdalHeaderUtils(self._headers, coords_bed, allele_id_format)
+        self.io = ArdalIO(self.headerUtils, self._hybrid_matrix, self.roaring)
+        self.get = ArdalGet(self.headerUtils, self._hybrid_matrix, self.roaring)
+        self.allele = ArdalAllele(self.headerUtils, self._hybrid_matrix, self.roaring)
+        self.compare = ArdalCompare(self.headerUtils, self._hybrid_matrix, self.roaring)
+        self.stats = ArdalStats(self.headerUtils, self._hybrid_matrix, self.roaring)
 
         if not quiet:
             self.get.matrixStats(print_stats=True)

@@ -7,19 +7,23 @@ from .utilities import *
 from ..exceptions.exceptions import *
 
 
-# core/ArdalAllele.py
+## core/ArdalAllele.py
 class ArdalAllele:
 
-    def __init__(self, headers, hybrid_matrix, roaring_enabled):
+    def __init__( self,
+                  headerUtils,
+                  hybrid_matrix,
+                  roaring_enabled : bool ):
 
-        self._headers = headers
+        self._headerUtils = headerUtils
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
 
+    @validate_backend_argument
     def unique( self,
                 guid_list : list,
-                force_bit_backend: bool=False ) -> set:
+                backend : str = "auto" ) -> dict:
         """
         Finds the set of SNPs unique to a given set of GUIDs.
 
@@ -37,22 +41,23 @@ class ArdalAllele:
         """
         ## input checks
         if guid_list:
-            checkGUIDs(guid_list, self._headers)
+            self._headerUtils.checkGUIDs(guid_list)
         else:
             raise EmptySelectionError("guids list cannot be empty.")
                     
         unqiue_snps = defaultdict(set)
         for guid in guid_list:
-            guid_unique_snps = self._matrix.uniqueSharedBits([encodeGuid(guid, self._headers)], 
-                                                             force_bit_backend=force_bit_backend)
-            unqiue_snps[guid] = {decodeAllele(idx, self._headers) for idx in guid_unique_snps}
+            guid_unique_snps = self._matrix.uniqueSharedBits([self._headerUtils.encodeGuid(guid)], 
+                                                              backend=backend)
+            unqiue_snps[guid] = {self._headerUtils.decodeAllele(idx) for idx in guid_unique_snps}
         
         return unqiue_snps
     
 
+    @validate_backend_argument
     def guidsWithAlleles( self,
                           allele_list : list,
-                          force_bit_backend : bool=False ) -> set:
+                          backend : str = "auto" ) -> set:
         """ Take a set of alleles and return all GUIDs containing all of those alleles.
         """
 
@@ -60,14 +65,14 @@ class ArdalAllele:
         if not allele_list:
             raise EmptySelectionError("allele list cannot be empty.")
         else:
-            checkAlleles(allele_list, self._headers)
+            self._headerUtils.checkAlleles(allele_list)
                     
         ## get the set of all guids which contain all of the specified alleles
-        allele_indices = {encodeAllele(allele, self._headers) for allele in allele_list}
+        allele_indices = {self._headerUtils.encodeAllele(allele) for allele in allele_list}
 
         result_guids = set()
-        for guid_idx, guid_name in enumerate(self._headers["guids"]):
-            present_alleles = set(self._matrix.getSetBitIndices(guid_idx, force_bit_backend=force_bit_backend))
+        for guid_idx, guid_name in enumerate(self._headerUtils.headers["guids"]):
+            present_alleles = set(self._matrix.getSetBitIndices(guid_idx, backend=backend))
             if allele_indices.issubset(present_alleles):
                 result_guids.add(guid_name)
         
@@ -84,10 +89,13 @@ class ArdalAllele:
             raise TypeError("Expression must be a string.")
 
         pattern = re.compile(expression.replace('*', '.*'))
-        return set([allele for allele in self._headers["alleles"] if pattern.match(allele)])
+        return list(set([allele for allele in self._headerUtils.headers["alleles"] if pattern.match(allele)]))
     
 
-    def uniqueCore( self, guids : list, force_bit_backend: bool=False ) -> set:
+    @validate_backend_argument
+    def uniqueCore( self,
+                    guids : list,
+                    backend : str = "auto" ) -> set:
         """
         Finds the set of SNPs unique to a given set of GUIDs and shared by all GUIDs in that set.
 
@@ -105,17 +113,11 @@ class ArdalAllele:
         """
 
         ## input checks
-        if not isinstance(guids, list):
-            raise ValueError("guids must be a list.")
-        if len(guids) == 0:
-            raise ValueError("guids set cannot be empty.")
-        for guid in guids:
-            if guid not in self._headers["guids"]:
-                raise ValueError(f"guid '{guid}' not found in allele matrix.")
+        self._headerUtils.checkGUIDs(guids)
             
-        guid_coords = [encodeGuid(guid, self._headers) for guid in guids]
-        unique_snp_indices = self._matrix.uniqueSharedBits(guid_coords, force_bit_backend=force_bit_backend)
-        return {decodeAllele(idx, self._headers) for idx in unique_snp_indices}
+        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
+        unique_snp_indices = self._matrix.uniqueSharedBits(guid_coords, backend=backend)
+        return {self._headerUtils.decodeAllele(idx) for idx in unique_snp_indices}
     
 
     # def core( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:

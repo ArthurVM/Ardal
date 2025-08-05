@@ -1,236 +1,151 @@
-import sys
-import pytest
+import os
 import numpy as np
-import pandas as pd
-from ardal import Ardal, ArdalParser
+import pytest
+from ardal import Ardal
+from ardal.exceptions.exceptions import MalformedInputError, UnsupportedFormatError, LoadMatrixError
+    
 
-from .conftest import *
+## check initialisation with different inputs
 
-
-def test_uniqueCore(ardal_object):
-    """
-    Tests the unique method of the ardal class.
-    """
-
-    ## test case 1: SNPs unique to GUID1 and GUID2
-    unique_snps1 = ardal_object.allele.uniqueCore(["GUID1", "GUID2"])
-    assert unique_snps1 == {"SNP1"}
-
-    ## test case 2: SNPs unique to GUID3, GUID4, and GUID5
-    unique_snps2 = ardal_object.allele.uniqueCore(["GUID3", "GUID4", "GUID5"])
-    assert unique_snps2 == {"SNP2"}
-
-    ## test case 3: SNPs unique to GUID6 and GUID7
-    unique_snps3 = ardal_object.allele.uniqueCore(["GUID6", "GUID7"])
-    assert unique_snps3 == {"SNP3"}
-
-    ### test case 4: SNPs unique to GUID8, GUID9, and GUID10
-    unique_snps4 = ardal_object.allele.uniqueCore(["GUID8", "GUID9", "GUID10"])
-    assert unique_snps4 == {"SNP4"}
-
-    ## test case 5: SNPs unique to GUID1, GUID2, GUID3, GUID4, GUID5, GUID6, GUID7
-    unique_snps5 = ardal_object.allele.uniqueCore(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7"])
-    assert unique_snps5 == {"SNP6"}
-
-    ## test case 6: SNPs unique to GUID6, GUID7, GUID8, GUID9, GUID10
-    unique_snps6 = ardal_object.allele.uniqueCore(["GUID6", "GUID7", "GUID8", "GUID9", "GUID10"])
-    assert unique_snps6 == {"SNP9"}
-
-    ## test case 7: SNPs unique to GUID1, GUID2, GUID3, GUID4, GUID5, GUID6, GUID7, GUID8, GUID9, GUID10
-    unique_snps7 = ardal_object.allele.uniqueCore(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"])
-    assert unique_snps7 == {"SNP5", "SNP7"}
-
-    ## test case 8: No unique SNPs
-    unique_snps8 = ardal_object.allele.uniqueCore(["GUID1", "GUID5"])
-    assert unique_snps8 == set()
+## SUCCESSES
+def test_ardal_init_success__mem(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet=True)
+    assert ardal._hybrid_matrix is not None
+    assert ardal.headerUtils is not None
+    
+    
+def test_ardal_init_success__npy(test_data_matrix_npy):
+    ardal = Ardal(data_source=test_data_matrix_npy, quiet=True)
+    assert ardal._hybrid_matrix is not None
+    assert ardal.headerUtils is not None
 
 
-def test_pairwise(compare_component):
-    """
-    Tests the pairwise method of the ardal class.
-    """
+def test_ardal_init_success__npz(test_data_matrix_npz):
+    ardal = Ardal(data_source=test_data_matrix_npz, quiet=True)
+    assert ardal._hybrid_matrix is not None
+    assert ardal.headerUtils is not None
+    
 
-    ## test case 1: Hamming distance
-    dist_matrix = compare_component.pairwise(metric="hamming")
-    assert isinstance(dist_matrix, pd.DataFrame)
-    assert dist_matrix.shape == (10, 10)
-    assert dist_matrix.to_dict() == {'GUID1': {'GUID1': 0, 'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2, 'GUID6': 4, 'GUID7': 4, 'GUID8': 5, 'GUID9': 5, 'GUID10': 6},
-                                     'GUID2': {'GUID1': 0, 'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2, 'GUID6': 4, 'GUID7': 4, 'GUID8': 5, 'GUID9': 5, 'GUID10': 6},
-                                     'GUID3': {'GUID1': 2, 'GUID2': 2, 'GUID3': 0, 'GUID4': 0, 'GUID5': 0, 'GUID6': 4, 'GUID7': 4, 'GUID8': 5, 'GUID9': 5, 'GUID10': 6},
-                                     'GUID4': {'GUID1': 2, 'GUID2': 2, 'GUID3': 0, 'GUID4': 0, 'GUID5': 0, 'GUID6': 4, 'GUID7': 4, 'GUID8': 5, 'GUID9': 5, 'GUID10': 6},
-                                     'GUID5': {'GUID1': 2, 'GUID2': 2, 'GUID3': 0, 'GUID4': 0, 'GUID5': 0, 'GUID6': 4, 'GUID7': 4, 'GUID8': 5, 'GUID9': 5, 'GUID10': 6},
-                                     'GUID6': {'GUID1': 4, 'GUID2': 4, 'GUID3': 4, 'GUID4': 4, 'GUID5': 4, 'GUID6': 0, 'GUID7': 0, 'GUID8': 3, 'GUID9': 3, 'GUID10': 4},
-                                     'GUID7': {'GUID1': 4, 'GUID2': 4, 'GUID3': 4, 'GUID4': 4, 'GUID5': 4, 'GUID6': 0, 'GUID7': 0, 'GUID8': 3, 'GUID9': 3, 'GUID10': 4},
-                                     'GUID8': {'GUID1': 5, 'GUID2': 5, 'GUID3': 5, 'GUID4': 5, 'GUID5': 5, 'GUID6': 3, 'GUID7': 3, 'GUID8': 0, 'GUID9': 0, 'GUID10': 1},
-                                     'GUID9': {'GUID1': 5, 'GUID2': 5, 'GUID3': 5, 'GUID4': 5, 'GUID5': 5, 'GUID6': 3, 'GUID7': 3, 'GUID8': 0, 'GUID9': 0, 'GUID10': 1},
-                                     'GUID10': {'GUID1': 6, 'GUID2': 6, 'GUID3': 6, 'GUID4': 6, 'GUID5': 6, 'GUID6': 4, 'GUID7': 4, 'GUID8': 1, 'GUID9': 1, 'GUID10': 0}}
+def test_ardal_init_success__csv(test_data_matrix_csv):
+    ardal = Ardal(data_source=test_data_matrix_csv, quiet=True)
+    assert ardal._hybrid_matrix is not None
+    assert ardal.headerUtils is not None
+    
 
-    ## test case 2: Jaccard distance
-    dist_matrix = compare_component.pairwise(metric="jaccard")
-    assert isinstance(dist_matrix, pd.DataFrame)
-    assert dist_matrix.shape == (10, 10)
-
-    ## test case 3: Invalid metric
-    with pytest.raises(ValueError):
-        compare_component.pairwise(metric="invalid")
+def test_ardal_init_success__makes_contiguous():
+    ## check Ardal makes a non-contigous array contiguous
+    tmp_matrix = np.ones((3, 4))
+    non_c_matrix = tmp_matrix.T
+    headers = {"guids" : [f"GUID{i}" for i in range(non_c_matrix.shape[0])], \
+               "alleles" : [f"A.{i*100}.T" for i in range(non_c_matrix.shape[1])]}
+    ardal = Ardal(data_source=[non_c_matrix, headers], quiet=True)
+    assert ardal._hybrid_matrix is not None
+    assert ardal.headerUtils is not None
 
 
-def test_neighbourhood(compare_component):
-    """
-    Tests the neighbourhood method of the ardal class.
-    """
+## FAILS
+def test_ardal_init_fail__None_input():
+    with pytest.raises(MalformedInputError, match="Input data structure cannot be None."):
+        Ardal(data_source=None, quiet=True)
+        
+    
+def test_ardal_init_fail__malformed_string():
+    with pytest.raises(FileNotFoundError, match=f"File does not exist: not_a_file.npy"):
+        Ardal(data_source="not_a_file.npy", quiet=True)
+        
+    with pytest.raises(UnsupportedFormatError, match="Unsupported file format: must be csv, parquet, npy, or npz"):
+        Ardal(data_source="./data/wrong_extension.txt", quiet=True)
+        
 
-    ## test case 1: SIMD
-    neighbourhood = compare_component.neighbourhood("GUID1", n=2, simd=True)
-    assert isinstance(neighbourhood, dict)
-    assert neighbourhood == {'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2}
+def test_ardal_init_fail__malformed_list(test_data_mem):
+    with pytest.raises(MalformedInputError, match="Input list must contain two elements: matrix and headers."):
+        Ardal(data_source=["too", "many", "elements"], quiet=True)
 
-    ## test case 2: Non-SIMD
-    neighbourhood = compare_component.neighbourhood("GUID1", n=2, simd=False)
-    assert isinstance(neighbourhood, dict)
-    assert neighbourhood == {'GUID2': 0, 'GUID3': 2, 'GUID4': 2, 'GUID5': 2}
+    with pytest.raises(FileNotFoundError, match="One or more file paths do not exist: ./data/not_a_file.npy, ./data/sim_headers.json"):
+        Ardal(data_source=["./data/not_a_file.npy", "./data/sim_headers.json"], quiet=True)
+        
+    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers, np.matrix\\] or two file paths."):
+        Ardal(data_source=[1, 2], quiet=True)
 
-    ## test case 3: Invalid GUID
-    with pytest.raises(ValueError):
-        compare_component.neighbourhood("INVALID", n=2)
+    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers, np.matrix\\] or two file paths."):
+        Ardal(data_source=[[], test_data_mem[1]], quiet=True)
 
+def test_ardal_init_fail__malformed_data(test_data_mem):
+    tmp_matrix = np.ones((3, 4))
+    
+    with pytest.raises(LoadMatrixError, match="Matrix must be 2-dimensional."):
+        Ardal(data_source=[np.zeros((2,3,4)), test_data_mem[1]], quiet=True)
+        
+    with pytest.raises(LoadMatrixError, match="Headers must contain 'guids' and 'alleles' keys."):
+        headers = {"wrong" : [f"GUID{i}" for i in range(tmp_matrix.shape[0])], \
+                   "keys" : [f"A.{i*100}.T" for i in range(tmp_matrix.shape[1])]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+    
+    with pytest.raises(LoadMatrixError, match="GUIDs must be a list of strings."):
+        headers = {"guids" : [i for i in range(tmp_matrix.shape[0])], \
+                   "alleles" : [f"A.{i*100}.T" for i in range(tmp_matrix.shape[1])]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+        
+    with pytest.raises(LoadMatrixError, match="Alleles must be a list of strings."):
+        headers = {"guids" : [f"GUID{i}" for i in range(tmp_matrix.shape[0])], \
+                   "alleles" : [i for i in range(tmp_matrix.shape[1])]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+    
+    with pytest.raises(LoadMatrixError, match=f"Mismatch: {tmp_matrix.shape[0]} matrix rows vs {tmp_matrix.shape[0]+1} GUIDs."):
+        headers = {"guids" : [f"GUID{i}" for i in range(tmp_matrix.shape[0]+1)], \
+                   "alleles" : [f"A.{i*100}.T" for i in range(tmp_matrix.shape[1])]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+    
+    with pytest.raises(LoadMatrixError, match=f"Mismatch: {tmp_matrix.shape[1]} matrix columns vs {tmp_matrix.shape[1]+1} alleles."):
+        headers = {"guids" : [f"GUID{i}" for i in range(tmp_matrix.shape[0])], \
+                   "alleles" : [f"A.{i*100}.T" for i in range(tmp_matrix.shape[1]+1)]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+        
+    with pytest.raises(LoadMatrixError, match=f"GUIDs must be unique."):
+        headers = {"guids" : [f"NON-UNIQUE-GUID" for i in range(tmp_matrix.shape[0])], \
+                   "alleles" : [f"A.{i*100}.T" for i in range(tmp_matrix.shape[1])]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+        
+    with pytest.raises(LoadMatrixError, match=f"Alleles must be unique."):
+        headers = {"guids" : [f"GUID{i}" for i in range(tmp_matrix.shape[0])], \
+                   "alleles" : ["NON-UNIQUE-ALLELE" for i in range(tmp_matrix.shape[1])]}
+        Ardal(data_source=[tmp_matrix, headers], quiet=True)
+    
 
-def test_core(allele_component):
-    """
-    Tests the core method of the ardal class.
-    """
+## check roaring is intialised correctly
+def test_roaring_flag(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, roaring=True, quiet=True)
+    assert ardal.roaring is True
+    
+    ardal = Ardal(data_source=test_data_mem, roaring=False, quiet=True)
+    assert ardal.roaring is False
+    
+    ardal = Ardal(data_source=test_data_mem, roaring="auto", density_threshold=1.0, quiet=True)
+    assert ardal.roaring is True
+    
+    ardal = Ardal(data_source=test_data_mem, roaring="auto", density_threshold=0.0, quiet=True)
+    assert ardal.roaring is False
+    
 
-    ## test case 1: Core alleles
-    core_alleles = allele_component.core(["GUID1", "GUID2"])
-    assert isinstance(core_alleles, set)
+## general small tests
+def test_stats_methods(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet=True)
+    entropy = ardal.stats.alleleEntropy()
+    assert isinstance(entropy, dict)
+    
 
-    ## test case 2: Invalid GUID
-    with pytest.raises(ValueError):
-        allele_component.core(["INVALID"])
+def test_compare_pairwise(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet=True)
+    df = ardal.compare.pairwise()
+    assert hasattr(df, "shape")
+    
 
-
-def test_allele(allele_component):
-    """
-    Tests the allele method of the ardal class.
-    """
-
-    ## test case 1: SNP1
-    alleles = allele_component.allele(["SNP1"])
-    assert alleles == {"GUID1", "GUID2"}
-
-    ## test case 2: SNP2
-    alleles = allele_component.allele(["SNP2"])
-    assert alleles == {"GUID3", "GUID4", "GUID5"}
-
-    ## test case 3: SNP3
-    alleles = allele_component.allele(["SNP3"])
-    assert alleles == {"GUID6", "GUID7"}
-
-    ## test case 4: SNP4
-    alleles = allele_component.allele(["SNP4"])
-    assert alleles == {"GUID8", "GUID9", "GUID10"}
-
-    ## test case 5: SNP5
-    alleles = allele_component.allele(["SNP5"])
-    assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"}
-
-    ## test case 6: SNP6
-    alleles = allele_component.allele(["SNP6"])
-    assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7"}
-
-    ## test case 7: SNP7
-    alleles = allele_component.allele(["SNP7"])
-    assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9", "GUID10"}
-
-    ## test case 8: SNP8
-    alleles = allele_component.allele(["SNP8"])
-    assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5"}
-
-    ## test case 9: SNP9
-    alleles = allele_component.allele(["SNP9"])
-    assert alleles == {"GUID6", "GUID7", "GUID8", "GUID9", "GUID10"}
-
-    ## test case 10: SNP10
-    alleles = allele_component.allele(["SNP10"])
-    assert alleles == {"GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9"}
-
-    ## test case 10: SNP10
-    alleles = allele_component.allele(["SNP5", "SNP10"])
-    assert alleles == {'GUID6', 'GUID9', 'GUID2', 'GUID8', 'GUID1', 'GUID3', 'GUID5', 'GUID7', 'GUID4'}
-
-    ## test case 11: Invalid Allele
-    with pytest.raises(ValueError):
-        allele_component.allele(["INVALID"])
-
-
-def test_matchAlleleNames(allele_component):
-    """
-    Tests the matchAlleleNames method of the ardal class.
-    """
-
-    ## test case 1: Match Allele Names
-    matched_alleles = allele_component.matchAlleleNames("SNP*")
-    assert isinstance(matched_alleles, set)
-
-    ## test case 2: Invalid Input
-    with pytest.raises(ValueError):
-        allele_component.matchAlleleNames(1)
-
-
-def test_stats(get_component):
-    """
-    Tests the stats method of the ardal class.
-    """
-
-    ## test case 1: Stats
-    stats = get_component.matrixStats()
+def test_get_matrix_stats(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet=True)
+    stats = ardal.get.matrixStats()
     assert isinstance(stats, dict)
+    
 
-
-def test_getMatrix(get_component):
-    """
-    Tests the getMatrix method of the ardal class.
-    """
-
-    ## test case 1: Get Matrix
-    matrix = get_component.getMatrix()
-    assert isinstance(matrix, np.ndarray)
-
-
-def test_getHeaders(get_component):
-    """
-    Tests the getHeaders method of the ardal class.
-    """
-
-    ## test case 1: Get Headers
-    headers = get_component.getHeaders()
-    assert isinstance(headers, dict)
-
-
-def test_snpCount(get_component):
-    """
-    Tests the snpCount method of the ardal class.
-    """
-
-    ## test case 1: Snp Count
-    snp_count = get_component.snpCount()
-    assert snp_count == {'GUID1': 6,
-                         'GUID2': 6,
-                         'GUID3': 6,
-                         'GUID4': 6,
-                         'GUID5': 6,
-                         'GUID6': 6,
-                         'GUID7': 6,
-                         'GUID8': 5,
-                         'GUID9': 5,
-                         'GUID10': 4}
-
-
-def test_toDataFrame(get_component):
-    """
-    Tests the toDataFrame method of the ardal class.
-    """
-
-    ## test case 1: To Data Frame
-    df = get_component.toDataFrame()
-    assert isinstance(df, pd.DataFrame)
+# def test_with_coords_bed(matrix_npy, coords_bed_file):
+#     ardal = Ardal(data_source=matrix_npy, coords_bed=coords_bed_file, quiet=True)
+#     assert ardal.headerUtils is not None

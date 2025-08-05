@@ -74,9 +74,12 @@ public:
     const std::vector<int>& getRowMassesVector( void );
     py::array_t<int> getColumnMasses( void );
     double getDensity( void ) const;
+    size_t getNCols( void ) const;
+    size_t getNRows( void ) const;
     py::array_t<uint8_t> getBitMatrix( void ) const;
     py::array_t<uint64_t> getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
-                                                 const std::vector<size_t>& col_indices ) const;
+                                                 const std::vector<size_t>& col_indices,
+                                                 const int threads = 1 ) const;
 
 private:
     // bit-packed matrix
@@ -95,7 +98,8 @@ private:
     std::vector<uint64_t> getColumnVector(size_t col_idx) const;
     std::vector<size_t> getColSetBitIndices( size_t col_idx ) const;
     std::vector<std::vector<uint64_t>> subsetPackedMatrix( const std::vector<size_t>& row_indices,
-                                                           const std::vector<size_t>& col_indices ) const;
+                                                           const std::vector<size_t>& col_indices,
+                                                           const int threads = 1 ) const;
 
     // distance functions
     uint32_t hammingDistance_scalar( size_t i, size_t j ) const;

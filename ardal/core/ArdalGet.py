@@ -4,27 +4,30 @@ This module provides functionality for retrieving and manipulating allele matric
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from humanize import naturalsize
 
 from .utilities import *
 from ..exceptions.exceptions import *
 
 
-# core/ArdalGet.py
+## core/ArdalGet.py
 class ArdalGet:
     """ Class for retrieving and manipulating allele matrices in the Ardal framework.
     """
 
-    def __init__(self, headers, hybrid_matrix, roaring_enabled):
+    def __init__( self,
+                  headerUtils,
+                  hybrid_matrix,
+                  roaring_enabled : bool ):
 
-        self._headers = headers
+        self._headerUtils = headerUtils
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
     
     def subset( self,
                 guid_list : list = [],
-                allele_list : list = [] ):
+                allele_list : list = [],
+                data_only : bool = False):
         """ Take a list of GUIDs and subset the allele matrix to include only these GUIDs, allowing for standard operations.
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
@@ -36,34 +39,40 @@ class ArdalGet:
 
         ## check GUIDs
         if guid_list:
-            checkGUIDs(guid_list, self._headers)
+            self._headerUtils.checkGUIDs(guid_list)
         else:
-            guid_list = self._headers["guids"]
+            guid_list = self._headerUtils.headers["guids"]
 
         ## check alleles
         if allele_list:
-            checkAlleles(allele_list, self._headers)
+            self._headerUtils.checkAlleles(allele_list)
         else:
-            allele_list = self._headers["alleles"]
+            allele_list = self._headerUtils.headers["alleles"]
 
         ## subset the DataFrame
         ## TODO: this is pretty grim, could be done better in C++
-        subset_df = pd.DataFrame(self._matrix.getBitMatrix(), index=self._headers["guids"], columns=self._headers["alleles"]).loc[guid_list, allele_list]
+        subset_df = pd.DataFrame(self._matrix.getBitMatrix(), index=self._headerUtils.headers["guids"], columns=self._headerUtils.headers["alleles"]).loc[guid_list, allele_list]
 
         ## create new headers and matrix for the new Ardal object
         new_headers = {"guids": subset_df.index.tolist(), "alleles": subset_df.columns.tolist()}
         new_matrix = subset_df.values.astype(np.uint8)
         
-        ## return the new subset matrix/JSON pair
-        return Ardal([new_matrix, new_headers], quiet=True)
+        if not data_only:
+            ## return an ardal object initialised with the subset data
+            return Ardal([new_matrix, new_headers], quiet=True)
+        else:
+            ## return the new subset matrix/JSON pair
+            return [new_matrix, new_headers]
         
     
     def matrixStats( self,
                      print_stats : bool = False ) -> dict:
         """ Return a dictionary containing information about the database and its size in memory.
         """
-        n_guids = len(self._headers["guids"])
-        n_alleles = len(self._headers["alleles"])
+        naturalsize = require_package("humanize", attr="naturalsize")
+        
+        n_guids = len(self._headerUtils.headers["guids"])
+        n_alleles = len(self._headerUtils.headers["alleles"])
         density = self.density()
         roaring = self.roaring
         bit_matrix_size_bytes = self.bitMatrix().nbytes
@@ -124,14 +133,14 @@ class ArdalGet:
         """ Return the roaring allele matrix.
         """
         roaring_dict = defaultdict(list)
-        guids = self._headers["guids"]
+        guids = self._headerUtils.headers["guids"]
 
         if self.roaring:
             rormat = self._matrix.getRoaringMatrix()
 
             if decode:
                 for i, mat in enumerate(rormat):
-                    allele_ids = [decodeAllele(idx, self._headers) for idx in mat]
+                    allele_ids = [self._headerUtils.decodeAllele(idx) for idx in mat]
                     roaring_dict[guids[i]]=allele_ids
                 return roaring_dict
             else:
@@ -144,14 +153,14 @@ class ArdalGet:
     def headers( self ) -> dict:
         """ Return the allele _headers.
         """
-        return self._headers
+        return self._headerUtils.headers
     
 
     def snpCount( self ) -> dict:
         """ Return a dictionary of SNP counts for each GUID.
         """
         guid_mass_vec = self._matrix.getRowMasses()
-        return {guid : mass for guid, mass in zip(self._headers["guids"], guid_mass_vec)}
+        return {guid : mass for guid, mass in zip(self._headerUtils.headers["guids"], guid_mass_vec)}
     
     
     def intervalAlleles( self,
@@ -160,5 +169,5 @@ class ArdalGet:
                          allele_id_format : str = "{chr}.{start}.{ref}.{alt}" ) -> list:
         """ Return a list of alleles which fall within the given genomic intervals.
         """
-        return getIntervalAlleles(intervals, self._headers, allele_id_format, coords_bed)
+        return self._headerUtils.getIntervalAlleles(intervals, allele_id_format, coords_bed)
     

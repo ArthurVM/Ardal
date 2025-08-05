@@ -290,7 +290,7 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
 
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(guided)
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
@@ -342,13 +342,19 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
         throw std::runtime_error("Thread count must be positive.");
     }
 
-    std::vector<std::vector<uint64_t>> submatrix = subsetPackedMatrix(row_indices, col_indices);
     const size_t subm_n_rows = row_indices.size();
     const size_t subm_n_cols = col_indices.size();
     const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
+
+    py::print("[C++] bit subsetting...");
+
+    // subset the matrix
+    std::vector<std::vector<uint64_t>> submatrix = subsetPackedMatrix(row_indices, col_indices, threads);
+
     const size_t total_pairs = subm_n_rows * (subm_n_rows - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);
 
+    py::print("[C++] bit hamming...");
     {
         // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
         using HammingFunc = uint32_t(*)(const uint64_t*, const uint64_t*, size_t);
@@ -366,7 +372,7 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
 
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(guided)
         for (size_t i = 0; i < subm_n_rows; ++i) {
             for (size_t j = i + 1; j < subm_n_rows; ++j) {
                 size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
@@ -374,12 +380,6 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
                 uint32_t dist = hamming_func(&submatrix[i][0], &submatrix[j][0], subm_packed_cols);
 
                 dist_ptr[idx] = dist;
-
-                // if (fill_cache) {
-                //     // currently not in action to save some headaches
-                //     #pragma omp critical
-                //     _hamming_cache[{i, j}] = dist;
-                // }
             }
         }
     }   // GIL reestablished
@@ -438,7 +438,7 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
 
         auto inner_product_ptr = inner_product_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(guided)
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
@@ -1191,31 +1191,48 @@ py::array_t<double> BitMatrix::informationGain( const std::vector<size_t>& ingro
  *  std::vector<std::vector<uint64_t>> : The new, smaller bit-packed matrix.
  ****************************************************************************************************/
 std::vector<std::vector<uint64_t>> BitMatrix::subsetPackedMatrix( const std::vector<size_t>& row_indices,
-                                                                  const std::vector<size_t>& col_indices ) const {
+                                                                  const std::vector<size_t>& col_indices,
+                                                                  const int threads ) const {
     const size_t subm_n_rows = row_indices.size();
     const size_t subm_n_cols = col_indices.size();
     const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
 
     std::vector<std::vector<uint64_t>> submatrix(subm_n_rows, std::vector<uint64_t>(subm_packed_cols, 0));
 
-    for (size_t i = 0; i < subm_n_rows; ++i) {
-        size_t orig_row_idx = row_indices[i];
-        for (size_t j = 0; j < subm_n_cols; ++j) {
-            size_t orig_col_idx = col_indices[j];
-            if (getBit(orig_row_idx, orig_col_idx)) {
-                size_t new_word_idx = j / 64;
-                size_t new_bit_idx = j % 64;
-                submatrix[i][new_word_idx] |= (1ULL << new_bit_idx);
+    {
+        // open mp thread stuff
+        py::gil_scoped_release release;   // release GIL for full parallel region
+        omp_set_num_threads(threads);
+
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < subm_n_rows; ++i) {
+            size_t orig_row_idx = row_indices[i];
+            for (size_t j = 0; j < subm_n_cols; ++j) {
+                size_t orig_col_idx = col_indices[j];
+                if (getBit(orig_row_idx, orig_col_idx)) {
+                    size_t new_word_idx = j / 64;
+                    size_t new_bit_idx = j % 64;
+                    submatrix[i][new_word_idx] |= (1ULL << new_bit_idx);
+                }
             }
         }
-    }
+    }   
     return submatrix;
 }
-
 
  
 double BitMatrix::getDensity( void ) const {
     return _density;
+}
+
+
+size_t BitMatrix::getNCols( void ) const {
+    return _n_cols;
+}
+
+
+size_t BitMatrix::getNRows( void ) const {
+    return _n_rows;
 }
 
 
@@ -1294,18 +1311,19 @@ py::array_t<int> BitMatrix::getColumnMasses( void ) {
  *  py::array_t<uint64_t> : A 2D NumPy array representing the packed sub-matrix.
  ****************************************************************************************************/
 py::array_t<uint64_t> BitMatrix::getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
-                                                        const std::vector<size_t>& col_indices ) const {
-    const std::vector<std::vector<uint64_t>> submat = subsetPackedMatrix(row_indices, col_indices);
+                                                        const std::vector<size_t>& col_indices,
+                                                        const int threads ) const {
+    const std::vector<std::vector<uint64_t>> submat = subsetPackedMatrix(row_indices, col_indices, threads);
     const size_t nrows = row_indices.size();
     const size_t ncols = col_indices.size();
 
-    py::array_t<uint64_t> result({nrows, ncols});
-    auto buf = result.mutable_unchecked<2>();
+    py::array_t<uint64_t> subset_matrix_py({nrows, ncols});
+    auto buf = subset_matrix_py.mutable_unchecked<2>();
     for (size_t i = 0; i < nrows; ++i)
         for (size_t j = 0; j < ncols; ++j)
             buf(i, j) = submat[i][j];
 
-    return result;
+    return subset_matrix_py;
 }
 
 } // namespace _ardal

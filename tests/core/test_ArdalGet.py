@@ -1,6 +1,8 @@
 import pytest
 import numpy as np
 
+from ardal.exceptions.exceptions import InvalidGUIDQueryError, ParameterError
+
 
 def test_subset(get_component):
     """
@@ -8,18 +10,18 @@ def test_subset(get_component):
     """
     # Test subset by GUIDs
     guid_subset = ["GUID1", "GUID10"]
-    matrix, headers = get_component.subset(guid_list=guid_subset)
+    matrix, headers = get_component.subset(guid_list=guid_subset, data_only=True)
     assert headers["guids"] == guid_subset
     assert matrix.shape == (2, 10)
 
     # Test subset by Alleles
     allele_subset = ["SNP1", "SNP10"]
-    matrix, headers = get_component.subset(allele_list=allele_subset)
+    matrix, headers = get_component.subset(allele_list=allele_subset, data_only=True)
     assert headers["alleles"] == allele_subset
     assert matrix.shape == (10, 2)
 
     # Test subset by both
-    matrix, headers = get_component.subset(guid_list=guid_subset, allele_list=allele_subset)
+    matrix, headers = get_component.subset(guid_list=guid_subset, allele_list=allele_subset, data_only=True)
     assert headers["guids"] == guid_subset
     assert headers["alleles"] == allele_subset
     assert matrix.shape == (2, 2)
@@ -28,12 +30,12 @@ def test_subset(get_component):
     np.testing.assert_array_equal(matrix, expected_matrix)
 
     # Test invalid GUID
-    with pytest.raises(ValueError, match="not found in allele matrix"):
-        get_component.subset(guid_list=["INVALID_GUID"])
+    with pytest.raises(InvalidGUIDQueryError, match=f"guids "):  ## doesnt seem to like the end of the warning string
+        get_component.subset(guid_list=["INVALID_GUID"], data_only=True)
 
     # Test empty lists
-    with pytest.raises(ValueError, match="cannot both be empty"):
-        get_component.subset(guid_list=[], allele_list=[])
+    with pytest.raises(ParameterError, match="guid_list and allele_list cannot both be empty."):
+        get_component.subset(guid_list=[], allele_list=[], data_only=True)
 
 
 def test_matrix_stats(get_component, capsys):
@@ -61,11 +63,11 @@ def test_density(get_component):
     assert get_component.density() == pytest.approx(0.56)
 
 
-def test_bit_matrix(get_component, test_data):
+def test_bit_matrix(get_component, test_data_mem):
     """
     Tests the bitMatrix method of the ArdalGet class.
     """
-    matrix, _ = test_data
+    matrix, _ = test_data_mem
     np.testing.assert_array_equal(get_component.bitMatrix(), matrix)
 
 

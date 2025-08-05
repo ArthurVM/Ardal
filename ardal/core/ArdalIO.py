@@ -10,14 +10,17 @@ from .utilities import *
 from ..exceptions.exceptions import *
 
 
-# core/ArdalIO.py
+## core/ArdalIO.py
 class ArdalIO:
     """ Class for reading and writing allele matrices in the Ardal framework.
     """
 
-    def __init__(self, headers, hybrid_matrix, roaring_enabled):
+    def __init__( self,
+                  headerUtils,
+                  hybrid_matrix,
+                  roaring_enabled : bool ):
 
-        self._headers = headers
+        self._headerUtils = headerUtils
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
@@ -25,18 +28,19 @@ class ArdalIO:
     def toDataFrame( self ) -> pd.DataFrame:
         """ Return the allele matrix as a Pandas DataFrame.
         """
-        return pd.DataFrame(self._matrix.getBitMatrix(), index=self._headers["guids"], columns=self._headers["alleles"])
+        return pd.DataFrame(self._matrix.getBitMatrix(), index=self._headerUtils.headers["guids"], columns=self._headerUtils.headers["alleles"])
 
 
+    @validate_backend_argument
     def toDict( self,
-                force_bit_backend : bool = False ) -> dict:
+                backend : str = "auto" ) -> dict:
         """ Return a dictionary containing present allele IDs mapped to their guid.
         """
         allele_dict = defaultdict(list)
-        for guid_idx, guid_name in enumerate(self._headers["guids"]):
-            snp_indices = self._matrix.getSetBitIndices(guid_idx, force_bit_backend=force_bit_backend)
+        for guid_idx, guid_name in enumerate(self._headerUtils.headers["guids"]):
+            snp_indices = self._matrix.getSetBitIndices(guid_idx, backend=backend)
             for snp_idx in snp_indices:
-                allele_dict[guid_name].append(decodeAllele(snp_idx, self._headers))
+                allele_dict[guid_name].append(self._headerUtils.decodeAllele(snp_idx))
         return dict(allele_dict)
     
 
@@ -71,7 +75,7 @@ class ArdalIO:
         print(f"Wrote allele matrix to disk : {matrix_out_path}")
 
         with open(json_out_path, 'w') as fout:
-            json.dump(self._headers, fout, indent=4)
+            json.dump(self._headerUtils.headers, fout, indent=4)
             
         print(f"Wrote headers to disk : {json_out_path}")
 

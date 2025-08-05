@@ -8,14 +8,17 @@ from .utilities import *
 from ..exceptions.exceptions import *
 
 
-# core/ArdalStats.py
+## core/ArdalStats.py
 class ArdalStats:
     """ Class for calculating statistics on allele matrices in the Ardal framework.
     """
 
-    def __init__(self, headers, hybrid_matrix, roaring_enabled):
+    def __init__( self,
+                  headerUtils,
+                  hybrid_matrix,
+                  roaring_enabled : bool ):
 
-        self._headers = headers
+        self._headerUtils = headerUtils
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
@@ -26,14 +29,14 @@ class ArdalStats:
         if an empty list is provided then all guids will be used.
         """
         if guids == []:
-            guids = self._headers["guids"]
+            guids = self._headerUtils.headers["guids"]
         else:
-            checkGUIDs(guids, self._headers)
+            self._headerUtils.checkGUIDs(guids)
         
-        guid_coords = [encodeGuid(guid, self._headers) for guid in guids]
+        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
         allele_freq = self._matrix.colFrequency(guid_coords)
 
-        return dict(sorted(zip(self._headers["alleles"], allele_freq), key=lambda x: x[1], reverse=True))
+        return dict(sorted(zip(self._headerUtils.headers["alleles"], allele_freq), key=lambda x: x[1], reverse=True))
         
 
     def alleleEntropy( self ) -> dict:
@@ -41,7 +44,7 @@ class ArdalStats:
         Entropy H(X) = -p * log2(p) - (1-p) * log2(1-p), where p is the allele frequency.
         """
         allele_entropy = self._matrix.columnEntropy()
-        entropies_dict = dict(sorted(zip(self._headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
+        entropies_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
         return entropies_dict
 
     
@@ -51,8 +54,8 @@ class ArdalStats:
                     threads : int = 1 ) -> dict:
         """ Computes the co-occurrence of pairs of alleles.
         """
-        if not isinstance(allele_indices, list):
-            raise TypeError("allele_indices must be a list.")
+        ## input validation
+        self._headerUtils.checkAlleles(allele_indices)
         if not isinstance(threshold, float):
             raise TypeError("threshold must be a float.")
         if not isinstance(threads, int):
@@ -63,10 +66,10 @@ class ArdalStats:
             raise ParameterError("threads must be at least 1.")
 
         if allele_indices != []:
-            checkAlleles(allele_indices, self._headers)
+            self._headerUtils.checkAlleles(allele_indices)
 
             ## encode the alleles
-            allele_indices = [encodeAllele(allele, self._headers) for allele in allele_indices]
+            allele_indices = [self._headerUtils.encodeAllele(allele) for allele in allele_indices]
 
             cooc_dict = self._matrix.bitCooccurrence_subset(col_indices=allele_indices,
                                                             threshold=threshold,
@@ -78,7 +81,7 @@ class ArdalStats:
 
         decoded_dict = defaultdict(list)
         for ref, cooc_vec in cooc_dict.items():
-            decoded_dict[decodeAllele(ref, self._headers)] = [decodeAllele(allele, self._headers) for allele in cooc_vec]
+            decoded_dict[self._headerUtils.decodeAllele(ref)] = [self._headerUtils.decodeAllele(allele) for allele in cooc_vec]
 
         return decoded_dict
 
@@ -114,7 +117,7 @@ class ArdalStats:
         if not isinstance(guids, list) or not guids:
             raise EmptySelectionError("guids must be a non-empty list.")
         
-        checkGUIDs(guids, self._headers)
+        self._headerUtils.checkGUIDs(guids)
 
         if metric == 'kullbackleibler':
             return self._klDivergence(guids)
@@ -130,9 +133,9 @@ class ArdalStats:
         allele frequency distributions for each allele in the matrix.
         D_{kl}(P||Q) = sum_{x in X}(P(x) * log2(P(x)/Q(x)))
         """
-        guid_coords = [encodeGuid(guid, self._headers) for guid in guids]
+        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
         kl_divergence = self._matrix.klDivergence(guid_coords)
-        kl_dict = dict(sorted(zip(self._headers["alleles"], kl_divergence), key=lambda x: x[1], reverse=True))
+        kl_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], kl_divergence), key=lambda x: x[1], reverse=True))
         return kl_dict
 
     
@@ -144,9 +147,9 @@ class ArdalStats:
         Args:
             guids: list of sample identifiers to define the target group
         """
-        guid_coords = [encodeGuid(guid, self._headers) for guid in guids]
+        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
         js_divergence = self._matrix.jsDivergence(guid_coords)
-        js_dict = dict(sorted(zip(self._headers["alleles"], js_divergence), key=lambda x: x[1], reverse=True))
+        js_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], js_divergence), key=lambda x: x[1], reverse=True))
         return js_dict
 
 
@@ -159,9 +162,9 @@ class ArdalStats:
         Returns:
             np.ndarray of shape (n_snps,) - information gain per SNP
         """
-        guid_coords = [encodeGuid(guid, self._headers) for guid in guids]
+        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
         ig = self._matrix.informationGain(guid_coords)
-        ig_dict = dict(sorted(zip(self._headers["alleles"], ig), key=lambda x: x[1], reverse=True))
+        ig_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], ig), key=lambda x: x[1], reverse=True))
         return ig_dict
 
 

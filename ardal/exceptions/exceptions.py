@@ -118,6 +118,10 @@ class AllelePatternError(ArdalError):
     """Raised when an allele pattern is malformed or invalid."""
     pass
 
+class InvalidBackendError(ArdalError):
+    """Raised when an invalid backend is passed as a parameter."""
+    pass
+
 
 ## warnings
 

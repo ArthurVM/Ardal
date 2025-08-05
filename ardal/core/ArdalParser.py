@@ -2,30 +2,32 @@ import sys
 import os
 import pandas as pd
 import numpy as np
-import scipy as sp
 import json
+from typing import Union, Tuple
 
 from ..exceptions.exceptions import *
+from .utilities import *
 
 
+## core/ArdalParser.py
 class ArdalParser:
     """ Parses Ardal data from CSV, Parquet, or NPY/JSON file pairs.
     """
 
     def __init__( self,
-                  input_data_structure,
-                  file_format=None ):
+                  input_data_structure : Union[list, str],
+                  file_format : Union[str, None] = None ):
         """ ArdalParser constructor
         """
         self.input_data = input_data_structure
         self.file_format = file_format.lower() if file_format else None
         self.matrix = None
-        self.headers = None
+        self.headers = {}
 
         self._parse()
 
 
-    def _parse( self ) -> int:
+    def _parse( self ) -> Union[int, None]:
         """ Parses the data based on the specified file format.
         """
 
@@ -33,11 +35,12 @@ class ArdalParser:
         if self.input_data is None:
             raise MalformedInputError("Input data structure cannot be None.")
 
-        ## handle [np.ndarray, dict] or [dict, np.ndarray]
+        ## handle list input for data in memory or on disk
         if isinstance(self.input_data, list):
             if len(self.input_data) != 2:
                 raise MalformedInputError("Input list must contain two elements: matrix and headers.")
-
+            
+            ## handle [np.ndarray, dict] or [dict, np.ndarray]
             a, b = self.input_data
             if isinstance(a, np.ndarray) and isinstance(b, dict):
                 self.matrix, self.headers = np.ascontiguousarray(a), b
@@ -56,7 +59,7 @@ class ArdalParser:
                 self.input_data = sorted([a, b], key=lambda x: x.split(".")[-1])
                 self.file_format = self.input_data[1].split(".")[-1].lower()
             else:
-                raise MalformedInputError("If list input, must contain either [headers, matrix] or two file paths.")
+                raise MalformedInputError("If list input, must contain either [headers, np.matrix] or two file paths.")
 
         elif isinstance(self.input_data, str):
             if not os.path.exists(self.input_data):
@@ -81,7 +84,7 @@ class ArdalParser:
         self._validate()
 
 
-    def _validate(self):
+    def _validate( self ) -> None:
         ## matrix checks
         if not isinstance(self.matrix, np.ndarray):
             raise LoadMatrixError("Matrix must be a NumPy array.")
@@ -125,21 +128,25 @@ class ArdalParser:
             raise LoadMatrixError("Alleles must be unique.")
 
 
-    def _load_csv(self, filepath):
+    def _load_csv( self,
+                   filepath : str ) -> Tuple[np.ndarray, dict]:
         df = pd.read_csv(filepath, index_col=0)
         matrix = df.values
         headers = {"guids": list(df.index), "alleles": list(df.columns)}
         return matrix, headers
 
 
-    def _load_parquet(self, filepath):
+    def _load_parquet( self,
+                       filepath :str ) -> Tuple[np.ndarray, dict]:
         df = pd.read_parquet(filepath, engine="fastparquet")
         matrix = df.values
         headers = {"guids": list(df.index), "alleles": list(df.columns)}
         return matrix, headers
 
 
-    def _load_npy_pair(self, json_path, npy_path):
+    def _load_npy_pair( self,
+                        json_path : str,
+                        npy_path : str ) -> Tuple[np.ndarray, dict]:
         try:
             matrix = np.ascontiguousarray(np.load(npy_path))
             with open(json_path, "r") as f:
@@ -149,13 +156,34 @@ class ArdalParser:
         return matrix, headers
 
 
-    def _load_npz_pair(self, json_path, npz_path):
+    
+    def _load_npz_pair(self,
+                    json_path: str,
+                    npz_path: str) -> Tuple[np.ndarray, dict]:
+        sp = require_package("scipy", attr="sparse")
+        ## try scipy.sparse first
         try:
-            # sparse = np.load(npz_path)['matrix']
-            sparse = sp.sparse.load_npz(npz_path).toarray()
-            matrix = np.ascontiguousarray(sparse)
+            sparse = sp.sparse.load_npz(npz_path)
+            matrix = np.ascontiguousarray(sparse.toarray())
+        except Exception as sp_error:
+            ## fall back to numpy load
+            try:
+                data = np.load(npz_path)
+                if 'matrix' not in data:
+                    raise ValueError("Key 'matrix' not found in .npz file.")
+                matrix = np.ascontiguousarray(data['matrix'])
+            except Exception as np_error:
+                raise LoadMatrixError(
+                    f"Failed to load matrix from npz: "
+                    f"scipy.sparse.load_npz failed with {sp_error}; "
+                    f"np.load failed with {np_error}"
+                )
+
+        ## load JSON file for headers
+        try:
             with open(json_path, "r") as f:
                 headers = json.load(f)
         except Exception as e:
-            raise LoadMatrixError(f"Failed to load npz/json pair: {e}")
+            raise LoadMatrixError(f"Failed to load JSON headers: {e}")
+
         return matrix, headers
