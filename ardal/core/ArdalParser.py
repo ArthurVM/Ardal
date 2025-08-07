@@ -5,8 +5,11 @@ import numpy as np
 import json
 from typing import Union, Tuple
 
-from ..exceptions.exceptions import *
-from .utilities import *
+from ..utils.misc import require_package
+from ..utils.exceptions import MalformedInputError, UnsupportedFormatError, LoadMatrixError
+from ..utils.logger import get_logger
+
+log = get_logger()
 
 
 ## core/ArdalParser.py
@@ -15,12 +18,11 @@ class ArdalParser:
     """
 
     def __init__( self,
-                  input_data_structure : Union[list, str],
-                  file_format : Union[str, None] = None ):
+                  input_data_structure : Union[list, str] ):
         """ ArdalParser constructor
         """
         self.input_data = input_data_structure
-        self.file_format = file_format.lower() if file_format else None
+        self.file_format = None
         self.matrix = None
         self.headers = {}
 
@@ -160,10 +162,10 @@ class ArdalParser:
     def _load_npz_pair(self,
                     json_path: str,
                     npz_path: str) -> Tuple[np.ndarray, dict]:
-        sp = require_package("scipy", attr="sparse")
+        sparse = require_package("scipy", attr="sparse")
         ## try scipy.sparse first
         try:
-            sparse = sp.sparse.load_npz(npz_path)
+            sparse = sparse.load_npz(npz_path)
             matrix = np.ascontiguousarray(sparse.toarray())
         except Exception as sp_error:
             ## fall back to numpy load

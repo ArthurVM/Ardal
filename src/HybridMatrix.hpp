@@ -93,6 +93,10 @@ public:
 
     bool roaringEnabled( void ) const;
 
+    py::array_t<size_t> getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
+                                               const std::vector<size_t>& col_indices,
+                                               const int threads ) const;
+
 
 private:
     std::unique_ptr<BitMatrix> bit_backend;

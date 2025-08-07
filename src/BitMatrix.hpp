@@ -77,9 +77,9 @@ public:
     size_t getNCols( void ) const;
     size_t getNRows( void ) const;
     py::array_t<uint8_t> getBitMatrix( void ) const;
-    py::array_t<uint64_t> getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
-                                                 const std::vector<size_t>& col_indices,
-                                                 const int threads = 1 ) const;
+    py::array_t<uint64_t> getSubsetMatrix( const std::vector<size_t>& row_indices, 
+                                           const std::vector<size_t>& col_indices,
+                                           const int threads = 1 ) const;
 
 private:
     // bit-packed matrix

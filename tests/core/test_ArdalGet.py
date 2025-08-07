@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 
-from ardal.exceptions.exceptions import InvalidGUIDQueryError, ParameterError
+from ardal.utils.exceptions import InvalidGUIDQueryError, ParameterError, RoaringError
 
 
 def test_subset(get_component):
@@ -10,18 +10,18 @@ def test_subset(get_component):
     """
     # Test subset by GUIDs
     guid_subset = ["GUID1", "GUID10"]
-    matrix, headers = get_component.subset(guid_list=guid_subset, data_only=True)
+    matrix, headers = get_component.subset(guids=guid_subset, data_only=True)
     assert headers["guids"] == guid_subset
     assert matrix.shape == (2, 10)
 
     # Test subset by Alleles
     allele_subset = ["SNP1", "SNP10"]
-    matrix, headers = get_component.subset(allele_list=allele_subset, data_only=True)
+    matrix, headers = get_component.subset(alleles=allele_subset, data_only=True)
     assert headers["alleles"] == allele_subset
     assert matrix.shape == (10, 2)
 
     # Test subset by both
-    matrix, headers = get_component.subset(guid_list=guid_subset, allele_list=allele_subset, data_only=True)
+    matrix, headers = get_component.subset(guids=guid_subset, alleles=allele_subset, data_only=True)
     assert headers["guids"] == guid_subset
     assert headers["alleles"] == allele_subset
     assert matrix.shape == (2, 2)
@@ -31,11 +31,11 @@ def test_subset(get_component):
 
     # Test invalid GUID
     with pytest.raises(InvalidGUIDQueryError, match=f"guids "):  ## doesnt seem to like the end of the warning string
-        get_component.subset(guid_list=["INVALID_GUID"], data_only=True)
+        get_component.subset(guids=["INVALID_GUID"], data_only=True)
 
     # Test empty lists
-    with pytest.raises(ParameterError, match="guid_list and allele_list cannot both be empty."):
-        get_component.subset(guid_list=[], allele_list=[], data_only=True)
+    with pytest.raises(ParameterError, match="guids and alleles cannot both be empty."):
+        get_component.subset(guids=[], alleles=[], data_only=True)
 
 
 def test_matrix_stats(get_component, capsys):
@@ -71,29 +71,23 @@ def test_bit_matrix(get_component, test_data_mem):
     np.testing.assert_array_equal(get_component.bitMatrix(), matrix)
 
 
-def test_roaring_matrix(get_component):
+def test_roaring_matrix(get_component, get_component_no_roaring):
     """
     Tests the roaringMatrix method of the ArdalGet class.
     """
-    # Test decoded output
+    ## test decoded output
     roaring_dict = get_component.roaringMatrix(decode=True)
     assert isinstance(roaring_dict, dict)
     assert "GUID1" in roaring_dict
     assert set(roaring_dict["GUID1"]) == {"SNP1", "SNP5", "SNP6", "SNP7", "SNP8", "SNP10"}
 
-    # Test raw output
+    ## test raw output
     raw_roaring = get_component.roaringMatrix(decode=False)
     assert isinstance(raw_roaring, list)
     assert len(raw_roaring) == 10
     assert isinstance(raw_roaring[0], np.ndarray)
-
-
-def test_snp_count(get_component):
-    """
-    Tests the snpCount method of the ArdalGet class.
-    """
-    counts = get_component.snpCount()
-    assert isinstance(counts, dict)
-    assert counts["GUID1"] == 6
-    assert counts["GUID10"] == 4
+    
+    ## test roaringMatrix getter when roaring is not available
+    with pytest.raises(RoaringError, match="Ardal object was instantialised with 'roaring=False'. Cannot retrieve roaring matrix."):
+        get_component_no_roaring.roaringMatrix(decode=False)
 

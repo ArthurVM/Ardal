@@ -97,5 +97,10 @@ PYBIND11_MODULE(_ardal, m) {  // _ardal module and function bindings
 
         .def("getRoaringMatrix", &_ardal::HybridMatrix::getRoaringMatrix)
         
-        .def("roaringEnabled", &_ardal::HybridMatrix::roaringEnabled);
+        .def("roaringEnabled", &_ardal::HybridMatrix::roaringEnabled)
+
+        .def("getSubsetPackedMatrix", &_ardal::HybridMatrix::getSubsetPackedMatrix,
+            py::arg("row_indices"),
+            py::arg("col_indices"),
+            py::arg("threads") = 1);
 }

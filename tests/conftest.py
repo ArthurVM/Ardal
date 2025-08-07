@@ -9,7 +9,7 @@ from ardal.core.ArdalIO import ArdalIO
 from ardal.core.ArdalGet import ArdalGet
 from ardal.core.ArdalStats import ArdalStats
 from ardal.core.ArdalAllele import ArdalAllele
-from ardal.core.ArdalCompare import ArdalCompare
+from ardal.core.ArdalDistance import ArdalDistance
 
 
 @pytest.fixture(scope="session")
@@ -67,6 +67,11 @@ def test_data_mem():
 
 
 @pytest.fixture(scope="session")
+def headers(test_data_mem):
+    return test_data_mem[1]
+
+
+@pytest.fixture(scope="session")
 def test_data_matrix_npy():
     return ["./data/sim_matrix.npy", "./data/sim_headers.json"]
 
@@ -86,15 +91,24 @@ def ardal_object(test_data_mem):
     """
     Creates an Ardal object for testing.
     """
-    ardal_object = Ardal(data_source=test_data_mem, roaring=True, quiet=True)
+    ardal_object = Ardal(data_source=test_data_mem, roaring=True, quiet_init=True)
     return ardal_object
 
 
 @pytest.fixture(scope="session")
+def ardal_object_simdata(test_data_matrix_npz):
+    """
+    Creates an Ardal object for testing.
+    """
+    ardal_object_simdata = Ardal(data_source=test_data_matrix_npz, roaring=True, quiet_init=True)
+    return ardal_object_simdata
+
+
+@pytest.fixture(scope="session")
 def hybrid_matrix(test_data_mem, ardal_object):
-    """Creates a HybridMatrix object for testing."""
+    """Creates a hybrid_matrix object for testing."""
     # Assuming default parameters from the Ardal constructor
-    return ardal_object.get.hybridMatrix()
+    return ardal_object.get.hybrid_matrix()
 
 
 @pytest.fixture(scope="session")
@@ -117,6 +131,19 @@ def get_component(headerUtils_component, hybrid_matrix):
 
 
 @pytest.fixture(scope="session")
+def allele_component_simdata(headerUtils_component, ardal_object_simdata):
+    """Creates an ArdalAllele component for testing the intervalAlleles function."""
+    hybrid_matrix = ardal_object_simdata.get.hybrid_matrix()
+    return ArdalAllele(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
+
+
+@pytest.fixture(scope="session")
+def get_component_no_roaring(headerUtils_component, hybrid_matrix):
+    """Creates an ArdalGet component for unit testing."""
+    return ArdalGet(headerUtils_component, hybrid_matrix, False)
+
+
+@pytest.fixture(scope="session")
 def stats_component(headerUtils_component, hybrid_matrix):
     """Creates an ArdalStats component for unit testing."""
     return ArdalStats(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
@@ -129,6 +156,6 @@ def allele_component(headerUtils_component, hybrid_matrix):
 
 
 @pytest.fixture(scope="session")
-def compare_component(headerUtils_component, hybrid_matrix):
-    """Creates an ArdalCompare component for unit testing."""
-    return ArdalCompare(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
+def distance_component(headerUtils_component, hybrid_matrix):
+    """Creates an ArdalDistance component for unit testing."""
+    return ArdalDistance(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())

@@ -5,12 +5,12 @@ import json
 import os
 
 
-def test_to_dataframe(io_component, test_data):
+def test_to_dataframe(io_component, test_data_mem):
     """
     Tests the toDataFrame method of the ArdalIO class.
     """
     df = io_component.toDataFrame()
-    matrix, headers = test_data
+    matrix, headers = test_data_mem
 
     assert isinstance(df, pd.DataFrame)
     assert df.shape == (10, 10)
@@ -25,29 +25,29 @@ def test_to_dict(io_component):
     """
     data_dict = io_component.toDict()
     assert isinstance(data_dict, dict)
-    # Based on test_data in conftest.py
-    # GUID1 has SNP1, SNP5, SNP6, SNP7, SNP8, SNP10
+    ## based on test_data in conftest.py
+    ## GUID1 has SNP1, SNP5, SNP6, SNP7, SNP8, SNP10
     assert set(data_dict["GUID1"]) == {"SNP1", "SNP5", "SNP6", "SNP7", "SNP8", "SNP10"}
-    # GUID10 has SNP4, SNP5, SNP7, SNP9
+    ## GUID10 has SNP4, SNP5, SNP7, SNP9
     assert set(data_dict["GUID10"]) == {"SNP4", "SNP5", "SNP7", "SNP9"}
 
 
-def test_write_npy(io_component, headers, test_data, tmp_path):
+def test_write_npy(io_component, test_data_mem, tmp_path):
     """
     Tests the write method with npy output.
     """
-    matrix, _ = test_data
+    matrix, headers = test_data_mem
     output_dir = tmp_path / "test_output_npy"
     output_dir.mkdir()
     io_component.write(str(output_dir), "test_data", npz=False)
 
-    # Verify files were created
+    ## verify files were created
     json_file = output_dir / "test_data_headers.json"
     npy_file = output_dir / "test_data_matrix.npy"
     assert json_file.exists()
     assert npy_file.exists()
 
-    # Verify content
+    ## verify content
     with open(json_file, 'r') as f:
         loaded_headers = json.load(f)
     assert loaded_headers == headers
@@ -56,11 +56,11 @@ def test_write_npy(io_component, headers, test_data, tmp_path):
     np.testing.assert_array_equal(loaded_matrix, matrix)
 
 
-def test_write_npz(io_component, test_data, tmp_path):
+def test_write_npz(io_component, test_data_mem, tmp_path):
     """
     Tests the write method with npz output.
     """
-    matrix, _ = test_data
+    matrix, _ = test_data_mem
     output_dir = tmp_path / "test_output_npz"
     output_dir.mkdir()
     io_component.write(str(output_dir), "test_data", npz=True)

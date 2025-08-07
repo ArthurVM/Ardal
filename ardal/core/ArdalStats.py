@@ -3,9 +3,14 @@ This module provides functionality for calculating statistics on allele matrices
 """
 import numpy as np
 from collections import defaultdict
+from typing import Union, List, Dict
 
-from .utilities import *
-from ..exceptions.exceptions import *
+from ..utils.exceptions import ParameterError, EmptySelectionError
+from ..utils.decorators import check_generic_threshold, check_thread_count, check_guids_list
+from ..utils.validators import validate_type
+from ..utils.logger import get_logger
+
+log = get_logger()
 
 
 ## core/ArdalStats.py
@@ -23,17 +28,18 @@ class ArdalStats:
         self.roaring = roaring_enabled
 
 
-    def af( self,
-            guids : list=[] ) -> dict:
+    def allele_frequency( self,
+                          guids : List = []
+                          ) -> Dict:
         """ Calculates the allele frequency for each allele in the matrix across the group of guids.
         if an empty list is provided then all guids will be used.
         """
         if guids == []:
             guids = self._headerUtils.headers["guids"]
         else:
-            self._headerUtils.checkGUIDs(guids)
+            self._headerUtils.check_guids(guids)
         
-        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
+        guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         allele_freq = self._matrix.colFrequency(guid_coords)
 
         return dict(sorted(zip(self._headerUtils.headers["alleles"], allele_freq), key=lambda x: x[1], reverse=True))
@@ -48,28 +54,21 @@ class ArdalStats:
         return entropies_dict
 
     
-    def alleleCooc( self,
-                    allele_indices : list = [],
-                    threshold : float = 0.95,
-                    threads : int = 1 ) -> dict:
+    @check_thread_count
+    @check_generic_threshold
+    def allele_cooc( self,
+                     alleles : list = [],
+                     threshold : float = 0.95,
+                     threads : int = 1
+                     ) -> dict:
         """ Computes the co-occurrence of pairs of alleles.
         """
-        ## input validation
-        self._headerUtils.checkAlleles(allele_indices)
-        if not isinstance(threshold, float):
-            raise TypeError("threshold must be a float.")
-        if not isinstance(threads, int):
-            raise TypeError("threads must be an integer.")
-        if threshold < 0 or threshold > 1:
-            raise ParameterError("threshold must be between 0 and 1.")
-        if threads < 1:
-            raise ParameterError("threads must be at least 1.")
-
-        if allele_indices != []:
-            self._headerUtils.checkAlleles(allele_indices)
+        if alleles != []:
+            ## input validation
+            self._headerUtils.check_alleles(allele_indices)
 
             ## encode the alleles
-            allele_indices = [self._headerUtils.encodeAllele(allele) for allele in allele_indices]
+            allele_indices = [self._headerUtils.encode_allele(allele) for allele in allele_indices]
 
             cooc_dict = self._matrix.bitCooccurrence_subset(col_indices=allele_indices,
                                                             threshold=threshold,
@@ -81,20 +80,22 @@ class ArdalStats:
 
         decoded_dict = defaultdict(list)
         for ref, cooc_vec in cooc_dict.items():
-            decoded_dict[self._headerUtils.decodeAllele(ref)] = [self._headerUtils.decodeAllele(allele) for allele in cooc_vec]
+            decoded_dict[self._headerUtils.decode_allele(ref)] = [self._headerUtils.decode_allele(allele) for allele in cooc_vec]
 
         return decoded_dict
 
 
-    def snpInform( self,
-                   guids: list,
-                   metric: str = "kullbackleibler" ) -> dict:
+    @check_guids_list
+    def allele_inform( self,
+                       guids: List,
+                       metric: str = "kullbackleibler"
+                       ) -> Union[Dict, None]:
         """
-        Calculates various scores that measure the association of each SNP
+        Calculates scores that measure the association of each allele
         with a specified group of samples (guids).
 
         This function serves as a unified interface for metrics that return a single
-        float value per SNP, representing the strength or nature of the association.
+        float value per allele, representing the strength or nature of the association.
         It compares an "in-group" (the provided guids) against an "out-group"
         (all other samples).
 
@@ -107,73 +108,75 @@ class ArdalStats:
                 - 'informationgain': Information Gain.
 
         Returns:
-            dict: A dictionary of snp : score pairs.
+            dict: A dictionary of allele_id : score pairs.
         """
         ## input validation
         available_metrics = {'kullbackleibler', 'jensenshannon', 'informationgain'}
-        if metric not in available_metrics:
-            raise ParameterError(f"Metric '{metric}' is not supported. Available metrics: {list(available_metrics)}")
+        lower_metric = metric.lower()
+        if lower_metric not in available_metrics:
+            raise ParameterError(f"Metric '{lower_metric}' is not supported. Available metrics: {list(available_metrics)}")
         
-        if not isinstance(guids, list) or not guids:
-            raise EmptySelectionError("guids must be a non-empty list.")
-        
-        self._headerUtils.checkGUIDs(guids)
+        self._headerUtils.check_guids(guids)
 
-        if metric == 'kullbackleibler':
-            return self._klDivergence(guids)
-        if metric == 'jensenshannon':
-            return self._jsDivergence(guids)
-        if metric == 'informationgain':
-            return self._informationGain(guids)
+        if lower_metric == 'kullbackleibler':
+            return self._kl_divergence(guids)
+        if lower_metric == 'jensenshannon':
+            return self._js_divergence(guids)
+        if lower_metric == 'informationgain':
+            return self._information_gain(guids)
     
     
-    def _klDivergence( self,
-                       guids : list ) -> dict:
+    def _kl_divergence( self,
+                        guids : list
+                        ) -> dict:
         """ Computes the Kullbeck Liebler divergence between the in group (input guids) and out group (all others)
         allele frequency distributions for each allele in the matrix.
         D_{kl}(P||Q) = sum_{x in X}(P(x) * log2(P(x)/Q(x)))
         """
-        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
+        guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         kl_divergence = self._matrix.klDivergence(guid_coords)
         kl_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], kl_divergence), key=lambda x: x[1], reverse=True))
         return kl_dict
 
     
-    def _jsDivergence( self,
-                       guids : list ) -> dict:
+    def _js_divergence( self,
+                        guids : List
+                        ) -> Dict:
         """
-        Computes Jensen-Shannon divergence for each SNP between target_guids and others.
+        Computes Jensen-Shannon divergence for each allele between target_guids and others.
         
         Args:
             guids: list of sample identifiers to define the target group
         """
-        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
+        guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         js_divergence = self._matrix.jsDivergence(guid_coords)
         js_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], js_divergence), key=lambda x: x[1], reverse=True))
         return js_dict
 
 
-    def _informationGain( self,
-                          guids : list ) -> dict:
+    def _information_gain( self,
+                           guids : List
+                           ) -> Dict:
         """
-        Compute information gain for each SNP column in binary matrix X,
+        Compute information gain for each allele column in binary matrix X,
         with respect to whether a sample is in target_guids.
 
         Returns:
-            np.ndarray of shape (n_snps,) - information gain per SNP
+            np.ndarray of shape (n_alleles,) - information gain per allele
         """
-        guid_coords = [self._headerUtils.encodeGuid(guid) for guid in guids]
+        guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         ig = self._matrix.informationGain(guid_coords)
         ig_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], ig), key=lambda x: x[1], reverse=True))
         return ig_dict
 
 
-    def testSnpAssociations( self,
-                             guids: list,
-                             tests: list = None) -> dict:
+    def test_associations( self,
+                           guids: List,
+                           tests: List = None
+                           ) -> Union[Dict, None]:
         """
         Performs statistical tests to evaluate the significance of the association
-        of each SNP with a specified group of samples (guids).
+        of each allele with a specified group of samples (guids).
 
         This function is for metrics that typically return a test statistic and a p-value.
 
@@ -185,7 +188,7 @@ class ArdalStats:
                 - 'fisher': Fisher's Exact Test (Not Implemented).
 
         Returns:
-            dict: A dictionary of snp : [score, p-value] pairs.
+            dict: A dictionary of allele_id : [score, p-value] pairs.
         """
         raise NotImplementedError("This function is not yet implemented.")
     

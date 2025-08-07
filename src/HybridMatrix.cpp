@@ -273,4 +273,11 @@ bool HybridMatrix::roaringEnabled( void ) const {
     return roaring_enabled;
 }
 
+
+py::array_t<size_t> HybridMatrix::getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
+                                                         const std::vector<size_t>& col_indices,
+                                                         const int threads ) const {
+    return bit_backend->getSubsetMatrix(row_indices, col_indices, threads);
+}
+
 } // namespace _ardal

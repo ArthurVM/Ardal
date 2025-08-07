@@ -5,7 +5,7 @@ import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 from ardal.core.ArdalParser import ArdalParser
-from ardal.exceptions.exceptions import MalformedInputError, LoadMatrixError, UnsupportedFormatError
+from ardal.utils.exceptions import MalformedInputError, LoadMatrixError, UnsupportedFormatError
 
 
 def valid_headers(n_rows, n_cols):
@@ -69,9 +69,8 @@ def test_rejects_unsupported_format():
         with pytest.raises(UnsupportedFormatError):
             ArdalParser(f.name)
 
-def test_valid_npy_db():
-    npy_file = "../data/sim_matrix.npy"
-    header_file = "../data/sim_headers.json"
+def test_valid_npy_db(test_data_matrix_npy):
+    npy_file, header_file = test_data_matrix_npy
     npy_array = np.load(npy_file)
     with open(header_file, 'r') as fin:
         headers = json.load(fin)
@@ -79,9 +78,8 @@ def test_valid_npy_db():
     assert (parser.matrix == npy_array).all()
     assert parser.headers == headers
 
-def test_valid_npy_db():
-    npz_file = "../data/sim_matrix.npz"
-    header_file = "../data/sim_headers.json"
+def test_valid_npz_db(test_data_matrix_npz):
+    npz_file, header_file = test_data_matrix_npz
     npz_array = np.load(npz_file)['matrix']
     with open(header_file, 'r') as fin:
         headers = json.load(fin)
@@ -89,9 +87,9 @@ def test_valid_npy_db():
     assert (parser.matrix == npz_array).all()
     assert parser.headers == headers
 
-def test_valid_csv_db():
+def test_valid_csv_db(test_data_matrix_csv):
     import pandas as pd
-    csv_file = "../data/sim_matrix.csv"
+    csv_file = test_data_matrix_csv
     df = pd.read_csv(csv_file, index_col=0)
     matrix = df.values
     headers = {"guids": list(df.index), "alleles": list(df.columns)}

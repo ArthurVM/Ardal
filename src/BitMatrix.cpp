@@ -1295,7 +1295,7 @@ py::array_t<int> BitMatrix::getColumnMasses( void ) {
 
 
 /****************************************************************************************************
- * ardal::BitMatrix::getSubsetPackedMatrix
+ * ardal::BitMatrix::getSubsetMatrix
  *
  * Get a subset of the packed matrix as a NumPy array.
  *
@@ -1310,20 +1310,24 @@ py::array_t<int> BitMatrix::getColumnMasses( void ) {
  * OUTPUT:
  *  py::array_t<uint64_t> : A 2D NumPy array representing the packed sub-matrix.
  ****************************************************************************************************/
-py::array_t<uint64_t> BitMatrix::getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
-                                                        const std::vector<size_t>& col_indices,
-                                                        const int threads ) const {
+py::array_t<uint64_t> BitMatrix::getSubsetMatrix( const std::vector<size_t>& row_indices, 
+                                                  const std::vector<size_t>& col_indices,
+                                                  const int threads ) const {
     const std::vector<std::vector<uint64_t>> submat = subsetPackedMatrix(row_indices, col_indices, threads);
     const size_t nrows = row_indices.size();
     const size_t ncols = col_indices.size();
 
-    py::array_t<uint64_t> subset_matrix_py({nrows, ncols});
-    auto buf = subset_matrix_py.mutable_unchecked<2>();
-    for (size_t i = 0; i < nrows; ++i)
-        for (size_t j = 0; j < ncols; ++j)
-            buf(i, j) = submat[i][j];
+    py::array_t<uint8_t> unpacked_matrix({nrows, ncols});
+    auto buf = unpacked_matrix.mutable_unchecked<2>();
 
-    return subset_matrix_py;
+    for (size_t i = 0; i < nrows; ++i) {
+        for (size_t j = 0; j < ncols; ++j) {
+            size_t word_idx = j / 64;
+            size_t bit_idx = j % 64;
+            buf(i, j) = (submat[i][word_idx] >> bit_idx) & 1;
+        }
+    }
+    return unpacked_matrix;
 }
 
 } // namespace _ardal
