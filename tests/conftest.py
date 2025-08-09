@@ -3,6 +3,8 @@ import sys
 import pytest
 import numpy as np
 import json
+from pathlib import Path
+
 from ardal import Ardal
 from ardal.core.ArdalHeaderUtils import ArdalHeaderUtils
 from ardal.core.ArdalIO import ArdalIO
@@ -11,6 +13,8 @@ from ardal.core.ArdalStats import ArdalStats
 from ardal.core.ArdalAllele import ArdalAllele
 from ardal.core.ArdalDistance import ArdalDistance
 
+
+DATA_DIR = Path(__file__).parent / "data"
 
 @pytest.fixture(scope="session")
 def test_data_mem():
@@ -23,7 +27,7 @@ def test_data_mem():
 
     ## define GUIDs and SNPs
     guids = [f"GUID{i}" for i in range(1, 11)]  # GUID1 to GUID10
-    alleles = [f"SNP{i}" for i in range(1, 11)]  # SNP1 to SNP10
+    alleles = [f"chr1.{i}.A.T" for i in range(1, 11)]  # SNP1 to SNP10 named as CHR1.{i}.A.T
 
     matrix = np.zeros((len(guids), len(alleles)), dtype=np.uint8)
 
@@ -62,8 +66,8 @@ def test_data_mem():
         "guids": guids,
         "alleles": alleles
     }
-
-    return [matrix, headers]
+    
+    return [np.ascontiguousarray(matrix), headers]
 
 
 @pytest.fixture(scope="session")
@@ -73,17 +77,17 @@ def headers(test_data_mem):
 
 @pytest.fixture(scope="session")
 def test_data_matrix_npy():
-    return ["./data/sim_matrix.npy", "./data/sim_headers.json"]
+    return [str(DATA_DIR / "sim_matrix.npy"), str(DATA_DIR / "sim_headers.json")]
 
 
 @pytest.fixture(scope="session")
 def test_data_matrix_npz():
-    return ["./data/sim_matrix.npz", "./data/sim_headers.json"]
+    return [str(DATA_DIR / "sim_matrix.npz"), str(DATA_DIR / "sim_headers.json")]
 
 
 @pytest.fixture(scope="session")
 def test_data_matrix_csv():
-    return "./data/sim_matrix.csv"
+    return str(DATA_DIR / "sim_matrix.csv")
 
 
 @pytest.fixture(scope="session")
@@ -131,9 +135,16 @@ def get_component(headerUtils_component, hybrid_matrix):
 
 
 @pytest.fixture(scope="session")
-def allele_component_simdata(headerUtils_component, ardal_object_simdata):
+def allele_component(headerUtils_component, hybrid_matrix):
+    """Creates an ArdalAllele component for unit testing."""
+    return ArdalAllele(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
+
+
+@pytest.fixture(scope="session")
+def allele_component_simdata(ardal_object_simdata):
     """Creates an ArdalAllele component for testing the intervalAlleles function."""
     hybrid_matrix = ardal_object_simdata.get.hybrid_matrix()
+    headerUtils_component = ArdalHeaderUtils(ardal_object_simdata.get.headers())
     return ArdalAllele(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 
@@ -147,12 +158,6 @@ def get_component_no_roaring(headerUtils_component, hybrid_matrix):
 def stats_component(headerUtils_component, hybrid_matrix):
     """Creates an ArdalStats component for unit testing."""
     return ArdalStats(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
-
-
-@pytest.fixture(scope="session")
-def allele_component(headerUtils_component, hybrid_matrix):
-    """Creates an ArdalAllele component for unit testing."""
-    return ArdalAllele(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 
 @pytest.fixture(scope="session")

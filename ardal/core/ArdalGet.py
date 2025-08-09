@@ -59,6 +59,8 @@ class ArdalGet:
             self._headerUtils.check_alleles(alleles)
         else:
             alleles = self._headerUtils.headers["alleles"]
+            
+        log.debug(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
         
         guid_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
         allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]

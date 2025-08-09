@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import time
 from collections import defaultdict
 from typing import Union, List
 
@@ -33,89 +34,251 @@ class ArdalDistance:
     @check_guids_list
     @check_alleles_list
     def pairwise( self,
-                  guids : Union[list, None] = None,
-                  alleles : Union[list, None] = None,
-                  intervals : Union[list, None] = None,
-                  intervals_bed : Union[str, None] = None,
-                  allele_coords_bed : Union[str, None] = None,
+                  guids: Union[list, None] = None,
+                  alleles: Union[list, None] = None,
+                  intervals: Union[list, None] = None,
+                  intervals_bed: Union[str, None] = None,
+                  allele_coords_bed: Union[str, None] = None,
                   metric: str = "hamming",
-                  use_simd : bool = True,
-                  threads : int = 1,
+                  use_simd: bool = True,
+                  threads: int = 1,
                   backend: str = "auto",
-                  allele_id_format : str = "{chr}.{start}.{ref}.{alt}"
-                  ) -> Union[pd.DataFrame, None]:
-        """ Calculates the distance between pairs of guids. If guids_ids are provided then it will only compute distances between
-        specified guids. If alleles are provided then it will only compute using specified alleles. If intervals are provided then
-        it will find alleles which fall within the given genomic intervals and only compute using these alleles.
+                  allele_id_format: str = "{chr}.{start}.{ref}.{alt}",
+                  *,
+                  return_square: bool = False,
+                  as_dataframe: bool = False,
+                  ) -> Union[np.ndarray, pd.DataFrame]:
+        """
+        Compute pairwise distances.
 
-        Pairwise distance can be calculated using Hamming, Jaccard, or Inner Product (number of shared alleles) functions.
-        If an empty list if provided (as by default) then the pairwise distance of all samples within the matrix will be calculated.
-        """    
+        Returns:
+            - If return_square=False (default): 1D condensed NumPy array of length n*(n-1)//2
+            - If return_square=True:
+                * NumPy (n x n) array if as_dataframe=False
+                * pandas.DataFrame if as_dataframe=True
+
+        Notes:
+            - Large N strongly favors returning condensed. Expanding to square is O(n^2) memory and time.
+            - I would refrain from asking a pandas.DataFrame to be built unless you are absolutely sure it is required.
+              This can be even more expensive for large N.
+        """
         naturalsize = require_package("humanize", attr="naturalsize")
-        time = require_package("time", "time")
-        
-        log.debug("[PAIRWISE] Starting pairwise")
-        
-        ## handle function specific parameter checking logic
-        self._check_pairwise_args(guids=guids,
-                                  alleles=alleles,
-                                  intervals=intervals,
-                                  intervals_bed=intervals_bed,
-                                  allele_coords_bed=allele_coords_bed,
-                                  metric=metric)
-        
-        kwargs = { "metric" : metric,
-                   "use_simd" : use_simd,
-                   "threads" : threads,
-                   "backend" : backend }
-        
-        ## specify whether to run local mode
-        local_flag = False
-        local_args = defaultdict(list)
-        
-        ## check for local mode
-        if guids or alleles or intervals:
-            local_flag = True
 
-        ## get guids to run on
+        log.debug("[PAIRWISE] Starting pairwise")
+
+        ## function specific checks
+        self._check_pairwise_args(
+            guids=guids,
+            alleles=alleles,
+            intervals=intervals,
+            intervals_bed=intervals_bed,
+            allele_coords_bed=allele_coords_bed,
+            metric=metric,
+        )
+        
+        ## raise a warning if the user requests a lower triangle dataframe
+        if not return_square and as_dataframe:
+            log.warning(f"'return_square' cannot be False when 'as_dataframe' is True. Setting 'return_square' to True.")
+            return_square = True
+
+        kwargs = {
+            "metric": metric,
+            "use_simd": use_simd,
+            "threads": threads,
+            "backend": backend,
+        }
+
+        ## args storage
+        local_flag = bool(guids or alleles or intervals)
+        local_args = {}
+
+        ## check input guids
         if guids:
             self._headerUtils.check_guids(guids)
             local_args["guids"] = guids
         else:
-            guids = self._headerUtils.headers['guids']
+            guids = self._headerUtils.headers["guids"]
             local_args["guids"] = guids
 
-        ## get alleles to run on
+        ## check input alleles
         if alleles:
             self._headerUtils.check_alleles(alleles)
             local_args["alleles"] = alleles
         else:
-            local_args["alleles"] = self._headerUtils.headers['alleles']
+            local_args["alleles"] = self._headerUtils.headers["alleles"]
 
+        ## get interval alleles
         if intervals:
-            log.debug(f"[PAIRWISE] Constructing intervals")
-            alleles = self._headerUtils.get_interval_alleles(intervals=intervals,
-                                                             intervals_bed=intervals_bed,
-                                                             allele_coords_bed=allele_coords_bed,
-                                                             allele_id_format=allele_id_format)
+            log.debug("[PAIRWISE] Constructing intervals")
+            alleles = self._headerUtils.get_interval_alleles(
+                intervals=intervals,
+                intervals_bed=intervals_bed,
+                allele_coords_bed=allele_coords_bed,
+                allele_id_format=allele_id_format,
+            )
             local_args["alleles"] = alleles
-            log.debug(f"[PAIRWISE] Interval constructed.")
-        
-        ## check there is enough memory to store the pairwise matrix
-        mat_size = len(guids)**2
-        natural_mat_size = naturalsize(mat_size * 8, binary=True)
-        total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
-        log.debug(f"[PAIRWISE] Computing {metric} distance matrix of scale {len(guids)}x{len(guids)} using {natural_mat_size} memory.")
-        if mat_size * 8 > total_memory * 0.8: ## 8 bytes per float64, 80% of total memory
-            raise MemoryError(f"Pairwise distance matrix of scale {len(guids)}x{len(guids)} will requre {natural_mat_size} memory and will exceed system memory limits. Please subset your data.")
-                        
-        if not local_flag:
-            return self._pairwise_global( **kwargs )
+            log.debug("[PAIRWISE] Interval constructed.")
 
-        if local_flag:
-            return self._pairwise_local( **local_args,
-                                         **kwargs )
-            
+        ## ------ memory guard (based on requested output shape & real dtype) ------
+        n = len(guids)
+        out_dtype = self._metric_dtype(metric)
+        if return_square:
+            count = n * n
+        else:
+            count = n * (n - 1) // 2
+        bytes_per = np.dtype(out_dtype).itemsize
+        est_bytes = count * bytes_per
+        natural_est = naturalsize(est_bytes, binary=True)
+
+        total_memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        log.debug(
+            f"[PAIRWISE] Planning {n}x{n} {metric} distance matrix ({out_dtype}) with shape "
+            f"{'square' if return_square else 'condensed'}, est ~{natural_est}."
+        )
+        if est_bytes > total_memory * 0.8:
+            raise MemoryError(
+                f"Requested output ({'nxn' if return_square else 'condensed'}) "
+                f"would require ~{natural_est}, exceeding safe memory limits. "
+                f"Either set return_square=False or subset your data."
+            )
+        ## ------------------------------------------------------------------------
+
+        ## run compute
+        if not local_flag:
+            dist_condensed = self._pairwise_global(**kwargs)
+        else:
+            dist_condensed = self._pairwise_local(**local_args, **kwargs)
+
+        ## cast once if the backend returns a different dtype
+        ## could happen since Jaccard and Hamming use different dtypes
+        if dist_condensed.dtype != out_dtype:
+            dist_condensed = dist_condensed.astype(out_dtype, copy=False)
+
+        ## return condensed by default
+        if not return_square:
+            return dist_condensed
+
+        ## expand to square with correct dtype
+        mat = self._expand_condensed(dist_condensed, n, out_dtype)
+
+        ## construct dataframe
+        ## NOTE: this could be extremely expensive for large matrices
+        if as_dataframe:
+            log.debug("[PAIRWISE] Building pandas dataframe. For large N this could take some time.")
+            return pd.DataFrame(mat, index=guids, columns=guids)
+        return mat
+
+
+    @staticmethod
+    def _metric_dtype(metric: str):
+        m = metric.lower()
+        if m == "jaccard":
+            return np.float32
+        elif m in ("hamming", "inner_product"):
+            return np.uint32
+        raise ParameterError(f"Unknown metric: {metric}")
+
+
+    @staticmethod
+    def _expand_condensed(condensed: np.ndarray, n: int, dtype) -> np.ndarray:
+        """
+        Build nxn square array from condensed vector.
+        """
+        log.debug("Expanding the condensed matrix.")
+        mat = np.zeros((n, n), dtype=dtype)
+        iu, ju = np.triu_indices(n, 1)
+        mat[iu, ju] = condensed
+        mat[ju, iu] = condensed
+        return mat
+
+
+    def _pairwise_global( self,
+                          metric: str = "hamming",
+                          use_simd: bool = True,
+                          threads: int = 1,
+                          backend: str = "auto",
+                          ) -> np.ndarray:
+        """ Pairwise distance computation for a matrix.
+
+        Args:
+            metric (str, optional): the distance metric to use {jaccard/hamming/inner_product}. Defaults to "hamming".
+            use_simd (bool, optional): whether to force SIMD. Defaults to True.
+            threads (int, optional): number of threads to run computation on. Defaults to 1.
+            backend (str, optional): which backend to use {auto/bit/roaring}. Defaults to "auto".
+
+        Raises:
+            ParameterError: raised if an unknown metric is passed to this function.
+
+        Returns:
+            np.ndarray: a condensed (lower triangle) distance matrix.
+        """
+        s = time.time()
+        log.debug(f"[PAIRWISE] Starting global {metric} distance calculations...")
+
+        if metric == "jaccard":
+            dist_tri = self._matrix.jaccard(use_simd=use_simd, threads=threads, backend=backend)
+        elif metric == "hamming":
+            dist_tri = self._matrix.hamming(use_simd=use_simd, threads=threads, backend=backend)
+        elif metric == "inner_product":
+            dist_tri = self._matrix.innerProduct(use_simd=use_simd, threads=threads, backend=backend)
+        else:
+            raise ParameterError(f"Unknown metric: {metric}")
+
+        log.debug(f"[PAIRWISE] Finished {metric} distance calculations in {time.time()-s:.3f}s.")
+        return dist_tri  ## condensed with correct dtype from backend
+
+
+    def _pairwise_local( self,
+                         guids: List,
+                         alleles: List,
+                         metric: str = "hamming",
+                         use_simd: bool = True,
+                         threads: int = 1,
+                         backend: str = "auto",
+                         ) -> np.ndarray:
+        """ Pairwise distance computation for a local (subsetted) matrix.
+
+        Args:
+            guids (list): a set of guids to compute over.
+            alleles (list): a set of alleles to compute over.
+            metric (str, optional): the distance metric to use {jaccard/hamming/inner_product}. Defaults to "hamming".
+            use_simd (bool, optional): whether to force SIMD. Defaults to True.
+            threads (int, optional): number of threads to run computation on. Defaults to 1.
+            backend (str, optional): which backend to use {auto/bit/roaring}. Defaults to "auto".
+
+        Raises:
+            ParameterError: raised if an unknown metric is passed to this function.
+
+        Returns:
+            np.ndarray: a condensed (lower triangle) distance matrix.
+        """
+        s = time.time()
+
+        row_indices = [self._headerUtils.encode_guid(g) for g in guids]
+        col_indices = [self._headerUtils.encode_allele(a) for a in alleles]
+
+        log.debug(
+            f"[PAIRWISE] Starting local {metric} on {len(col_indices)}x{len(row_indices)} subset."
+        )
+
+        if metric == "jaccard":
+            dist_tri = self._matrix.jaccard_subset(
+                row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
+            )
+        elif metric == "hamming":
+            dist_tri = self._matrix.hamming_subset(
+                row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
+            )
+        elif metric == "inner_product":
+            dist_tri = self._matrix.innerProduct_subset(
+                row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
+            )
+        else:
+            raise ParameterError(f"Unknown metric: {metric}")
+
+        log.debug(f"[PAIRWISE] Finished local {metric} distance calculations in {time.time()-s:.3f}s.")
+        return dist_tri
+    
     
     def _check_pairwise_args( self,
                               guids : Union[list, None] = None,
@@ -123,7 +286,9 @@ class ArdalDistance:
                               intervals : Union[list, None] = None,
                               intervals_bed : Union[str, None] = None,
                               allele_coords_bed : Union[str, None] = None,
-                              metric: str = "hamming"
+                              metric : str = "hamming",
+                              return_square : bool = False,
+                              as_dataframe : bool = False
                               ) -> None:
         ACCEPTED_DIST_FUNCTIONS = ["jaccard", "hamming", "inner_product"]
         
@@ -141,83 +306,8 @@ class ArdalDistance:
         
         if allele_coords_bed and not intervals:
             raise ParameterError("intervals argument cannot be None when allele_coords_bed argument is not None.")
-
-
-    def _pairwise_global( self,
-                          metric: str = "hamming",
-                          use_simd : bool=True,
-                          threads : int=1,
-                          backend : str="auto" ) -> pd.DataFrame:
-        squareform = require_package("scipy", "scipy.spatial.distance", attr="squareform")
         
-        log.debug(f"[PAIRWISE] Starting global {metric} distance calculations...")
         
-        if metric == "jaccard":
-            dist_tri = self._matrix.jaccard(use_simd=use_simd,
-                                            threads=threads,
-                                            backend=backend)
-            dist_matrix = np.array(squareform(dist_tri), dtype=np.float32)
-
-        elif metric == "hamming":
-            dist_tri = self._matrix.hamming(use_simd=use_simd,
-                                            threads=threads,
-                                            backend=backend)
-            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
-
-        elif metric == "inner_product":
-            dist_tri = self._matrix.innerProduct(use_simd=use_simd,
-                                                 threads=threads,
-                                                 backend=backend)
-            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
-        
-        log.debug(f"[PAIRWISE] Finished {metric} distance calculations.")
-        return pd.DataFrame(dist_matrix, columns=self._headerUtils.headers["guids"], index=self._headerUtils.headers["guids"])
-
-
-    def _pairwise_local( self,
-                         guids : list = None,
-                         alleles : list = None,
-                         metric: str = "hamming",
-                         use_simd : bool = True,
-                         threads : int = 1,
-                         backend: str = "auto" ) -> pd.DataFrame:
-        squareform = require_package("scipy", "scipy.spatial.distance", attr="squareform")
-        time = require_package("time", "time")
-        
-        s = time.time()
-                
-        row_indices = [self._headerUtils.encode_guid(g) for g in guids]
-        col_indices = [self._headerUtils.encode_allele(a) for a in alleles]
-        
-        log.debug(f"[PAIRWISE] Starting local {metric} distance calculations on {len(col_indices)}x{len(row_indices)} subset matrix...")
-                
-        if metric == "jaccard":
-            dist_tri = self._matrix.jaccard_subset(row_indices=row_indices,
-                                                   col_indices=col_indices,
-                                                   use_simd=use_simd,
-                                                   threads=threads,
-                                                   backend=backend)
-            dist_matrix = np.array(squareform(dist_tri), dtype=np.float32)
-
-        elif metric == "hamming":
-            dist_tri = self._matrix.hamming_subset(row_indices=row_indices,
-                                                   col_indices=col_indices,
-                                                   use_simd=use_simd,
-                                                   threads=threads,
-                                                   backend=backend)
-            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
-
-        elif metric == "inner_product":
-            dist_tri = self._matrix.innerProduct_subset(row_indices=row_indices,
-                                                        col_indices=col_indices,
-                                                        use_simd=use_simd,
-                                                        threads=threads,
-                                                        backend=backend)
-            dist_matrix = np.array(squareform(dist_tri), dtype=np.uint32)
-        
-        log.debug(f"[PAIRWISE] Finished {metric} distance calculations.")
-        return pd.DataFrame(dist_matrix, columns=guids, index=guids)
-    
 
     def snv_neighbourhood( self,
                            guid : str,

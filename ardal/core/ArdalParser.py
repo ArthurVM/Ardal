@@ -61,7 +61,7 @@ class ArdalParser:
                 self.input_data = sorted([a, b], key=lambda x: x.split(".")[-1])
                 self.file_format = self.input_data[1].split(".")[-1].lower()
             else:
-                raise MalformedInputError("If list input, must contain either [headers, np.matrix] or two file paths.")
+                raise MalformedInputError("If list input, must contain either [headers::json, matrix::np.matrix] or two file paths.")
 
         elif isinstance(self.input_data, str):
             if not os.path.exists(self.input_data):

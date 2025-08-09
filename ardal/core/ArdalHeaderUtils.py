@@ -22,6 +22,10 @@ class ArdalHeaderUtils:
                   allele_positions : Union[Dict, None] = None ):
 
         self.headers = headers
+        self.n_guids = len(self.headers['guids'])
+        self.n_alleles = len(self.headers['alleles'])
+        self._allele_coords_bed = allele_coords_bed
+        self._allele_id_format = allele_id_format
         self._decoded_headers = self._decode_headers()
         
         ## allele positions were not provided
@@ -33,11 +37,9 @@ class ArdalHeaderUtils:
             self._allele_positions_from_ids = False   ## positions decoded from allele_ids
             
             ## if allele_id_format is provided then just decode positions now
-            if allele_id_format:
-                self.allele_positions = self.compute_allele_positions(allele_id_format = allele_id_format,
-                                                                      allele_coords_bed = allele_coords_bed)
-                self._allele_coords_bed = allele_coords_bed
-                self._allele_id_format = allele_id_format
+            if self._allele_id_format :
+                self.allele_positions = self.compute_allele_positions(allele_id_format = self._allele_id_format,
+                                                                      allele_coords_bed = self._allele_coords_bed)
         
         ## allele positions were provided in a dict
         else:
@@ -45,9 +47,16 @@ class ArdalHeaderUtils:
             self.allele_positions = allele_positions
             self._allele_positions_from_bed = False
             self._allele_positions_from_ids = True
+            
+        log.debug(f"""Initialised HeaderUtils object with {len(self.headers['guids'])} GUIDs and {len(self.headers['alleles'])} alleles.
+                                    allele_coords_bed = {self._allele_coords_bed}
+                                    allele_id_format = {self._allele_id_format}
+                                    allele_positions_from_bed = {self._allele_positions_from_bed}
+                                    allele_positions_from_ids = {self._allele_positions_from_ids}""")
 
 
     def _decode_headers( self ) -> Dict:
+        log.debug(f"Decoding headers.")
         return  { "guids" : dict(zip(self.headers["guids"], range(len(self.headers["guids"])))),
                   "alleles" : dict(zip(self.headers["alleles"], range(len(self.headers["alleles"]))))
                 }
@@ -69,7 +78,11 @@ class ArdalHeaderUtils:
         Returns:
             Dict[str, Dict[int, List[str]]]: Dictionary of chromosome keys to position-to-allele mappings.
         """
-        log.debug(f"Request to compute allele positions with id_format={allele_id_format}, bed={allele_coords_bed}, recompute={recompute_positions}")
+        log.debug(f"""Request to compute allele positions with id_format={allele_id_format}, bed={allele_coords_bed}, recompute={recompute_positions}
+                                    allele_coords_bed = {self._allele_coords_bed}
+                                    allele_id_format = {self._allele_id_format}
+                                    allele_positions_from_bed = {self._allele_positions_from_bed}
+                                    allele_positions_from_ids = {self._allele_positions_from_ids}""")
 
         use_bed = bool(allele_coords_bed)
 
@@ -98,12 +111,25 @@ class ArdalHeaderUtils:
         ## decode BED if requested or not already cached
         if use_bed and (recompute_positions or not self._allele_positions_from_bed):
             log.debug("Decoding allele positions from BED file.")
+            
+            ## get the positions of each allele to check whether they are being redefined
+            cached_allele_positions = self.get_allele_positions()
+                        
             coords = self._read_allele_coords_bed(allele_coords_bed)
             for allele in self.headers["alleles"]:
                 if allele in coords:
                     chr_key, start, end = coords[allele]
-                    allele_positions[str(chr_key)][int(start)].append(allele)
+                    
+                    ## raise a warning if an allele position is being redefined                    
+                    if allele in cached_allele_positions:
+                        cached_allele_pos = cached_allele_positions[allele]
+                        if cached_allele_pos != [chr_key, start]:
+                            log.warning(f"Position for allele {allele} being overwritten from {cached_allele_pos} to {[chr_key, start]}")
+                    
+                    allele_positions[chr_key][start].append(allele)
                     bed_defined_alleles.add(allele)
+                    
+            ## switch the bed flag
             self._allele_positions_from_bed = True
             self._allele_coords_bed = allele_coords_bed
 
@@ -172,7 +198,7 @@ class ArdalHeaderUtils:
             parts.get('ref'),
             parts.get('alt')
         )
-        
+    
 
     def _check_allele_format_grammar( self,
                                       allele_id_format : str
@@ -234,7 +260,7 @@ class ArdalHeaderUtils:
                               intervals_bed : Union[str, None] = None,
                               allele_coords_bed : Union[str, None] = None,
                               allele_id_format : str = "{chr}.{start}.{ref}.{alt}",
-                              delimiter : str = " "
+                              delimiter : str = "\t"
                               ) -> List[Set[str]]:
         bisect = require_package("bisect", "bisect")
         
@@ -338,7 +364,7 @@ class ArdalHeaderUtils:
         """
         cleaned_intervals = []
         
-        log.debug(f"Bed path : {intervals_bed}")
+        log.debug(f"Intervals bed path : {intervals_bed}")
          
         if intervals_bed != None:
             with open(intervals_bed, 'r') as fin:
@@ -347,7 +373,7 @@ class ArdalHeaderUtils:
             log.debug(f"Found {len(lines)} entries in {intervals_bed}")
             
             ## construct a generic list of bed entries
-            intervals = [l.strip("\n").split(delimiter) for l in lines]
+            intervals = [l.strip("\n").split() for l in lines]
             cleaned_intervals = self._check_intervals(intervals=intervals,
                                                       from_bed=True)
             log.debug(f"Found {len(cleaned_intervals)} valid intervals in {intervals_bed}")
@@ -363,9 +389,9 @@ class ArdalHeaderUtils:
         cleaned_intervals = []
             
         for i, interval in enumerate(intervals):
-            if not isinstance(interval, list):
+            if not isinstance(interval, list) and not isinstance(interval, tuple):
                 if not from_bed:
-                    raise IntervalError(f"intervals should be a nested list like [ [$interval_1], [$interval_2], ... ]")
+                    raise IntervalError(f"intervals should be list of lists/tuples like [ [$interval_1], [$interval_2], ... ]")
                 else:
                     raise IntervalError(f"bed file contains malformed lines. ")
             try:
@@ -436,7 +462,10 @@ class ArdalHeaderUtils:
                 log.warning(f"Skipping malformed line {i+1} in {allele_coords_bed}: '{line.strip()}'")
                 continue
             
-            chrom, start, end, allele_id = parts
+            chrom = str(parts[0])
+            start = int(parts[1])
+            end = int(parts[2])
+            allele_id = str(parts[3])
             if allele_id in coords:
                 log.warning(f"Duplicate allele_id '{allele_id}' found in {allele_coords_bed}. Overwriting previous entry.")
             coords[allele_id] = [chrom, start, end]
@@ -452,16 +481,16 @@ class ArdalHeaderUtils:
         """ Check guids are present within the matrix and construct a list of present guids to proceed with
         if filter is True
         """
-        absent_guids = []
-        present_guids = []
+        absent_guids = set()
+        present_guids = set()
         for id in guids:
             if id not in self.headers["guids"]:
-                absent_guids.append(id)
+                absent_guids.add(id)
             else:
-                present_guids.append(id)
+                present_guids.add(id)
 
         if filter:
-            return present_guids
+            return list(present_guids)
 
         if len(absent_guids) > 0:
             raise InvalidGUIDQueryError(f"guids {absent_guids} not found in allele matrix.")
@@ -490,8 +519,21 @@ class ArdalHeaderUtils:
             raise InvalidAlleleQueryError(f"alleles {absent_alleles} not found in allele matrix.")
 
     
-    def get_allele_positions( self ) -> Dict:
-        """ Returns the allele_positions dictionary.
+    def get_allele_positions( self
+                              ) -> Dict:
+        """ Returns allele positions by inverting the allele_positions dictionary
+        """
+        return {
+            allele: (chr_key, pos)
+            for chr_key, pos_dict in self.get_allele_posmap().items()
+            for pos, alleles in pos_dict.items()
+            for allele in alleles
+        }
+        
+        
+    def get_allele_posmap( self
+                           ) -> Dict:
+        """ Get the allele_positions dictionary.
         """
         return self.allele_positions
 
@@ -510,7 +552,7 @@ class ArdalHeaderUtils:
                      ) -> str:
         """ Decode a row coordinate to its corresponding GUID in the headers dictionary.
         """
-        validate_type(row_coord, int, "row_coord")
+        validate_type(row_coord, Union[int, np.uint64, np.uint32], "row_coord")
         return self.headers["guids"][row_coord]
 
 
@@ -528,5 +570,5 @@ class ArdalHeaderUtils:
                        ) -> str:
         """ Decode a column coordinate to its corresponding allele in the headers dictionary.
         """
-        validate_type(col_coord, int, "col_coord")
+        validate_type(col_coord, Union[int, np.uint64, np.uint32], "col_coord")
         return self.headers["alleles"][col_coord]

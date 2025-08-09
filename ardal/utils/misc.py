@@ -5,7 +5,10 @@ import importlib
 from typing import Union
 
 
-def require_package(package_name, import_as = None, attr: Union[str, None] = None, error_message=None):
+def require_package( package_name,
+                     import_as = None,
+                     attr: Union[str, None] = None,
+                     error_message = None ) -> None:
     """
     Attempt to import a package. Raise informative error if not found.
 
@@ -31,3 +34,20 @@ def require_package(package_name, import_as = None, attr: Union[str, None] = Non
             f"The package '{package_name}' is required but not installed or missing an attribute. "
             f"Install it with `pip install {package_name}`."
         )
+
+
+def wildcard_to_regex( expr: str ) -> str:
+    re = require_package("re", "re")
+    out = []
+    escape = False
+    for ch in expr:
+        if escape:
+            out.append(re.escape(ch))
+            escape = False
+        elif ch == "\\":
+            escape = True
+        elif ch == "*":
+            out.append(".*")
+        else:
+            out.append(re.escape(ch))
+    return "".join(out)

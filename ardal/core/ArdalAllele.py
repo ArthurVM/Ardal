@@ -8,6 +8,7 @@ from ..utils.misc import require_package
 from ..utils.decorators import check_backend_argument, check_guids_list, check_alleles_list, check_allele_id_format, check_bed_paths
 from ..utils.exceptions import EmptySelectionError, RegexError
 from ..utils.validators import validate_type
+from ..utils.misc import wildcard_to_regex
 from ..utils.logger import get_logger
 
 log = get_logger()
@@ -94,12 +95,13 @@ class ArdalAllele:
         re = require_package("re", "re")
         
         validate_type(expression, str, "expression")
+        expr = wildcard_to_regex(expression)
         try:
-            pattern = re.compile(expression.replace('*', '.*'))
+            pattern = re.compile(expr.replace('*', '.*'))
             return list(set([allele for allele in self._headerUtils.headers["alleles"] if pattern.match(allele)]))
         except Exception as e:
             RegexError(f"Regex using expression {expression} failed.")
-            
+
 
     @check_backend_argument
     @check_guids_list
@@ -123,19 +125,16 @@ class ArdalAllele:
         """
         ## input checks
         self._headerUtils.check_guids(guids)
-        
-        ## if all guids are selected, just return all alleles
-        if guids == self._headerUtils.headers["guids"]:
-            return self._headerUtils.headers["alleles"]
             
         guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         unique_allele_indices = self._matrix.uniqueSharedBits(guid_coords, backend=backend)
-        results = list({self._headerUtils.decode_allele(idx) for idx in unique_allele_indices})
+        decoded_alleles = list({self._headerUtils.decode_allele(idx) for idx in unique_allele_indices})
+        print("U", unique_allele_indices, decoded_alleles)
         
-        if len(results) == 0:
+        if len(decoded_alleles) == 0:
             log.warning(f"No unique core alleles found. This is common in large databases. Consider using the stats module if you are looking for alleles which are over-represented in a set of guids.")
             
-        return results
+        return decoded_alleles
     
     
     def count( self ) -> dict:
@@ -148,7 +147,7 @@ class ArdalAllele:
     @check_allele_id_format
     @check_bed_paths
     def interval( self,
-                  intervals : list,
+                  intervals : Union[List, None] = None,
                   intervals_bed : Union[str, None] = None,
                   allele_coords_bed : Union[str, None] = None,
                   allele_id_format : str = "{chr}.{start}.{ref}.{alt}"
@@ -160,8 +159,12 @@ class ArdalAllele:
                                                       intervals_bed=intervals_bed,
                                                       allele_coords_bed=allele_coords_bed)
         
-        
-
+    
+    def get_positions( self
+                       ) -> Dict:
+        return self._headerUtils.get_allele_positions()
+    
+    
     # def core( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:
     #     """ Take a set of guids and return alleles common to this subset.
     #     """
