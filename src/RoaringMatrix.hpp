@@ -24,10 +24,15 @@ namespace _ardal {
 class RoaringMatrix {
 public:
     // constructor: takes a NumPy matrix
-    RoaringMatrix( py::array_t<uint8_t> input_matrix, const std::vector<int>& row_masses );
+    RoaringMatrix( py::array_t<uint8_t> input_matrix,
+                   const std::vector<int>& row_masses );
 
     // distance functions
     py::array_t<uint32_t> hamming( int threads = 1 ) const;
+    py::array_t<uint32_t> hamming_subset( const std::vector<size_t>& row_indices,
+                                          const std::vector<size_t>& col_indices,
+                                          int threads = 1 ) const;
+    py::array_t<double> jaccard( int threads = 1 ) const;
     py::array_t<int> innerProduct( int threads = 1 ) const;
  
     // neighbourhood functions
@@ -57,6 +62,7 @@ private:
 
     // distance functions
     uint32_t hammingDistance( size_t i, size_t j ) const;
+    double jaccardIndex( size_t i, size_t j ) const;
     uint32_t innerProductRowwise( size_t i, size_t j ) const;
 
     // utility functions
