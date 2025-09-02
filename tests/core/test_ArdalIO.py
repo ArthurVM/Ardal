@@ -9,7 +9,7 @@ def test_to_dataframe(io_component, test_data_mem):
     """
     Tests the toDataFrame method of the ArdalIO class.
     """
-    df = io_component.toDataFrame()
+    df = io_component.to_dataframe()
     matrix, headers = test_data_mem
 
     assert isinstance(df, pd.DataFrame)
@@ -23,13 +23,13 @@ def test_to_dict(io_component):
     """
     Tests the toDict method of the ArdalIO class.
     """
-    data_dict = io_component.toDict()
+    data_dict = io_component.to_dict()
     assert isinstance(data_dict, dict)
     ## based on test_data in conftest.py
     ## GUID1 has SNP1, SNP5, SNP6, SNP7, SNP8, SNP10
-    assert set(data_dict["GUID1"]) == {"SNP1", "SNP5", "SNP6", "SNP7", "SNP8", "SNP10"}
+    assert set(data_dict["GUID1"]) == {"chr1.1.A.T", "chr1.5.A.T", "chr1.6.A.T", "chr1.7.A.T", "chr1.8.A.T", "chr1.10.A.T"}
     ## GUID10 has SNP4, SNP5, SNP7, SNP9
-    assert set(data_dict["GUID10"]) == {"SNP4", "SNP5", "SNP7", "SNP9"}
+    assert set(data_dict["GUID10"]) == {"chr1.4.A.T", "chr1.7.A.T", "chr1.9.A.T", "chr1.5.A.T"}
 
 
 def test_write_npy(io_component, test_data_mem, tmp_path):

@@ -570,5 +570,5 @@ class ArdalHeaderUtils:
                        ) -> str:
         """ Decode a column coordinate to its corresponding allele in the headers dictionary.
         """
-        validate_type(col_coord, Union[int, np.int8, np.int16, np.int32, np.int64], "col_coord")
+        validate_type(col_coord, Union[int, np.int8, np.int16, np.int32, np.int64, np.uint, np.uint8, np.uint16, np.uint32, np.uint64], "col_coord")
         return self.headers["alleles"][col_coord]

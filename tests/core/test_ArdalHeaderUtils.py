@@ -54,7 +54,19 @@ def test_get_allele_positions(headerUtils_component):
     headerUtils_component.compute_allele_positions(allele_id_format="{chr}.{start}.{ref}.{alt}")
     pos = headerUtils_component.get_allele_positions()
     print(pos)
-    assert pos["chr1.10.A.T"] == ("chr1", 10)
+    assert pos["chr1.1.A.T"] == ("chr1", 1)
+    assert pos["chr1.2.A.T"] == ("chr1", 2)
+    assert pos["chr1.3.A.T"] == ("chr1", 3)
+    assert pos["chr1.4.A.T"] == ("chr1", 4)
+    assert pos["chr1.5.A.T"] == ("chr1", 5)
+    assert pos["chr1.6.A.T"] == ("chr1", 6)
+    assert pos["chr1.7.A.T"] == ("chr1", 7)
+    assert pos["chr1.8.A.T"] == ("chr1", 8)
+    assert pos["chr1.9.A.T"] == ("chr1", 9)
+    
+    ## we changed this earlier in test_ArdalAllele:test_get_positions
+    ## can be commented out if it causes issues due to run order
+    assert pos["chr1.10.A.T"] == ("chr2", 300)
 
 
 def test_read_coords_bed(tmp_path, headerUtils_component):

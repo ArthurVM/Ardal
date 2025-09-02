@@ -64,10 +64,10 @@ def test_ardal_init_fail__malformed_list(test_data_mem):
     with pytest.raises(FileNotFoundError, match="One or more file paths do not exist: ./data/not_a_file.npy, ./data/sim_headers.json"):
         Ardal(data_source=["./data/not_a_file.npy", "./data/sim_headers.json"], quiet_init=True)
         
-    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers, np.matrix\\] or two file paths."):
+    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers::json, matrix::np.matrix\\] or two file paths."):
         Ardal(data_source=[1, 2], quiet_init=True)
 
-    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers, np.matrix\\] or two file paths."):
+    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers::json, matrix::np.matrix\\] or two file paths."):
         Ardal(data_source=[[], test_data_mem[1]], quiet_init=True)
 
 def test_ardal_init_fail__malformed_data(test_data_mem):
