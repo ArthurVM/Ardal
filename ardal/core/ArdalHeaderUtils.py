@@ -552,7 +552,7 @@ class ArdalHeaderUtils:
                      ) -> str:
         """ Decode a row coordinate to its corresponding GUID in the headers dictionary.
         """
-        validate_type(row_coord, Union[int, np.uint64, np.uint32], "row_coord")
+        validate_type(row_coord, Union[int, np.int8, np.int16, np.int32, np.int64], "row_coord")
         return self.headers["guids"][row_coord]
 
 
@@ -570,5 +570,5 @@ class ArdalHeaderUtils:
                        ) -> str:
         """ Decode a column coordinate to its corresponding allele in the headers dictionary.
         """
-        validate_type(col_coord, Union[int, np.uint64, np.uint32], "col_coord")
+        validate_type(col_coord, Union[int, np.int8, np.int16, np.int32, np.int64], "col_coord")
         return self.headers["alleles"][col_coord]

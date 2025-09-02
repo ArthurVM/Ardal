@@ -92,10 +92,8 @@ py::array_t<uint32_t> HybridMatrix::hamming_subset( const std::vector<size_t> ro
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
-        py::print("[C++] Running Roaring::hamming_subset...");
         return roaring_backend->hamming_subset(row_indices, col_indices, threads);
     } else {
-        py::print("[C++] Running Bit::hamming_subset...");
         return bit_backend->hamming_subset(row_indices, col_indices, use_simd, threads);
     }
 }

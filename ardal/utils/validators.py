@@ -1,5 +1,6 @@
 ## ardal/utils/validators.py
-from typing import Union
+from typing import Union, get_origin, get_args
+import types as _types
 
 from .exceptions import InvalidBackendError, ParameterError, AllelePatternError, IntervalError
 
@@ -86,7 +87,7 @@ def validate_guids( guids ) -> None:
     
     if guids:
         for i in guids:
-            validate_type(i, (str, None), f"guids[{i}]")
+            validate_type(i, Union[str, None], f"guids[{i}]")
         
 
 def validate_alleles( alleles ) -> None:
@@ -94,7 +95,7 @@ def validate_alleles( alleles ) -> None:
     
     if alleles:
         for i in alleles:
-            validate_type(i, (str, None), f"alleles[{i}]")
+            validate_type(i, Union[str, None], f"alleles[{i}]")
 
 
 def validate_type( value,
@@ -112,10 +113,17 @@ def validate_type( value,
     Raises:
         TypeError: If the value is not of the expected type.
     """
-    if not isinstance(value, expected_type):
-        expected = (
-            expected_type.__name__
-            if isinstance(expected_type, type)
-            else ", ".join(t.__name__ for t in expected_type)
-        )
-        raise TypeError(f"{name} must be of type {expected}, not {type(value).__name__}.")
+    origin = get_origin(expected_type)
+
+    if origin in (Union, _types.UnionType):              # Union[X, Y] or X | Y
+        types_ = tuple(get_args(expected_type))
+        if not all(isinstance(t, type) for t in types_):
+            raise TypeError("Union must contain only runtime-checkable classes.")
+    elif isinstance(expected_type, type):                 # single class
+        types_ = (expected_type,)
+    else:
+        raise TypeError("expected_type must be a class or a Union[...] / X|Y.")
+
+    if not isinstance(value, types_):
+        names = " | ".join(t.__name__ for t in types_)
+        raise TypeError(f"{name} must be of type {names}, not {type(value).__name__}.")

@@ -89,12 +89,11 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
     const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);     
     {
-        py::gil_scoped_release release;
-        omp_set_num_threads(threads);
+        py::gil_scoped_release release;   // kill python
 
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
+        #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
@@ -132,8 +131,6 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
         throw std::runtime_error("Thread count must be positive.");
     }
 
-    py::print("[C++] roaring subsetting...");
-
     // create matrix mask
     roaring::Roaring col_mask_bitmap;
     for (size_t col_idx : col_indices) {
@@ -153,8 +150,6 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
         submatrix.push_back(_roaring_matrix.at(row_idx) & col_mask_bitmap);
     }
 
-    py::print("[C++] roaring hamming...");
-
     // hamming distance stuff
     const size_t subm_n_rows = submatrix.size();
     if (subm_n_rows == 0) {
@@ -169,7 +164,7 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
     {
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
+        #pragma omp for schedule(dynamic, 1)
         for (size_t i = 0; i < subm_n_rows; ++i) {
             for (size_t j = i + 1; j < subm_n_rows; ++j) {
                 size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
@@ -227,11 +222,10 @@ py::array_t<double> RoaringMatrix::jaccard( int threads ) const {
     py::array_t<double> dist_matrix(total_pairs);     
     {
         py::gil_scoped_release release;
-        omp_set_num_threads(threads);
 
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
+        #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
@@ -310,9 +304,8 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
 
     {
         py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);     // Explicitly control number of threads
 
-        #pragma omp parallel
+        #pragma omp parallel num_threads(threads)
         {
             const int thread_id = omp_get_thread_num();
 
@@ -334,7 +327,7 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
                 if (distance <= epsilon)
                     local.emplace_back(i, distance);
             }
-        }
+        }   // end of parallel region
     }   // GIL reestablished here
 
     // count total neighbours to preallocate np array
@@ -382,18 +375,17 @@ py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
     py::array_t<int> inner_product_matrix(total_pairs);
     {
         py::gil_scoped_release release;
-        omp_set_num_threads(threads);
 
         auto inner_product_ptr = inner_product_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
+        #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (size_t i = 0; i < _n_rows; ++i) {
             for (size_t j = i + 1; j < _n_rows; ++j) {
                 size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
                 inner_product_ptr[idx] = innerProductRowwise(i, j);
             }
-        }
-    }
+        }   // end of parallel region
+    }   // GIL reestablished
     return inner_product_matrix;
 }
 
@@ -434,9 +426,8 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
 
     {
         py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);     // Explicitly control number of threads
 
-        #pragma omp parallel
+        #pragma omp parallel num_threads(threads)
         {
             const int thread_id = omp_get_thread_num();
 
@@ -454,7 +445,7 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
                 if (distance >= ip_epsilon)
                     local.emplace_back(i, distance);
             }
-        }
+        }   // end of parallel region
     }   // GIL reestablished here
 
     py::list ipe_n;
@@ -655,7 +646,7 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
         int tid = omp_get_thread_num();
         auto& local_map = thread_maps[tid];
 
-        #pragma omp for schedule(guided)
+        #pragma omp for schedule(static)
         for (size_t i = 0; i < n_cols - 1; ++i) {
             const auto& i_bitmap = colwise_roaring[i];
             for (size_t j = i + 1; j < n_cols; ++j) {
@@ -743,7 +734,7 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
         int tid = omp_get_thread_num();
         auto& local_map = thread_maps[tid];
 
-        #pragma omp for schedule(guided)
+        #pragma omp for schedule(static)
         for (size_t i = 0; i < n_cols - 1; ++i) {
             // check if the column is in the subset
             if (std::find(col_indices.begin(), col_indices.end(), i) == col_indices.end()) {

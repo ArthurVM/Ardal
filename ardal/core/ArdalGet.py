@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Union, Tuple, List, TYPE_CHECKING
 
 from ..utils.misc import require_package
-from ..utils.decorators import validate_thread_count, check_alleles_list, check_guids_list
+from ..utils.decorators import check_thread_count, check_alleles_list, check_guids_list
 from ..utils.exceptions import ParameterError, RoaringError
 from ..utils.logger import get_logger
 
@@ -29,6 +29,7 @@ class ArdalGet:
         self.roaring = roaring_enabled
 
     
+    @check_thread_count
     @check_guids_list
     @check_alleles_list
     def subset( self,

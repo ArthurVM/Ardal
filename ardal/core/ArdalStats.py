@@ -7,7 +7,6 @@ from typing import Union, List, Dict
 
 from ..utils.exceptions import ParameterError, EmptySelectionError
 from ..utils.decorators import check_generic_threshold, check_thread_count, check_guids_list
-from ..utils.validators import validate_type
 from ..utils.logger import get_logger
 
 log = get_logger()

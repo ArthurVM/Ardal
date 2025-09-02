@@ -285,19 +285,28 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
         #endif
 
         // open mp thread stuff
-        py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);
+        py::gil_scoped_release release;   // release GIL
 
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
+        #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (size_t i = 0; i < _n_rows; ++i) {
+            // get row i
+            const uint64_t* __restrict row_i = &_packed_matrix[i][0];
+
+            // compute the index base once per i
+            size_t base = (i * (2 * _n_rows - i - 1)) / 2;
+
             for (size_t j = i + 1; j < _n_rows; ++j) {
-                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
 
-                uint32_t dist = hamming_func(&_packed_matrix[i][0], &_packed_matrix[j][0], _packed_cols);
+                // get row j
+                const uint64_t* __restrict row_j = &_packed_matrix[j][0];
 
-                dist_ptr[idx] = dist;
+                // compute hamming disct
+                const uint32_t dist = hamming_func(row_i, row_j, _packed_cols);
+                
+                // use the base to construct the index
+                dist_ptr[base + (j - i - 1)] = dist;
 
                 // if (fill_cache) {
                 //     // currently not in action to save some headaches
@@ -346,15 +355,12 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
     const size_t subm_n_cols = col_indices.size();
     const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
 
-    py::print("[C++] bit subsetting...");
-
     // subset the matrix
     std::vector<std::vector<uint64_t>> submatrix = subsetPackedMatrix(row_indices, col_indices, threads);
 
     const size_t total_pairs = subm_n_rows * (subm_n_rows - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);
 
-    py::print("[C++] bit hamming...");
     {
         // function pointer stuff to prevent wrapping it in the loop and allow scalar executing in AVX2 environments
         using HammingFunc = uint32_t(*)(const uint64_t*, const uint64_t*, size_t);
@@ -368,18 +374,20 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
 
         // open mp thread stuff
         py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);
 
         auto dist_ptr = dist_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
-        for (size_t i = 0; i < subm_n_rows; ++i) {
-            for (size_t j = i + 1; j < subm_n_rows; ++j) {
-                size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
+        #pragma omp parallel num_threads(threads)
+        {
+            #pragma omp for schedule(dynamic, 1)
+            for (size_t i = 0; i < subm_n_rows; ++i) {
+                for (size_t j = i + 1; j < subm_n_rows; ++j) {
+                    size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
 
-                uint32_t dist = hamming_func(&submatrix[i][0], &submatrix[j][0], subm_packed_cols);
+                    uint32_t dist = hamming_func(&submatrix[i][0], &submatrix[j][0], subm_packed_cols);
 
-                dist_ptr[idx] = dist;
+                    dist_ptr[idx] = dist;
+                }
             }
         }
     }   // GIL reestablished
@@ -434,18 +442,19 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
 
         // open mp threading
         py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);
 
         auto inner_product_ptr = inner_product_matrix.mutable_data();
 
-        #pragma omp parallel for schedule(guided)
+        #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (size_t i = 0; i < _n_rows; ++i) {
-            for (size_t j = i + 1; j < _n_rows; ++j) {
-                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
-                
+
+            // construct the base
+            size_t base = (i * (2 * _n_rows - i - 1)) / 2;
+
+            for (size_t j = i + 1; j < _n_rows; ++j) {                
                 int inner_product = inner_product_func(&_packed_matrix[i][0], &_packed_matrix[j][0], _packed_cols);
 
-                inner_product_ptr[idx] = inner_product;
+                inner_product_ptr[base + (j - i - 1)] = inner_product;
 
                 // if (fill_cache) {
                 //     // currently not in action to save some headaches
@@ -516,16 +525,17 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx,
 
         // open mp threading
         py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);     // Explicitly control number of threads
 
-        #pragma omp parallel
+        #pragma omp parallel num_threads(threads)
         {
-            const int thread_id = omp_get_thread_num();
+            const int tid = omp_get_thread_num();
 
             #pragma omp single
             thread_results.resize(omp_get_num_threads());
 
-            auto& local = thread_results[thread_id];
+            // thread local vectors
+            std::vector<std::pair<std::size_t,int>> local;
+            local.reserve(1024);   // heuristic, dont really need so can be removed
 
             #pragma omp for schedule(static)
             for (size_t i = 0; i < _n_rows; ++i) {
@@ -539,7 +549,8 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx,
                 if (distance <= epsilon)
                     local.emplace_back(i, distance);
             }
-        }
+            thread_results[tid] = std::move(local);
+        }   // end of parallel region
     }   // GIL reestablished here
 
     // count total neighbours to preallocate np array
@@ -1201,10 +1212,9 @@ std::vector<std::vector<uint64_t>> BitMatrix::subsetPackedMatrix( const std::vec
 
     {
         // open mp thread stuff
-        py::gil_scoped_release release;   // release GIL for full parallel region
-        omp_set_num_threads(threads);
+        py::gil_scoped_release release;   // kill python
 
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for num_threads(threads) schedule(static)
         for (size_t i = 0; i < subm_n_rows; ++i) {
             size_t orig_row_idx = row_indices[i];
             for (size_t j = 0; j < subm_n_cols; ++j) {
@@ -1216,7 +1226,7 @@ std::vector<std::vector<uint64_t>> BitMatrix::subsetPackedMatrix( const std::vec
                 }
             }
         }
-    }   
+    }   // GIL reestablished  
     return submatrix;
 }
 
