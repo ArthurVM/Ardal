@@ -48,9 +48,12 @@ Ardal requires a C++ compiler to build the C++ extension.
     This will clone the repository, navigate to the project directory, and install the package.
 
 3. **Using Conda**
+   
+   NOTE: Placeholder. Currently not in use.
+   
     ```bash
     conda build .
-    conda install /path/to/your/conda-bld/noarch/ardal-0.1.0-py_0.tar.bz2
+    conda install /path/to/conda-bld/noarch/ardal-0.1.0-py_0.tar.bz2
     ```
     This will build and install the package using conda.
 
@@ -74,10 +77,10 @@ matrix_data = np.array([
 ], dtype=np.uint8)
 headers = {
     "guids" : ["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6"],
-    "alleles" : ["SNP1", "SNP2", "SNP3", "SNP4", "SNP5"]
+    "alleles" : ["chr1.1000.A.T", "chr1.2000.A.T", "chr1.3000.A.T", "chr1.4000.A.T", "chr1.5000.A.T"]
 }
 
-## create an Ardal object from dummy data
+## minimum case to create an Ardal object from dummy data
 ard_obj = Ardal(data_source=[headers, matrix_data])
 ```
 From data on disk
@@ -85,6 +88,14 @@ From data on disk
 headers_path = "/path/to/headers.json"
 matrix_path = "/path/to/matrix.npy"
 ard_obj = Ardal(data_source=[headers_path, matrix_path])
+```
+You may also specify verbosity level, backend selection protocol (i.e. whether to force roaring or let Ardal decide), and the format of the SNP ids for advanced functionality at object creation
+```
+ard_obj = Ardal(data_source=[headers_path, matrix_path],
+                roaring="auto",
+                allele_id_format="{chr}.{start}.{ref}.{alt}",
+                quiet_init=False,
+                verbosity="debug")
 ```
 ### Compute a Distance Matrix
 You can compute a distance matrix easily using either Hamming or Jaccard distance.
@@ -99,11 +110,8 @@ jaccard_matrix = ard_obj.compare.pairwise(metric="jaccard")
 A SNP neighbourhood can be computed by finding all GUIDs which lie within n SNPs of a query GUID.
 This can be achieved with or without SIMD, depending on CPU architecture.
 ```
-## find the neighborhood of GUID1 within a Hamming distance of 2 (using SIMD)
-neighborhood_simd = ard_obj.compare.neighbourhood("GUID1", n=2, simd=True)
-
-## find the neighborhood of GUID1 within a Hamming distance of 2 (without SIMD)
-neighborhood = ard_obj.compare.neighbourhood("GUID1", n=2, simd=False)
+## find the neighborhood of GUID1 within a Hamming distance of 2
+neighborhood_simd = ard_obj.distance.neighbourhood("GUID1", n=2)
 ```
 ### Identifying Unique Alleles
 You can find the alleles which are unique to a given set of GUIDs within the input data.
@@ -121,14 +129,14 @@ as `.stats.snpInform()`.
 ingroup_guids = ["GUID1", "GUID2", "GUID3"]
 
 ## calculate the Jensen-Shannon divergence of each SNP
-snps = ard.stats.snpInform(ingroup_guids, metric="jensenshannon")
+snps = ard.stats.allele_inform(ingroup_guids, metric="jensenshannon")
 
 ## select the top 1% of SNPs
-t = np.percentile(list(snps.values()), 99.999)
+t = np.percentile(list(snps.values()), 99.0)
 top_snps = [snp for snp, score in snps.items() if score >= t]
 
-## compute the allele co-occurrence to ensure co-occurring SNPs dont result in overfitting
-cooc_snps = ard.alleleCooc(selected_snps, threshold=0.95, threads=10)
+## compute the allele co-occurrence to ensure co-occurring SNPs don't result in overfitting
+cooc_snps = ard.stats.allele_cooc(selected_snps, threshold=0.95, threads=10)
 na_snps = [snp for d in list(cooc_snps.values()) for snp in d]
 model_snps = [snp for snp in top_snps if snp not in na_snps]
 ```
@@ -136,31 +144,31 @@ model_snps = [snp for snp in top_snps if snp not in na_snps]
 There are a number of general utility functions for getting data, input/output, subsetting, and database inspection.
 ```
 ## get the allele matrix stats as a JSON
-stats_json = ard_obj.get.matrixStats()
+stats_json = ard_obj.get.matrix_stats()
 
 ## or print as a rich text table
-ard_obj.get.matrixStats(print_stats=True)
+ard_obj.get.matrix_stats(print_stats=True)
 
 ## get the allele matrix as a NumPy array
-bit_matrix = ard_obj.get.bitMatrix()
+bit_matrix = ard_obj.get.bit_matrix()
 
 ## get the roaring matrix
-roaring_matrix = ard_obj.get.roaringMatrix()
+roaring_matrix = ard_obj.get.roaring_matrix()
 
 ## get the GUID and Allele headers
-headers = ard_obj.get.getHeaders()
+headers = ard_obj.get.headers()
 
 ## get the allele matrix as a Pandas DataFrame
-df = ard_obj.io.toDataFrame()
+df = ard_obj.io.to_dataframe()
 
-## or as a dictionary (which will be identical to the .get.roaringMatrix() function in practice)
-allele_dict = ard_obj.io.toDict()
+## or as a dictionary (which will be identical to the .get.roaring_matrix() function in practice)
+allele_dict = ard_obj.io.to_dict()
 
 ## write the allele matrix to disk as a npy JSON pair
-ard_obj.io.write.snpCount(file_path="./, output_prefix="out_db")
+ard_obj.io.write(file_path="./, output_prefix="out_db")
 
 ## or compress the npy to npz
-ard_obj.io.write.snpCount(file_path="./, output_prefix="out_db", npz=True)
+ard_obj.io.write(file_path="./, output_prefix="out_db", npz=True)
 ```
 
 # Ardal API Documentation
