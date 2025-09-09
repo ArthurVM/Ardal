@@ -35,50 +35,19 @@ namespace _ardal {
  *   - If the matrix dimensions are too large, potentially causing an overflow.
  *   - If the input matrix contains values other than 0 or 1.
  ****************************************************************************************************/
-BitMatrix::BitMatrix( py::array_t<uint8_t> input_matrix ) {
-    auto buf = input_matrix.request();
-
-    if (buf.ndim != 2) {
-        throw std::runtime_error("Input matrix must be 2-dimensional");
-    }
-
-    // capture matrix dimensions
-    _n_rows = buf.shape[0];
-    _n_cols = buf.shape[1];
-
-    // calculate packed matrix columns
-    _packed_cols = (_n_cols + 63) / 64;
-
-    // size check
-    if (_n_rows > std::numeric_limits<size_t>::max() / _n_cols) {
-        throw std::runtime_error("Matrix dimensions are too large, potential overflow.");
-    }
-
-    // allocate memory for packed matrix
-    auto ptr = static_cast<uint8_t*>(buf.ptr);
-    _packed_matrix.resize(_n_rows, std::vector<uint64_t>(_packed_cols, 0));
-    
-    // get the mass (popcount) of each row and column
-    _row_masses.resize(_n_rows, 0);
-    _col_masses.resize(_n_cols, 0);
-
-    // do some packing
-    for (size_t i = 0; i < _n_rows; ++i) {
-        for (size_t j = 0; j < _n_cols; ++j) {
-            uint8_t val = ptr[i * _n_cols + j];
-            if (val != 0 && val != 1) {
-                throw std::runtime_error("Input matrix must only contain binary values (0 or 1)");
-            }
-            if (val) {
-                _packed_matrix[i][j / 64] |= (1ULL << (j % 64));
-                // populate mass counters
-                _row_masses[i]++;
-                _col_masses[j]++;
-            }
-        }
-    }
-    // calculate matrix density
-    _density = density();
+BitMatrix::BitMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
+                      const std::vector<int>& row_masses,
+                      const std::vector<int>& col_masses,
+                      const size_t& n_rows,
+                      const size_t& n_cols )
+    : _packed_matrix(packed_matrix),
+      _row_masses(row_masses),
+      _col_masses(col_masses),
+      _n_rows(n_rows),
+      _n_cols(n_cols) {
+    // capture packed matrix columns
+    auto buf = packed_matrix.request();
+    _n_packed_cols = buf.shape[1];
 }
 
 
@@ -106,7 +75,7 @@ std::vector<size_t> BitMatrix::getRowSetBitIndices( size_t row_idx ) const {
     }
     std::vector<size_t> row_indices;
     row_indices.reserve(_row_masses[row_idx]);
-    for (size_t k = 0; k < _packed_cols; ++k) {
+    for (size_t k = 0; k < _n_packed_cols; ++k) {
         uint64_t chunk = _packed_matrix[row_idx][k];
         while (chunk != 0) {
             int trailing_zeros = __builtin_ctzll(chunk);
@@ -303,7 +272,7 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
                 const uint64_t* __restrict row_j = &_packed_matrix[j][0];
 
                 // compute hamming disct
-                const uint32_t dist = hamming_func(row_i, row_j, _packed_cols);
+                const uint32_t dist = hamming_func(row_i, row_j, _n_packed_cols);
                 
                 // use the base to construct the index
                 dist_ptr[base + (j - i - 1)] = dist;
@@ -353,7 +322,7 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
 
     const size_t subm_n_rows = row_indices.size();
     const size_t subm_n_cols = col_indices.size();
-    const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
+    const size_t subm_n_packed_cols = (subm_n_cols + 63) / 64;
 
     // subset the matrix
     std::vector<std::vector<uint64_t>> submatrix = subsetPackedMatrix(row_indices, col_indices, threads);
@@ -384,7 +353,7 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
                 for (size_t j = i + 1; j < subm_n_rows; ++j) {
                     size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
 
-                    uint32_t dist = hamming_func(&submatrix[i][0], &submatrix[j][0], subm_packed_cols);
+                    uint32_t dist = hamming_func(&submatrix[i][0], &submatrix[j][0], subm_n_packed_cols);
 
                     dist_ptr[idx] = dist;
                 }
@@ -452,7 +421,7 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
             size_t base = (i * (2 * _n_rows - i - 1)) / 2;
 
             for (size_t j = i + 1; j < _n_rows; ++j) {                
-                int inner_product = inner_product_func(&_packed_matrix[i][0], &_packed_matrix[j][0], _packed_cols);
+                int inner_product = inner_product_func(&_packed_matrix[i][0], &_packed_matrix[j][0], _n_packed_cols);
 
                 inner_product_ptr[base + (j - i - 1)] = inner_product;
 
@@ -544,7 +513,7 @@ py::array_t<int64_t> BitMatrix::neighbourhood( size_t row_idx,
                 int mass_d = std::abs(q_mass - _row_masses[i]);
                 if (mass_d > epsilon) continue;
 
-                int distance = epsilon_neighbourhood_func(&_packed_matrix[row_idx][0], &_packed_matrix[i][0], _packed_cols, epsilon);
+                int distance = epsilon_neighbourhood_func(&_packed_matrix[row_idx][0], &_packed_matrix[i][0], _n_packed_cols, epsilon);
 
                 if (distance <= epsilon)
                     local.emplace_back(i, distance);
@@ -637,7 +606,7 @@ py::list BitMatrix::innerProductNeighbourhood( size_t row_idx,
             continue;
         }
 
-        int inner_product = ip_neighbourhood_func(&_packed_matrix[row_idx][0], &_packed_matrix[i][0], _packed_cols);
+        int inner_product = ip_neighbourhood_func(&_packed_matrix[row_idx][0], &_packed_matrix[i][0], _n_packed_cols);
         
         if (inner_product >= ip_epsilon) {
             ipe_n.append(py::make_tuple(i, inner_product));
@@ -666,12 +635,12 @@ std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_
     if (row_indices.empty()) return {};
  
     const size_t ingroup_size = row_indices.size();
-    std::vector<uint64_t> group_and(_packed_cols, ~0ULL);   // initialize with all bits set
+    std::vector<uint64_t> group_and(_n_packed_cols, ~0ULL);   // initialize with all bits set
 
     if (use_simd) {
         // SIMD ingroup AND
         size_t k = 0;
-        for (; k + 4 <= _packed_cols; k += 4) {
+        for (; k + 4 <= _n_packed_cols; k += 4) {
             __m256i acc = _mm256_loadu_si256((__m256i const*)&_packed_matrix[row_indices[0]][k]);
             for (size_t idx = 1; idx < ingroup_size; ++idx) {
                 __m256i row = _mm256_loadu_si256((__m256i const*)&_packed_matrix[row_indices[idx]][k]);
@@ -680,7 +649,7 @@ std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_
             _mm256_storeu_si256((__m256i*)&group_and[k], acc);
         }
         // remainder loop for ingroup AND
-        for (; k < _packed_cols; ++k) {
+        for (; k < _n_packed_cols; ++k) {
             uint64_t acc = _packed_matrix[row_indices[0]][k];
             for (size_t idx = 1; idx < ingroup_size; ++idx) {
                 acc &= _packed_matrix[row_indices[idx]][k];
@@ -689,7 +658,7 @@ std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_
         }
     } else {
         // scalar ingroup AND
-        for (size_t k = 0; k < _packed_cols; ++k) {
+        for (size_t k = 0; k < _n_packed_cols; ++k) {
             uint64_t acc = _packed_matrix[row_indices[0]][k];
             for (size_t idx = 1; idx < ingroup_size; ++idx) {
                 acc &= _packed_matrix[row_indices[idx]][k];
@@ -702,7 +671,7 @@ std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_
     // this checks each column mass (number of set bits) against the number of ingroup rows
     // in order for that column to be unique and shared by the in group, these two values must be identical
     std::vector<size_t> unique_bits;
-    for (size_t k = 0; k < _packed_cols; ++k) {
+    for (size_t k = 0; k < _n_packed_cols; ++k) {
         uint64_t chunk = group_and[k];
         if (chunk == 0) continue;   // optimisation: skip empty chunks
 
@@ -1002,7 +971,7 @@ py::array_t<double> BitMatrix::klDivergence( const std::vector<size_t>& ingroup_
     std::vector<int> ingroup_col_masses(_n_cols, 0);
     for (const auto& row_idx : ingroup_indices) {
         if (row_idx >= _n_rows) continue;   // safety check
-        for (size_t k = 0; k < _packed_cols; ++k) {
+        for (size_t k = 0; k < _n_packed_cols; ++k) {
             uint64_t chunk = _packed_matrix[row_idx][k];
             while (chunk != 0) {
                 int trailing_zeros = __builtin_ctzll(chunk);
@@ -1068,7 +1037,7 @@ py::array_t<double> BitMatrix::jsDivergence( const std::vector<size_t>& ingroup_
     std::vector<int> ingroup_col_masses(_n_cols, 0);
     for (const auto& row_idx : ingroup_indices) {
         if (row_idx >= _n_rows) continue;   // safety check
-        for (size_t k = 0; k < _packed_cols; ++k) {
+        for (size_t k = 0; k < _n_packed_cols; ++k) {
             uint64_t chunk = _packed_matrix[row_idx][k];
             while (chunk) {
                 int tz = __builtin_ctzll(chunk);
@@ -1134,7 +1103,7 @@ py::array_t<double> BitMatrix::informationGain( const std::vector<size_t>& ingro
     std::vector<int> ingroup_col_masses(_n_cols, 0);
     for (const auto& row_idx : ingroup_indices) {
         if (row_idx >= _n_rows) continue;   // safety check
-        for (size_t k = 0; k < _packed_cols; ++k) {
+        for (size_t k = 0; k < _n_packed_cols; ++k) {
             uint64_t chunk = _packed_matrix[row_idx][k];
             while (chunk) {
                 int tz = __builtin_ctzll(chunk);
@@ -1206,9 +1175,9 @@ std::vector<std::vector<uint64_t>> BitMatrix::subsetPackedMatrix( const std::vec
                                                                   const int threads ) const {
     const size_t subm_n_rows = row_indices.size();
     const size_t subm_n_cols = col_indices.size();
-    const size_t subm_packed_cols = (subm_n_cols + 63) / 64;
+    const size_t subm_n_packed_cols = (subm_n_cols + 63) / 64;
 
-    std::vector<std::vector<uint64_t>> submatrix(subm_n_rows, std::vector<uint64_t>(subm_packed_cols, 0));
+    std::vector<std::vector<uint64_t>> submatrix(subm_n_rows, std::vector<uint64_t>(subm_n_packed_cols, 0));
 
     {
         // open mp thread stuff

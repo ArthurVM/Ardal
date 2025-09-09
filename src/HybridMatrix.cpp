@@ -18,7 +18,7 @@ namespace _ardal {
  * or a `RoaringMatrix` as its backend, depending on the density of the input matrix.
  *
  * INPUT:
- *  matrix (py::array_t<uint8_t>): A 2D NumPy array containing only binary values (0 or 1).
+ *  packed_matrix (py::array_t<uint8_t>): A 2D 64bit packed binary matrix.
  *  use_roaring_if_sparse (bool): If true, the `RoaringMatrix` backend will be used if the
  *                                matrix density is below `density_threshold`.
  *  density_threshold (double): The density threshold below which `RoaringMatrix` is preferred.
@@ -29,17 +29,58 @@ namespace _ardal {
  * EXCEPTIONS:
  *  Propagates exceptions from `BitMatrix` and `RoaringMatrix` constructors.
  ****************************************************************************************************/  
-HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
+HybridMatrix::HybridMatrix( py::array_t<uint8_t> packed_npy_matrix,
                             bool use_roaring_if_sparse,
                             double density_threshold ) {
-    bit_backend = std::make_unique<_ardal::BitMatrix>(matrix);
-    density = bit_backend->getDensity();
-    _n_cols = bit_backend->getNCols();
+    auto buf = packed_npy_matrix.request();
+    if (buf.ndim != 2) {
+        throw std::runtime_error("Input matrix must be 2-dimensional");
+    }
 
+    // repack into expected structure for C++
+    _packed_matrix.resize(n_rows, std::vector<uint64_t>(_n_packed_cols, 0));
+    for (size_t i = 0; i < n_rows; ++i) {
+        for (size_t j = 0; j < _n_packed_cols; ++j) {
+            _packed_matrix[i][j] = data[i * _n_packed_cols + j];
+        }
+    }
+
+    // get the matrix metadata once to pass to each backend
+    // shape
+    size_t n_rows = buf.shape[0];
+    size_t n_packed_cols = buf.shape[1];
+    size_t n_cols = n_packed_cols * 64;
+
+    // col/row masses
+    std::vector<int> row_masses(n_rows, 0);
+    std::vector<int> col_masses(n_cols, 0);
+    int64_t total_mass = 0;
+    
+    // matrix density
+    const uint64_t* data = static_cast<const uint64_t*>(buf.ptr);
+    for (size_t i = 0; i < n_rows; ++i) {
+        for (size_t j = 0; j < n_packed_cols; ++j) {
+            uint64_t word = data[i * n_packed_cols + j];
+            for (size_t b = 0; b < 64; ++b) {
+                size_t col = j * 64 + b;
+                if (col >= n_cols) break;
+                if ((word >> b) & 1) {
+                    row_masses[i]++;
+                    col_masses[col]++;
+                    total_mass++;
+                }
+            }
+        }
+    }
+    double density = static_cast<double>(total_mass) / (n_rows * n_cols);
+
+    // initialise bit backend
+    bit_backend = std::make_unique<_ardal::BitMatrix>(packed_matrix, row_masses, col_masses, n_rows, n_cols);
+
+    // initialise roaring backend if required and density thresholds are met
     if (use_roaring_if_sparse && density < density_threshold) {
         roaring_enabled = true;
-        const auto& row_masses = bit_backend->getRowMassesVector();
-        roaring_backend = std::make_unique<_ardal::RoaringMatrix>(matrix, row_masses);
+        roaring_backend = std::make_unique<_ardal::RoaringMatrix>(packed_matrix, row_masses, col_masses, n_rows, n_cols);
     } else {
         roaring_enabled = false;
     }
@@ -47,7 +88,7 @@ HybridMatrix::HybridMatrix( py::array_t<uint8_t> matrix,
 
 
 HybridMatrix::BackendType HybridMatrix::selectBackend(size_t n_cols, double density) const {
-    // Example heuristic
+    // heuristic backend selection
     if (n_cols > 20000 && density < 0.02) {
         return BackendType::ROARING;
     } else {

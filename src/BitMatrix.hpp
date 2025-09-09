@@ -32,7 +32,11 @@ struct pair_hash {
 class BitMatrix {
 public:
     // constructor: takes a NumPy matrix
-    BitMatrix( py::array_t<uint8_t> input_matrix );
+    BitMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
+               const std::vector<int>& row_masses,
+               const std::vector<int>& col_masses,
+               const size_t& n_rows,
+               const size_t& n_cols );
 
     // distance functions
     py::array_t<uint32_t> hamming( bool fill_cache = false,
@@ -88,7 +92,7 @@ private:
     // attributes
     size_t _n_rows;                 // the number of rows (guids)
     size_t _n_cols;                 // the number of columns (alleles)
-    size_t _packed_cols;            // the number of packed columns
+    size_t _n_packed_cols;          // the number of packed columns
     std::vector<int> _row_masses;   // the mass of each row
     std::vector<int> _col_masses;   // the mass of each column
     double _density;                // the density of the matrix

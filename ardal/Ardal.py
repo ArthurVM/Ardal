@@ -1,7 +1,9 @@
 """ Frontend for the Ardal allele matrix toolkit.
 """
 import logging
-from typing import Union, Dict
+import numpy as np
+import pandas as pd
+from typing import Union, Dict, Tuple
 
 from .core.ArdalParser import ArdalParser
 from .core.ArdalHeaderUtils import ArdalHeaderUtils
@@ -37,7 +39,7 @@ class Ardal(object):
     @check_allele_id_format
     @check_bed_paths
     def __init__( self,
-                  data_source : str,
+                  data_source : Union[str, pd.DataFrame, Tuple[str, str], Tuple[np.ndarray, Dict]],
                   roaring : Union[str, bool] = "auto",
                   density_threshold : float = 0.02,
                   allele_id_format : Union[str, None] = None,
@@ -72,8 +74,11 @@ class Ardal(object):
 
         ## do some parameter fiddling to enforce the generation of a roaring matrix
         self._roaring_setter(roaring, density_threshold)
+        
+        log.debug(parser.matrix)
             
         if parser.matrix is not None:
+            log.debug(f"Initialising _ardal::HybridMatrix backend.")
             self._hybrid_matrix = _ardal.HybridMatrix(parser.matrix,
                                                       use_roaring_if_sparse=self.build_roaring,
                                                       density_threshold=self.density_threshold)
@@ -85,6 +90,7 @@ class Ardal(object):
         ## set this as a signal from the backend
         self.roaring = self._hybrid_matrix.roaringEnabled()
         
+        log.debug("Initialising Ardal component classes.")
         ## Ardal component classes
         self._headerUtils = ArdalHeaderUtils(headers = self._headers,
                                              allele_coords_bed = allele_coords_bed,
@@ -110,6 +116,8 @@ class Ardal(object):
         self.stats = ArdalStats(headerUtils = self._headerUtils,
                                 hybrid_matrix = self._hybrid_matrix,
                                 roaring_enabled = self.roaring)
+        
+        log.info("GOT HERE")
 
         if not quiet_init and verbosity < SILENT:
             self.get.matrix_stats(print_table=True)
@@ -145,6 +153,8 @@ class Ardal(object):
             self.density_threshold = density_threshold
         else:
             raise ValueError(f"Invalid roaring mode: {roaring}")
+        
+        log.debug(f"Roaring setter : roaring={roaring}; density_threshold={density_threshold}; build_roaring={self.build_roaring}")
 
 
     def set_verbosity( self,

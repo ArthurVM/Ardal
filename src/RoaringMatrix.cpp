@@ -30,35 +30,34 @@ namespace _ardal {
  *   - If the input matrix is not 2-dimensional.
  *   - If the input matrix contains values other than 0 or 1.
  ****************************************************************************************************/
-RoaringMatrix::RoaringMatrix( py::array_t<uint8_t> input_matrix,
-                              const std::vector<int>& row_masses )
-    : _row_masses(row_masses) {
-    auto buf = input_matrix.request();
-
-    // std::cout << "Building roaring" << std::endl;
-
-    if (buf.ndim != 2) {
-        throw std::runtime_error("Input matrix must be 2-dimensional");
-    }
-
-    // capture matrix dimensions
-    _n_rows = buf.shape[0];
-    _n_cols = buf.shape[1];
+RoaringMatrix::RoaringMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
+                              const std::vector<int>& row_masses,
+                              const std::vector<int>& col_masses,
+                              const size_t& n_rows,
+                              const size_t& n_cols )
+    : _row_masses(row_masses),
+      _col_masses(col_masses),
+      _n_rows(n_rows),
+      _n_cols(n_cols) {
+    // capture packed matrix columns
+    auto buf = packed_matrix.request();
+    _n_packed_cols = buf.shape[1];
 
     // allocate memory for roaring bitmaps
     _roaring_matrix.resize(_n_rows);
     
     // populate roaring bitmaps
-    auto ptr = static_cast<uint8_t*>(buf.ptr);
+    const uint64_t* data = static_cast<const uint64_t*>(buf.ptr);
     for (size_t i = 0; i < _n_rows; ++i) {
         roaring::Roaring& bitmap = _roaring_matrix[i];
-        for (size_t j = 0; j < _n_cols; ++j) {
-            uint8_t val = ptr[i * _n_cols + j];
-            if (val != 0 && val != 1) {
-                throw std::runtime_error("Input matrix must only contain binary values (0 or 1)");
-            }
-            if (val) {
-                bitmap.add(j);
+        for (size_t j = 0; j < _n_packed_cols; ++j) {
+            uint64_t word = data[i * _n_packed_cols + j];
+            for (size_t b = 0; b < 64; ++b) {
+                size_t col = j * 64 + b;
+                if (col >= n_cols) break;
+                if ((word >> b) & 1) {
+                    bitmap.add(col);
+                }
             }
         }
     }

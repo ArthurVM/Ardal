@@ -24,8 +24,11 @@ namespace _ardal {
 class RoaringMatrix {
 public:
     // constructor: takes a NumPy matrix
-    RoaringMatrix( py::array_t<uint8_t> input_matrix,
-                   const std::vector<int>& row_masses );
+    RoaringMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
+                   const std::vector<int>& row_masses,
+                   const std::vector<int>& col_masses,
+                   const size_t& n_rows,
+                   const size_t& n_cols );
 
     // distance functions
     py::array_t<uint32_t> hamming( int threads = 1 ) const;
@@ -57,8 +60,10 @@ private:
 
     // attributes
     const std::vector<int>& _row_masses;
+    const std::vector<int>& _col_masses;
     size_t _n_rows;
     size_t _n_cols;
+    size_t _n_packed_cols;
 
     // distance functions
     uint32_t hammingDistance( size_t i, size_t j ) const;
