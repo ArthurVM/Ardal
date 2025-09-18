@@ -64,7 +64,7 @@ class ArdalDistance:
         """
         naturalsize = require_package("humanize", attr="naturalsize")
 
-        log.debug("[PAIRWISE] Starting pairwise")
+        log.info("[PAIRWISE] Starting pairwise")
 
         ## function specific checks
         self._check_pairwise_args(
@@ -109,7 +109,7 @@ class ArdalDistance:
 
         ## get interval alleles
         if intervals:
-            log.debug("[PAIRWISE] Constructing intervals")
+            log.info("[PAIRWISE] Constructing intervals")
             alleles = self._headerUtils.get_interval_alleles(
                 intervals=intervals,
                 intervals_bed=intervals_bed,
@@ -117,7 +117,7 @@ class ArdalDistance:
                 allele_id_format=allele_id_format,
             )
             local_args["alleles"] = alleles
-            log.debug("[PAIRWISE] Interval constructed.")
+            log.info("[PAIRWISE] Interval constructed.")
 
         ## ------ memory guard (based on requested output shape & real dtype) ------
         n = len(guids)
@@ -131,7 +131,7 @@ class ArdalDistance:
         natural_est = naturalsize(est_bytes, binary=True)
 
         total_memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        log.debug(
+        log.info(
             f"[PAIRWISE] Planning {n}x{n} {metric} distance matrix ({out_dtype}) with shape "
             f"{'square' if return_square else 'condensed'}, est ~{natural_est}."
         )
@@ -164,7 +164,7 @@ class ArdalDistance:
         ## construct dataframe
         ## NOTE: this could be extremely expensive for large matrices
         if as_dataframe:
-            log.debug("[PAIRWISE] Building pandas dataframe. For large N this could take some time.")
+            log.info("[PAIRWISE] Building pandas dataframe. For large N this could take some time.")
             return pd.DataFrame(mat, index=guids, columns=guids)
         return mat
 
@@ -184,7 +184,7 @@ class ArdalDistance:
         """
         Build nxn square array from condensed vector.
         """
-        log.debug("Expanding the condensed matrix.")
+        log.info("[PAIRWISE] Expanding the condensed matrix.")
         mat = np.zeros((n, n), dtype=dtype)
         iu, ju = np.triu_indices(n, 1)
         mat[iu, ju] = condensed
@@ -213,7 +213,7 @@ class ArdalDistance:
             np.ndarray: a condensed (lower triangle) distance matrix.
         """
         s = time.time()
-        log.debug(f"[PAIRWISE] Starting global {metric} distance calculations...")
+        log.info(f"[PAIRWISE] Starting global {metric} distance calculations...")
 
         if metric == "jaccard":
             dist_tri = self._matrix.jaccard(use_simd=use_simd, threads=threads, backend=backend)
@@ -224,7 +224,7 @@ class ArdalDistance:
         else:
             raise ParameterError(f"Unknown metric: {metric}")
 
-        log.debug(f"[PAIRWISE] Finished {metric} distance calculations in {time.time()-s:.3f}s.")
+        log.info(f"[PAIRWISE] Finished {metric} distance calculations in {time.time()-s:.3f}s.")
         return dist_tri  ## condensed with correct dtype from backend
 
 
@@ -257,7 +257,7 @@ class ArdalDistance:
         row_indices = [self._headerUtils.encode_guid(g) for g in guids]
         col_indices = [self._headerUtils.encode_allele(a) for a in alleles]
 
-        log.debug(
+        log.info(
             f"[PAIRWISE] Starting local {metric} on {len(col_indices)}x{len(row_indices)} subset."
         )
 
@@ -276,7 +276,7 @@ class ArdalDistance:
         else:
             raise ParameterError(f"Unknown metric: {metric}")
 
-        log.debug(f"[PAIRWISE] Finished local {metric} distance calculations in {time.time()-s:.3f}s.")
+        log.info(f"[PAIRWISE] Finished local {metric} distance calculations in {time.time()-s:.3f}s.")
         return dist_tri
     
     

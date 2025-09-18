@@ -5,15 +5,18 @@ Copyright 2025 Arthur V. Morris
 #pragma once
 
 #include <memory>
-#include "BitMatrix.hpp"
-#include "RoaringMatrix.hpp"
+#include <iostream>
+#include "core/types.hpp"
+
 
 namespace py = pybind11;
-namespace _ardal {
+namespace ardal {
 
 class HybridMatrix {
 public:
-    HybridMatrix( py::array_t<uint8_t> matrix,
+    HybridMatrix( py::array packed_or_dense_matrix,
+                  bool is_bitpacked,
+                  size_t n_cols_bits,
                   bool use_roaring_if_sparse = true,
                   double density_threshold = 0.02 );
 
@@ -81,13 +84,15 @@ public:
     
 
     // get functions: BitMatrix
-    py::array_t<int> getRowMasses( void );
+    py::array_t<int> getRowMasses( void ) const;
 
-    py::array_t<int> getColumnMasses( void );
+    py::array_t<int> getColumnMasses( void ) const;
 
     double getDensity( void ) const;
 
     py::array_t<uint8_t> getBitMatrix( void ) const;
+
+    py::array_t<uint64_t> getPackedMatrix( void ) const;
 
     py::list getRoaringMatrix( void ) const;
 
@@ -98,14 +103,18 @@ public:
                                                const int threads ) const;
 
 
-private:
+private:  
+    // attributes
+    const uint64_t* words_ = nullptr;       // base pointer to rmaj words
+    size_t n_rows_ = 0;
+    size_t n_cols_bits_ = 0;
+    size_t words_per_row_ = 0;
+    size_t density_;
+    
+    // backends
     std::unique_ptr<BitMatrix> bit_backend;
     std::unique_ptr<RoaringMatrix> roaring_backend;
-    
-    // attributes
-    bool roaring_enabled;
-    double density;
-    size_t _n_cols;
+    bool roaring_enabled = false;
     
     // backend selector
     enum class BackendType { AUTO, BIT, ROARING };
@@ -119,4 +128,4 @@ private:
     }
 };
 
-} // namespace _ardal
+} // namespace ardal

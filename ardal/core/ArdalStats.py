@@ -64,10 +64,10 @@ class ArdalStats:
         """
         if alleles != []:
             ## input validation
-            self._headerUtils.check_alleles(allele_indices)
+            self._headerUtils.check_alleles(alleles)
 
             ## encode the alleles
-            allele_indices = [self._headerUtils.encode_allele(allele) for allele in allele_indices]
+            allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
 
             cooc_dict = self._matrix.bitCooccurrence_subset(col_indices=allele_indices,
                                                             threshold=threshold,

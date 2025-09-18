@@ -60,9 +60,11 @@ class Ardal(object):
             quiet_init (bool): If True, suppress initial matrix stats printout.
             allele_positions (dict or none): a dictionary of allele positions which can be passed to headerUtils.
         """
-        from . import _ardal
+        from . import backends
         
         if isinstance(verbosity, str):
+            ## set backend verbosity here to avoid double _ardal import and circular issues
+            backends._ardal.set_backend_verbosity(verbosity.lower())
             verbosity = VERBOSITY_LEVELS.get(verbosity.lower(), logging.WARNING)
 
         log.setLevel(verbosity)
@@ -74,14 +76,19 @@ class Ardal(object):
 
         ## do some parameter fiddling to enforce the generation of a roaring matrix
         self._roaring_setter(roaring, density_threshold)
-        
-        log.debug(parser.matrix)
-            
+                    
         if parser.matrix is not None:
-            log.debug(f"Initialising _ardal::HybridMatrix backend.")
-            self._hybrid_matrix = _ardal.HybridMatrix(parser.matrix,
-                                                      use_roaring_if_sparse=self.build_roaring,
-                                                      density_threshold=self.density_threshold)
+            log.info(f"""Initialising _ardal::HybridMatrix backend with:
+                                    matrix = {parser.matrix.shape} {type(parser.matrix)}
+                                    is_bitpacked = {parser.is_bitpacked} {type(parser.is_bitpacked)}
+                                    n_cols_bits = {parser.meta["n_cols"]} {type(parser.meta["n_cols"])}
+                                    build_roaring = {self.build_roaring} {type(self.build_roaring)}
+                                    density_threshold = {self.density_threshold} {type(self.density_threshold)}""")
+            self._hybrid_matrix = backends._ardal.HybridMatrix(parser.matrix,
+                                                               is_bitpacked=parser.is_bitpacked,
+                                                               n_cols_bits=parser.meta["n_cols"],
+                                                               use_roaring_if_sparse=self.build_roaring,
+                                                               density_threshold=self.density_threshold)
             self._headers = parser.headers
         else:
             ## raise an error if parsing fails to prevent unexpected behaviour down the line
@@ -90,9 +97,10 @@ class Ardal(object):
         ## set this as a signal from the backend
         self.roaring = self._hybrid_matrix.roaringEnabled()
         
-        log.debug("Initialising Ardal component classes.")
+        log.info("Initialising Ardal component classes.")
         ## Ardal component classes
         self._headerUtils = ArdalHeaderUtils(headers = self._headers,
+                                             meta = parser.meta,
                                              allele_coords_bed = allele_coords_bed,
                                              allele_id_format = allele_id_format,
                                              allele_positions = allele_positions)
@@ -117,8 +125,6 @@ class Ardal(object):
                                 hybrid_matrix = self._hybrid_matrix,
                                 roaring_enabled = self.roaring)
         
-        log.info("GOT HERE")
-
         if not quiet_init and verbosity < SILENT:
             self.get.matrix_stats(print_table=True)
             

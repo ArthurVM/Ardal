@@ -2,12 +2,11 @@
 Copyright 2025 Arthur V. Morris
 */
 #include "RoaringMatrix.hpp"
-#include <stdexcept>
-#include <cmath>
-#include <cstring>
+#include "roaring/roaring.hh"
+#include "utils/PythonLogger.hpp"
 
 namespace py = pybind11;
-namespace _ardal {
+namespace ardal {
 
 
 /****************************************************************************************************
@@ -30,33 +29,36 @@ namespace _ardal {
  *   - If the input matrix is not 2-dimensional.
  *   - If the input matrix contains values other than 0 or 1.
  ****************************************************************************************************/
-RoaringMatrix::RoaringMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
-                              const std::vector<int>& row_masses,
-                              const std::vector<int>& col_masses,
-                              const size_t& n_rows,
-                              const size_t& n_cols )
-    : _row_masses(row_masses),
-      _col_masses(col_masses),
-      _n_rows(n_rows),
-      _n_cols(n_cols) {
-    // capture packed matrix columns
-    auto buf = packed_matrix.request();
-    _n_packed_cols = buf.shape[1];
-
+RoaringMatrix::RoaringMatrix( std::shared_ptr<const ardal::detail::WordsVV> packed_matrix,
+                              std::shared_ptr<const std::vector<int>> row_masses,
+                              std::shared_ptr<const std::vector<int>> col_masses,
+                              std::size_t n_rows,
+                              std::size_t n_cols_bits )
+    : n_rows_(n_rows),
+      n_cols_(n_cols_bits) 
+{
     // allocate memory for roaring bitmaps
-    _roaring_matrix.resize(_n_rows);
+    roaring_bitmap_.resize(n_rows_);
+
+    // allocate memory for col_masses and row_masses
+    // NOTE: these are passed from HybridMatrix but are causing a core dump when they are used.
+    // This is a temporary fixu until I can work out what is going wrong there.
+    row_masses_.assign(n_rows_, 0);
+    col_masses_.assign(n_cols_, 0);
     
+    ardal::utils::log_info("Constructing Roaring bit-map.");
     // populate roaring bitmaps
-    const uint64_t* data = static_cast<const uint64_t*>(buf.ptr);
-    for (size_t i = 0; i < _n_rows; ++i) {
-        roaring::Roaring& bitmap = _roaring_matrix[i];
-        for (size_t j = 0; j < _n_packed_cols; ++j) {
-            uint64_t word = data[i * _n_packed_cols + j];
+    for (size_t i = 0; i < n_rows_; ++i) {
+        roaring::Roaring& bitmap = roaring_bitmap_[i];
+        for (size_t j = 0; j < n_cols_; ++j) {
+            uint64_t word = packed_matrix[i][j];
             for (size_t b = 0; b < 64; ++b) {
                 size_t col = j * 64 + b;
-                if (col >= n_cols) break;
+                if (col >= n_cols_) break;
                 if ((word >> b) & 1) {
                     bitmap.add(col);
+                    row_masses_[i]++;
+                    col_masses_[j]++;
                 }
             }
         }
@@ -74,7 +76,7 @@ RoaringMatrix::RoaringMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
  * their symmetric difference (A XOR B).
  *
  * INPUT:
- *  None (operates on the private member _roaring_matrix)
+ *  None (operates on the private member roaring_bitmap_)
  *
  * PARAMETERS:
  *  threads (int) : The number of threads to use for parallel computation.
@@ -85,17 +87,20 @@ RoaringMatrix::RoaringMatrix( std::vector<std::vector<uint64_t>> packed_matrix,
  *                     where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
 py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
-    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
-    py::array_t<uint32_t> dist_matrix(total_pairs);     
+    ardal::utils::log_info("Running RoaringMatrix::hamming with scalar instructions.");
+
+    const size_t total_pairs = n_rows_ * (n_rows_ - 1) / 2;
+    py::array_t<uint32_t> dist_matrix(total_pairs);
+
     {
         py::gil_scoped_release release;   // kill python
 
         auto dist_ptr = dist_matrix.mutable_data();
 
         #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
-        for (size_t i = 0; i < _n_rows; ++i) {
-            for (size_t j = i + 1; j < _n_rows; ++j) {
-                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+        for (size_t i = 0; i < n_rows_; ++i) {
+            for (size_t j = i + 1; j < n_rows_; ++j) {
+                size_t idx = (i * (2 * n_rows_ - i - 1)) / 2 + (j - i - 1);
                 dist_ptr[idx] = hammingDistance(i, j);
             }
         }
@@ -126,6 +131,8 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
 py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& row_indices,
                                                      const std::vector<size_t>& col_indices,
                                                      int threads ) const {
+    ardal::utils::log_info("Running RoaringMatrix::hamming_subset with scalar instructions.");
+
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -133,7 +140,7 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
     // create matrix mask
     roaring::Roaring col_mask_bitmap;
     for (size_t col_idx : col_indices) {
-        if (col_idx >= _n_cols) {
+        if (col_idx >= n_cols_) {
             throw std::out_of_range("Column index in col_indices is out of bounds.");
         }
         col_mask_bitmap.add(col_idx);
@@ -143,18 +150,18 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
     std::vector<roaring::Roaring> submatrix;
     submatrix.reserve(row_indices.size());
     for (size_t row_idx : row_indices) {
-        if (row_idx >= _n_rows) {
+        if (row_idx >= n_rows_) {
             throw std::out_of_range("Row index in row_indices is out of bounds.");
         }
-        submatrix.push_back(_roaring_matrix.at(row_idx) & col_mask_bitmap);
+        submatrix.push_back(roaring_bitmap_.at(row_idx) & col_mask_bitmap);
     }
 
     // hamming distance stuff
-    const size_t subm_n_rows = submatrix.size();
-    if (subm_n_rows == 0) {
+    const size_t submn_rows_ = submatrix.size();
+    if (submn_rows_ == 0) {
         return py::array_t<uint32_t>(0);
     }
-    const size_t total_pairs = subm_n_rows * (subm_n_rows - 1) / 2;
+    const size_t total_pairs = submn_rows_ * (submn_rows_ - 1) / 2;
     py::array_t<uint32_t> dist_matrix(total_pairs);
 
     py::gil_scoped_release release;   // release GIL for full parallel region
@@ -164,9 +171,9 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
         auto dist_ptr = dist_matrix.mutable_data();
 
         #pragma omp for schedule(dynamic, 1)
-        for (size_t i = 0; i < subm_n_rows; ++i) {
-            for (size_t j = i + 1; j < subm_n_rows; ++j) {
-                size_t idx = (i * (2 * subm_n_rows - i - 1)) / 2 + (j - i - 1);
+        for (size_t i = 0; i < submn_rows_; ++i) {
+            for (size_t j = i + 1; j < submn_rows_; ++j) {
+                size_t idx = (i * (2 * submn_rows_ - i - 1)) / 2 + (j - i - 1);
                 dist_ptr[idx] = (submatrix[i] ^ submatrix[j]).cardinality();
             }
         }
@@ -191,7 +198,7 @@ py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& 
  *  uint32_t : The Hamming distance between the two rows.
  ****************************************************************************************************/
 uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
-    return (_roaring_matrix[i] ^ _roaring_matrix[j]).cardinality();
+    return (roaring_bitmap_[i] ^ roaring_bitmap_[j]).cardinality();
 }
 
 
@@ -206,7 +213,7 @@ uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
  *              JD = |A ∩ B| / |A ∪ B|
  *
  * INPUT:
- *  None (operates on the private member _roaring_matrix)
+ *  None (operates on the private member roaring_bitmap_)
  *
  * PARAMETERS:
  *  threads (int) : The number of threads to use for parallel computation.
@@ -217,17 +224,18 @@ uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
  *                     where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
 py::array_t<double> RoaringMatrix::jaccard( int threads ) const {
-    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
-    py::array_t<double> dist_matrix(total_pairs);     
+    ardal::utils::log_info("Running RoaringMatrix::jaccard with scalar instructions.");
+    const size_t total_pairs = n_rows_ * (n_rows_ - 1) / 2;
+    py::array_t<double> dist_matrix(total_pairs);
     {
         py::gil_scoped_release release;
 
         auto dist_ptr = dist_matrix.mutable_data();
 
         #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
-        for (size_t i = 0; i < _n_rows; ++i) {
-            for (size_t j = i + 1; j < _n_rows; ++j) {
-                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+        for (size_t i = 0; i < n_rows_; ++i) {
+            for (size_t j = i + 1; j < n_rows_; ++j) {
+                size_t idx = (i * (2 * n_rows_ - i - 1)) / 2 + (j - i - 1);
                 dist_ptr[idx] = jaccardIndex(i, j);
             }
         }
@@ -253,8 +261,9 @@ py::array_t<double> RoaringMatrix::jaccard( int threads ) const {
  *           Note: This returns the Jaccard *Index* (similarity), not distance.
  ****************************************************************************************************/
 double RoaringMatrix::jaccardIndex( size_t i, size_t j ) const {
-    const double intersection_size = (_roaring_matrix[i] & _roaring_matrix[j]).cardinality();
-    const double union_size = _row_masses[i] + _row_masses[j] - intersection_size;
+    const double intersection_size = (roaring_bitmap_[i] & roaring_bitmap_[j]).cardinality();
+    const double union_size = row_masses_[i] + row_masses_[j] - intersection_size;
+    // const double union_size = (roaring_bitmap_[i] | roaring_bitmap_[j]).cardinality();
 
     if (union_size == 0) {
         // if union is 0, both sets are empty and thus identical. Distance is 0.
@@ -285,6 +294,8 @@ double RoaringMatrix::jaccardIndex( size_t i, size_t j ) const {
  *                         index and Hamming distance of a neighbor.
  ****************************************************************************************************/
 py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, int threads ) const {
+    ardal::utils::log_info("Running RoaringMatrix::neighbourhood with scalar instructions.");
+
     // do some data cleanliness
     if (epsilon < 0) {
         throw std::runtime_error("epsilon must be non-negative.");
@@ -292,13 +303,13 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
     if (row_idx < 0) {
         throw std::runtime_error("Row index must be non-negative.");
         }
-    if (row_idx >= _n_rows) {
+    if (row_idx >= n_rows_) {
         throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
         }
     if (threads <= 0)
         throw std::runtime_error("Number of threads must be positive.");
     
-    int q_mass = _row_masses[row_idx];    // access pre-calculated row mass
+    int q_mass = row_masses_[row_idx];    // access pre-calculated row mass
     std::vector<std::vector<std::pair<size_t, int>>> thread_results;
 
     {
@@ -314,10 +325,10 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
             auto& local = thread_results[thread_id];
 
             #pragma omp for schedule(static)
-            for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t i = 0; i < n_rows_; ++i) {
                 if (i == row_idx) continue;
 
-                int mass_d = std::abs(q_mass - _row_masses[i]);
+                int mass_d = std::abs(q_mass - row_masses_[i]);
                 if (mass_d > epsilon) continue;
                 
                 // due to the restrictions on using a roaring bitmap, early exit is not trivial :(
@@ -361,7 +372,7 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
  * rows of the matrix. For Roaring bitmaps, this is the cardinality of their intersection (AND).
  *
  * INPUT:
- *  None (operates on the private member _roaring_matrix)
+ *  None (operates on the private member roaring_bitmap_)
  *
  * PARAMETERS:
  *  threads (int) : The number of threads to use for parallel computation.
@@ -370,7 +381,9 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
  *  py::array_t<int> : A 1D NumPy array representing the condensed inner product matrix.
  ****************************************************************************************************/
 py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
-    const size_t total_pairs = _n_rows * (_n_rows - 1) / 2;
+    ardal::utils::log_info("Running RoaringMatrix::innerProduct with scalar instructions.");
+
+    const size_t total_pairs = n_rows_ * (n_rows_ - 1) / 2;
     py::array_t<int> inner_product_matrix(total_pairs);
     {
         py::gil_scoped_release release;
@@ -378,9 +391,9 @@ py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
         auto inner_product_ptr = inner_product_matrix.mutable_data();
 
         #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
-        for (size_t i = 0; i < _n_rows; ++i) {
-            for (size_t j = i + 1; j < _n_rows; ++j) {
-                size_t idx = (i * (2 * _n_rows - i - 1)) / 2 + (j - i - 1);
+        for (size_t i = 0; i < n_rows_; ++i) {
+            for (size_t j = i + 1; j < n_rows_; ++j) {
+                size_t idx = (i * (2 * n_rows_ - i - 1)) / 2 + (j - i - 1);
                 inner_product_ptr[idx] = innerProductRowwise(i, j);
             }
         }   // end of parallel region
@@ -408,6 +421,8 @@ py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
  *
  ****************************************************************************************************/
 py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilon, int threads ) const {
+    ardal::utils::log_info("Running RoaringMatrix::innerProductNeighbourhood with scalar instructions.");
+
     // do some data cleanliness
     if (ip_epsilon < 0) {
         throw std::runtime_error("epsilon must be non-negative.");
@@ -415,7 +430,7 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
     if (row_idx < 0) {
         throw std::runtime_error("Row index must be non-negative.");
         }
-    if (row_idx >= _n_rows) {
+    if (row_idx >= n_rows_) {
         throw std::runtime_error("Coordinate dimensions exceed the number of rows.");
         }
     if (threads <= 0)
@@ -436,7 +451,7 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
             auto& local = thread_results[thread_id];
 
             #pragma omp for schedule(static)
-            for (size_t i = 0; i < _n_rows; ++i) {
+            for (size_t i = 0; i < n_rows_; ++i) {
                 if (i == row_idx) continue;
                 
                 int distance = innerProductRowwise(row_idx, i);
@@ -472,7 +487,7 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
  *  uint32_t : The inner product of the two rows.
  ****************************************************************************************************/
 uint32_t RoaringMatrix::innerProductRowwise( size_t i, size_t j ) const {
-    return (_roaring_matrix[i] & _roaring_matrix[j]).cardinality();
+    return (roaring_bitmap_[i] & roaring_bitmap_[j]).cardinality();
 }
 
 
@@ -492,19 +507,21 @@ uint32_t RoaringMatrix::innerProductRowwise( size_t i, size_t j ) const {
  *  std::vector<size_t> : A vector containing the column indices of the unique shared bits.
  ****************************************************************************************************/
 std::vector<size_t> RoaringMatrix::uniqueSharedBits(const std::vector<size_t>& row_indices) const {
+    ardal::utils::log_info("Running RoaringMatrix::uniqueSharedBits with scalar instructions.");
+
     if (row_indices.empty()) return {};
 
     // --- Step 1: Intersect ingroup bitmaps ---
-    roaring::Roaring ingroup_shared = _roaring_matrix.at(row_indices[0]);
+    roaring::Roaring ingroup_shared = roaring_bitmap_.at(row_indices[0]);
     for (size_t i = 1; i < row_indices.size(); ++i) {
-        ingroup_shared &= _roaring_matrix.at(row_indices[i]);
+        ingroup_shared &= roaring_bitmap_.at(row_indices[i]);
     }
 
     // --- Step 2: Union outgroup bitmaps ---
     roaring::Roaring outgroup_union;
-    for (size_t i = 0; i < _n_rows; ++i) {
+    for (size_t i = 0; i < n_rows_; ++i) {
         if (std::find(row_indices.begin(), row_indices.end(), i) != row_indices.end()) continue;
-        outgroup_union |= _roaring_matrix.at(i);
+        outgroup_union |= roaring_bitmap_.at(i);
     }
 
     // --- Step 3: Compute unique shared bits ---
@@ -535,7 +552,7 @@ std::vector<size_t> RoaringMatrix::uniqueSharedBits(const std::vector<size_t>& r
  *  py::array_t<size_t> : A 1D NumPy array containing the column indices for the specified row.
  ****************************************************************************************************/
 py::array_t<size_t> RoaringMatrix::getSetBitIndices( size_t row_idx ) const {
-    const auto& bitmap = _roaring_matrix.at(row_idx);
+    const auto& bitmap = roaring_bitmap_.at(row_idx);
 
     // Create a numpy array of uint32_t to hold the values.
     py::array_t<uint32_t> values_u32(bitmap.cardinality());
@@ -562,8 +579,8 @@ py::array_t<size_t> RoaringMatrix::getSetBitIndices( size_t row_idx ) const {
  ****************************************************************************************************/
 py::list RoaringMatrix::getRoaringMatrix( void ) const {
     py::list roaring_matrix;
-    for (size_t i = 0; i < _n_rows; ++i) {
-        // const auto& bitmap = _roaring_matrix[i];
+    for (size_t i = 0; i < n_rows_; ++i) {
+        // const auto& bitmap = roaring_bitmap_[i];
         roaring_matrix.append(getSetBitIndices(i));
     }
     return roaring_matrix;
@@ -583,16 +600,17 @@ py::list RoaringMatrix::getRoaringMatrix( void ) const {
  *  std::vector<roaring::Roaring> : A vector of Roaring bitmaps representing the columns.
  ****************************************************************************************************/
 std::vector<roaring::Roaring> RoaringMatrix::colwiseRoaringFromRowwise( void ) const {
+    ardal::utils::log_info("Constructing col-wise Roaring bitmap from row-wise.");
     // create one roaring bitmap per column
-    std::vector<roaring::Roaring> colwise_roaring(_n_cols);
+    std::vector<roaring::Roaring> colwise_roaring(n_cols_);
 
     // for each row, iterate over its set bits and add the row index to the corresponding column bitmap
-    for (size_t row = 0; row < _n_rows; ++row) {
-        const auto& row_bitmap = _roaring_matrix[row];
-        // Use an iterator to efficiently access set bits
+    for (size_t row = 0; row < n_rows_; ++row) {
+        const auto& row_bitmap = roaring_bitmap_[row];
+        // use an iterator to efficiently access set bits
         for (auto it = row_bitmap.begin(); it != row_bitmap.end(); ++it) {
-            size_t col = *it;
-            if (col < _n_cols) {
+            const size_t col = *it;
+            if (col < n_cols_) {
                 colwise_roaring[col].add(row);
             }
         }
@@ -620,6 +638,8 @@ std::vector<roaring::Roaring> RoaringMatrix::colwiseRoaringFromRowwise( void ) c
  *  py::dict : A dictionary where keys are column indices and values are lists of co-occurring partners.
  ****************************************************************************************************/
 py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) const {
+    ardal::utils::log_info("Running RoaringMatrix::bitCooccurrence_all with scalar instructions.");
+
     // do some input cleanliness
     if (threshold < 0 || threshold > 1) {
         throw std::runtime_error("threshold must be between 0 and 1.");
@@ -627,7 +647,7 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
     if (threads <= 0) {
         throw std::runtime_error("Number of threads must be positive.");
     }
-    if (_n_rows == 0) {
+    if (n_rows_ == 0) {
         return py::dict();
     }
 
@@ -635,39 +655,65 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
     auto colwise_roaring = colwiseRoaringFromRowwise();
     size_t n_cols = colwise_roaring.size();
 
-    // thread local results maps
-    std::vector<std::map<size_t, std::vector<size_t>>> thread_maps(threads);
+    // sanity checks
+    if (roaring_bitmap_.size() != n_rows_) {
+        throw std::runtime_error("row-wise roaring size mismatch");
+    }
+    if (colwise_roaring.size() != n_cols_) {
+        throw std::runtime_error("col-wise roaring size mismatch");
+    }
 
-    py::gil_scoped_release release;   // release GIL for full parallel region
+    // underflow safety
+    if (n_cols < 2) return py::dict();
 
-    #pragma omp parallel num_threads(threads)
+
+    // uncomment to debug
+    std::stringstream ss;
+    ss << "n_rows_ = " << n_rows_ << "; " << "n_cols_ = " << n_cols_ << "; " << "roaring_bitmap_.size() = " << roaring_bitmap_.size() << "; " << "colwise_roaring.size() = " << colwise_roaring.size();
+    ardal::utils::log_debug(static_cast<string>(ss.str()));
+
+
+    std::map<size_t, std::vector<size_t>> global_map;
+
     {
-        int tid = omp_get_thread_num();
-        auto& local_map = thread_maps[tid];
+        py::gil_scoped_release release;   // murder GIL
 
-        #pragma omp for schedule(static)
-        for (size_t i = 0; i < n_cols - 1; ++i) {
-            const auto& i_bitmap = colwise_roaring[i];
-            for (size_t j = i + 1; j < n_cols; ++j) {
-                const auto& j_bitmap = colwise_roaring[j];
-                double intersection_size = (i_bitmap & j_bitmap).cardinality();
-                double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
-                if (union_size == 0) continue;
-                double jaccard_index = intersection_size / union_size;
-                if (jaccard_index >= threshold) {
-                    local_map[i].push_back(j);
+        #pragma omp parallel num_threads(threads)
+        {
+            std::map<size_t, std::vector<size_t>> local_map;
+
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < n_cols - 1; ++i) {
+                const auto& i_bitmap = colwise_roaring[i];
+                std::vector<size_t> cooccurring_partners;
+                for (size_t j = i + 1; j < n_cols; ++j) {
+                    const auto& j_bitmap = colwise_roaring[j];
+                    double intersection_size = (i_bitmap & j_bitmap).cardinality();
+                    double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
+
+                    if (union_size == 0) continue;
+                    double jaccard_index = intersection_size / union_size;
+                    if (jaccard_index >= threshold) {
+                        cooccurring_partners.push_back(j);
+                    }
+                }
+                // std::stringstream ss;
+                // ss << "col " << i;
+                // ardal::utils::log_info(static_cast<string>(ss.str()));
+
+                if (!cooccurring_partners.empty()) {
+                    local_map[i] = std::move(cooccurring_partners);
                 }
             }
-        }
-    } // end parallel region
 
-    // merge thread local maps
-    std::map<size_t, std::vector<size_t>> global_map;
-    for (const auto& local_map : thread_maps) {
-        for (const auto& [k, v] : local_map) {
-            global_map[k].insert(global_map[k].end(), v.begin(), v.end());
-        }
-    }
+            #pragma omp critical
+            {
+                for (const auto& [k, v] : local_map) {
+                    global_map[k].insert(global_map[k].end(), v.begin(), v.end());
+                }
+            }
+        } // end parallel region
+    } // re-establish GIL
 
     // convert to py dict
     py::dict cooccurrences_py;
@@ -699,6 +745,8 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
  *             partners from the subset.
  ****************************************************************************************************/
 py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const {
+    ardal::utils::log_info("Running RoaringMatrix::bitCooccurrence_subset with scalar instructions.");
+
     // do some input cleanliness
     if (threshold < 0 || threshold > 1) {
         throw std::runtime_error("threshold must be between 0 and 1.");
@@ -706,7 +754,7 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
     if (threads <= 0) {
         throw std::runtime_error("Number of threads must be positive.");
     }
-    if (_n_rows == 0) {
+    if (n_rows_ == 0) {
         return py::dict();
     }
     if (col_indices.empty() || col_indices.size() == 1) {
@@ -714,7 +762,7 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
     }
     // check if col_indices are valid
     for (const auto& idx : col_indices) {
-        if (idx >= _n_cols) {
+        if (idx >= n_cols_) {
             throw std::runtime_error("Column index out of bounds.");
         }
     }
@@ -723,49 +771,51 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
     auto colwise_roaring = colwiseRoaringFromRowwise();
     size_t n_cols = colwise_roaring.size();
 
-    // thread local results maps
-    std::vector<std::map<size_t, std::vector<size_t>>> thread_maps(threads);
+    std::map<size_t, std::vector<size_t>> global_map;
 
-    py::gil_scoped_release release;   // release GIL for full parallel region
-
-    #pragma omp parallel num_threads(threads)
     {
-        int tid = omp_get_thread_num();
-        auto& local_map = thread_maps[tid];
+        py::gil_scoped_release release;   // murder GIL
 
-        #pragma omp for schedule(static)
-        for (size_t i = 0; i < n_cols - 1; ++i) {
-            // check if the column is in the subset
-            if (std::find(col_indices.begin(), col_indices.end(), i) == col_indices.end()) {
-                continue; // skip columns not in the subset
-            }
+        #pragma omp parallel num_threads(threads)
+        {
+            std::map<size_t, std::vector<size_t>> local_map;
 
-            const auto& i_bitmap = colwise_roaring[i];
-            for (size_t j = i + 1; j < n_cols; ++j) {
+            #pragma omp for schedule(static)
+            for (size_t i = 0; i < n_cols - 1; ++i) {
                 // check if the column is in the subset
-                if (std::find(col_indices.begin(), col_indices.end(), j) == col_indices.end()) {
+                if (std::find(col_indices.begin(), col_indices.end(), i) == col_indices.end()) {
                     continue; // skip columns not in the subset
                 }
-
-                const auto& j_bitmap = colwise_roaring[j];
-                double intersection_size = (i_bitmap & j_bitmap).cardinality();
-                double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
-                if (union_size == 0) continue;
-                double jaccard_index = intersection_size / union_size;
-                if (jaccard_index >= threshold) {
-                    local_map[i].push_back(j);
+                
+                std::vector<size_t> cooccurring_partners;
+                const auto& i_bitmap = colwise_roaring[i];
+                for (size_t j = i + 1; j < n_cols; ++j) {
+                    // check if the column is in the subset
+                    if (std::find(col_indices.begin(), col_indices.end(), j) == col_indices.end()) {
+                        continue; // skip columns not in the subset
+                    }
+                    const auto& j_bitmap = colwise_roaring[j];
+                    double intersection_size = (i_bitmap & j_bitmap).cardinality();
+                    double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
+                    if (union_size == 0) continue;
+                    double jaccard_index = intersection_size / union_size;
+                    if (jaccard_index >= threshold) {
+                        cooccurring_partners.push_back(j);
+                    }
+                }
+                if (!cooccurring_partners.empty()) {
+                    local_map[i] = std::move(cooccurring_partners);
                 }
             }
-        }
-    } // end parallel region
 
-    // merge thread local maps
-    std::map<size_t, std::vector<size_t>> global_map;
-    for (const auto& local_map : thread_maps) {
-        for (const auto& [k, v] : local_map) {
-            global_map[k].insert(global_map[k].end(), v.begin(), v.end());
-        }
-    }
+            #pragma omp critical
+            {
+                for (const auto& [k, v] : local_map) {
+                    global_map[k].insert(global_map[k].end(), v.begin(), v.end());
+                }
+            }
+        } // end parallel region
+    } // re-establish GIL
 
     // convert to py dict
     py::dict cooccurrences_py;
@@ -775,4 +825,4 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
     return cooccurrences_py;
 }
 
-} // namespace _ardal
+} // namespace ardal

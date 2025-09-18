@@ -61,7 +61,7 @@ class ArdalGet:
         else:
             alleles = self._headerUtils.headers["alleles"]
             
-        log.debug(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
+        log.info(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
         
         guid_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
         allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
@@ -99,7 +99,7 @@ class ArdalGet:
         n_alleles = len(self._headerUtils.headers["alleles"])
         density = self.density()
         roaring = self.roaring
-        bit_matrix_size_bytes = self.bit_matrix().nbytes
+        bit_matrix_size_bytes = self.packed_matrix().nbytes
         if self.roaring:
             roaring_mat = self.roaring_matrix(decode=False)
             roaring_size_bytes = sum(arr.nbytes for arr in roaring_mat)
@@ -145,11 +145,17 @@ class ArdalGet:
         return self._matrix.getBitMatrix()
     
 
-    def hybrid_matrix( self ):
-        """ Return the hybrid_matrix.
+    def packed_matrix( self ):
+        """ Return the 64-bit packed matrix.
         """
-        return self._matrix
-
+        arr = self._matrix.getPackedMatrix()
+        
+        ## ensure little endian
+        if arr.dtype.byteorder not in ('<', '='):
+            arr = arr.byteswap().newbyteorder('<')
+            
+        return arr
+        
     
     def roaring_matrix( self,
                        decode : bool=True
@@ -179,3 +185,20 @@ class ArdalGet:
         """
         return self._headerUtils.headers
     
+    
+    def meta( self ) -> dict:
+        """ Return the allele matrix metadata.
+        """
+        return self._headerUtils.meta
+    
+    
+    def row_masses( self ) -> dict:
+        """ Return the row masses.
+        """
+        return self._matrix.getRowMasses()
+    
+    
+    def column_masses( self ) -> dict:
+        """ Return the col masses.
+        """
+        return self._matrix.getColumnMasses()

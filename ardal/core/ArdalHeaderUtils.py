@@ -17,11 +17,13 @@ class ArdalHeaderUtils:
 
     def __init__( self,
                   headers : dict,
+                  meta : dict,
                   allele_coords_bed : Union[str, None] = None,
                   allele_id_format : Union[str, None] = None,
                   allele_positions : Union[Dict, None] = None ):
 
         self.headers = headers
+        self.meta = meta
         self.n_guids = len(self.headers['guids'])
         self.n_alleles = len(self.headers['alleles'])
         self._allele_coords_bed = allele_coords_bed
@@ -48,7 +50,7 @@ class ArdalHeaderUtils:
             self._allele_positions_from_bed = False
             self._allele_positions_from_ids = True
             
-        log.debug(f"""Initialised HeaderUtils object with {len(self.headers['guids'])} GUIDs and {len(self.headers['alleles'])} alleles.
+        log.info(f"""Initialised HeaderUtils object with {len(self.headers['guids'])} GUIDs and {len(self.headers['alleles'])} alleles.
                                     allele_coords_bed = {self._allele_coords_bed}
                                     allele_id_format = {self._allele_id_format}
                                     allele_positions_from_bed = {self._allele_positions_from_bed}
@@ -56,7 +58,7 @@ class ArdalHeaderUtils:
 
 
     def _decode_headers( self ) -> Dict:
-        log.debug(f"Decoding headers.")
+        log.info(f"Decoding headers.")
         return  { "guids" : dict(zip(self.headers["guids"], range(len(self.headers["guids"])))),
                   "alleles" : dict(zip(self.headers["alleles"], range(len(self.headers["alleles"]))))
                 }
@@ -78,7 +80,7 @@ class ArdalHeaderUtils:
         Returns:
             Dict[str, Dict[int, List[str]]]: Dictionary of chromosome keys to position-to-allele mappings.
         """
-        log.debug(f"""Request to compute allele positions with id_format={allele_id_format}, bed={allele_coords_bed}, recompute={recompute_positions}
+        log.info(f"""Request to compute allele positions with id_format={allele_id_format}, bed={allele_coords_bed}, recompute={recompute_positions}
                                     allele_coords_bed = {self._allele_coords_bed}
                                     allele_id_format = {self._allele_id_format}
                                     allele_positions_from_bed = {self._allele_positions_from_bed}
@@ -312,7 +314,7 @@ class ArdalHeaderUtils:
         if len(interval_alleles) == 0:
             log.warning(f"No alleles found within the given intervals. Please check your intervals and that allele IDs are in the expected form defined by allele_id_format (currently {allele_id_format}).")
             
-        log.debug(f"Found {len(interval_alleles)} alleles.")
+        log.info(f"Found {len(interval_alleles)} alleles.")
         return list(set(interval_alleles))
 
 
@@ -343,13 +345,13 @@ class ArdalHeaderUtils:
                                   intervals : Union[List, None]
                                   ) -> List:
         if intervals != None:
-            log.debug(f"Found {len(intervals)} records in 'intervals'.")
+            log.info(f"Found {len(intervals)} records in 'intervals'.")
             interval_list = self._check_intervals(intervals=intervals,
                                                   from_bed=False)
-            log.debug(f"Found {len(interval_list)} valid intervals in 'intervals'.")
+            log.info(f"Found {len(interval_list)} valid intervals in 'intervals'.")
         else:
             interval_list = []
-            log.debug(f"No intervals passed using 'intervals'.")
+            log.info(f"No intervals passed using 'intervals'.")
         
         return interval_list
         
@@ -370,13 +372,13 @@ class ArdalHeaderUtils:
             with open(intervals_bed, 'r') as fin:
                 lines = fin.readlines()
             
-            log.debug(f"Found {len(lines)} entries in {intervals_bed}")
+            log.info(f"Found {len(lines)} entries in {intervals_bed}")
             
             ## construct a generic list of bed entries
             intervals = [l.strip("\n").split() for l in lines]
             cleaned_intervals = self._check_intervals(intervals=intervals,
                                                       from_bed=True)
-            log.debug(f"Found {len(cleaned_intervals)} valid intervals in {intervals_bed}")
+            log.info(f"Found {len(cleaned_intervals)} valid intervals in {intervals_bed}")
         
         return cleaned_intervals
 
@@ -441,7 +443,7 @@ class ArdalHeaderUtils:
         ## _check_intervals and so can be safely concatenated
         else:
             all_intervals = intervals_from_list + intervals_from_bed
-            log.debug(f"Total number of intervals from all sources : {len(all_intervals)}")
+            log.info(f"Total number of intervals from all sources : {len(all_intervals)}")
             return all_intervals
         
 

@@ -1,14 +1,32 @@
-// bindings.cpp
+// pack_matrix.hpp
+#pragma once
+#include <cstdint>
+#include <vector>
+#include <stdexcept>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
-#include "pack.hpp"
+
 #ifdef _OPENMP
   #include <omp.h>
 #endif
 
 namespace py = pybind11;
 
-py::array pack_dense_to_words(py::array dense) {
+inline void pack_dense_row_to_words(const uint8_t* row, size_t n_cols, uint64_t* out_words) {
+    const size_t words = (n_cols + 63) / 64;
+    for (size_t w = 0; w < words; ++w) {
+        uint64_t word = 0;
+        const size_t base = w * 64;
+        const size_t limit = (base + 64 <= n_cols) ? 64 : (n_cols - base);
+        for (size_t b = 0; b < limit; ++b) {
+            // non-zero -> set bit
+            word |= (static_cast<uint64_t>(row[base + b] != 0) << b);
+        }
+        out_words[w] = word;
+    }
+}
+
+inline py::array pack_dense_to_words(py::array dense) {
     // accept bool/uint8; ensure C-contiguous
     py::buffer_info info = dense.request();
     if (info.ndim != 2) throw std::runtime_error("dense must be 2D");
@@ -38,8 +56,4 @@ py::array pack_dense_to_words(py::array dense) {
         pack_dense_row_to_words(row, n_cols, out_row);
     }
     return out;
-}
-
-PYBIND11_MODULE(_ardal_pack, m) {
-    m.def("pack_dense_to_words", &pack_dense_to_words, "Pack dense uint8/bool -> <u8 words>");
 }
