@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from typing import Union
+from importlib.metadata import version, PackageNotFoundError
 
 from ..utils.misc import require_package
 from ..utils.decorators import check_backend_argument
@@ -54,7 +55,7 @@ class ArdalIO:
     def write( self,
                output_prefix : str,
                out_directory : str = "./",
-               format : str = "npy",
+               format : str = "bin",
                ) -> None:
         """ 
         Write the allele matrix to disk.
@@ -86,7 +87,7 @@ class ArdalIO:
         
         if format not in ALLOWED_FORMATS:
             raise ParameterError(f"Invalid matrix output format : {format}. Must be one of {ALLOWED_FORMATS}.")
-            
+        
         matrix_out_path = os.path.join(out_directory, output_prefix + "." + format)
 
         if os.path.exists(json_out_path):
@@ -96,12 +97,15 @@ class ArdalIO:
 
         matrix_to_save = self._matrix.getBitMatrix()
         if format == "npy":
+            log.info("Writing dense matrix as .npy")
             np.save(matrix_out_path, matrix_to_save)
             headers_meta = self._headerUtils.headers
         elif format == "npz":
+            log.info("Writing dense matrix as .npz")
             np.savez_compressed(matrix_out_path, matrix=matrix_to_save)
             headers_meta = self._headerUtils.headers
         elif format == "bin":
+            log.info("Writing packed matrix as .bin")
             headers_meta = self._write_packed(matrix_out_path)
             
         log.info(f"Wrote allele matrix to disk : {matrix_out_path}")
@@ -157,7 +161,8 @@ class ArdalIO:
             "row_stride_bytes": words_per_row * 8,
             "data_file": data_file,
             "data_nbytes": int(words.nbytes),
-            "data_sha256": None
+            "data_sha256": None,
+            "generated_by" : "Ardal v" + version("ardal"),
     }
 
 

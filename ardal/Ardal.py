@@ -41,7 +41,7 @@ class Ardal(object):
     def __init__( self,
                   data_source : Union[str, pd.DataFrame, Tuple[str, str], Tuple[np.ndarray, Dict]],
                   roaring : Union[str, bool] = "auto",
-                  density_threshold : float = 0.02,
+                  density_threshold : float = 0.1,
                   allele_id_format : Union[str, None] = None,
                   allele_coords_bed : Union[str, None] = None,
                   verbosity : Union[int, str] = "error",
@@ -63,8 +63,8 @@ class Ardal(object):
         from . import backends
         
         if isinstance(verbosity, str):
-            ## set backend verbosity here to avoid double _ardal import and circular issues
-            backends._ardal.set_backend_verbosity(verbosity.lower())
+            ## set backend verbosity here to avoid double ardal import and circular issues
+            backends.ardal.set_backend_verbosity(verbosity.lower())
             verbosity = VERBOSITY_LEVELS.get(verbosity.lower(), logging.WARNING)
 
         log.setLevel(verbosity)
@@ -78,13 +78,13 @@ class Ardal(object):
         self._roaring_setter(roaring, density_threshold)
                     
         if parser.matrix is not None:
-            log.info(f"""Initialising _ardal::HybridMatrix backend with:
+            log.info(f"""Initialising ardal::HybridMatrix backend with:
                                     matrix = {parser.matrix.shape} {type(parser.matrix)}
                                     is_bitpacked = {parser.is_bitpacked} {type(parser.is_bitpacked)}
                                     n_cols_bits = {parser.meta["n_cols"]} {type(parser.meta["n_cols"])}
                                     build_roaring = {self.build_roaring} {type(self.build_roaring)}
                                     density_threshold = {self.density_threshold} {type(self.density_threshold)}""")
-            self._hybrid_matrix = backends._ardal.HybridMatrix(parser.matrix,
+            self._hybrid_matrix = backends.ardal.HybridMatrix(parser.matrix,
                                                                is_bitpacked=parser.is_bitpacked,
                                                                n_cols_bits=parser.meta["n_cols"],
                                                                use_roaring_if_sparse=self.build_roaring,
@@ -160,7 +160,7 @@ class Ardal(object):
         else:
             raise ValueError(f"Invalid roaring mode: {roaring}")
         
-        log.debug(f"Roaring setter : roaring={roaring}; density_threshold={density_threshold}; build_roaring={self.build_roaring}")
+        log.debug(f"Roaring setter : roaring={roaring}; density_threshold={self.density_threshold}; build_roaring={self.build_roaring}")
 
 
     def set_verbosity( self,

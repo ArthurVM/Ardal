@@ -50,6 +50,7 @@ class ArdalDistance:
                   ) -> Union[np.ndarray, pd.DataFrame]:
         """
         Compute pairwise distances.
+        Can be Hamming (default), Jaccard, or Inner-Product distance.
 
         Returns:
             - If return_square=False (default): 1D condensed NumPy array of length n*(n-1)//2
@@ -254,8 +255,8 @@ class ArdalDistance:
         """
         s = time.time()
 
-        row_indices = [self._headerUtils.encode_guid(g) for g in guids]
-        col_indices = [self._headerUtils.encode_allele(a) for a in alleles]
+        row_indices = sorted([self._headerUtils.encode_guid(g) for g in guids], reverse=False)
+        col_indices = sorted([self._headerUtils.encode_allele(a) for a in alleles], reverse=False)
 
         log.info(
             f"[PAIRWISE] Starting local {metric} on {len(col_indices)}x{len(row_indices)} subset."
@@ -316,7 +317,7 @@ class ArdalDistance:
         WARNING : NOT PRODUCTION READY
         assumes allele ID of form {ref_nucleotide}{pos}{alt_nucleotide} and so the pos can be indexed out with [1:-1]
         """
-        log.critical("snvNeighbourhood not production ready. May produce unstable results.")
+        log.critical("snv_neighbourhood not production ready. May produce unstable results.")
         
         validate_type(guid, str, "guid")
         validate_type(n, int, "n")

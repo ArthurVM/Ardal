@@ -6,6 +6,7 @@ import hashlib
 from sys import byteorder
 from pathlib import Path
 from typing import Union, Tuple
+from importlib.metadata import version, PackageNotFoundError
 
 import pandas as pd
 import numpy as np
@@ -462,6 +463,7 @@ class ArdalParser:
             "data_file_resolved": str(bin_path.resolve()),
             "data_nbytes": int(n_rows * words_per_row * 8),
             "data_sha256": None,
+            "generated_by" : "Ardal v" + version("ardal"),
         }
         return mm, headers, meta
 
@@ -592,8 +594,9 @@ class ArdalParser:
             "bits_per_word": 64,
             "row_stride_bytes": words_per_row * 8,
             "data_file": None,
-            "data_nbytes": int(matrix.nbytes)/64,    ## this is dubious...
-            "data_sha256": None
+            "data_nbytes": int(matrix.nbytes)/8,    ## this is dubious...
+            "data_sha256": None,
+            "generated_by" : "Ardal v" + version("ardal"),
     }
     
     @staticmethod

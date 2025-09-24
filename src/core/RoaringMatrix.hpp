@@ -19,7 +19,9 @@ Copyright 2025 Arthur V. Morris
 #include <cmath>
 #include <cstring>
 #include <sstream>
-#include "core/types.hpp"
+#include "roaring/roaring.hh"
+#include "detail/flat_matrix.hpp"
+#include "utils/bitops.hpp"
 
 
 namespace py = pybind11;
@@ -28,11 +30,9 @@ namespace ardal {
 class RoaringMatrix {
 public:
     // constructor: takes a NumPy matrix
-    RoaringMatrix( std::shared_ptr<const ardal::detail::WordsVV> vv,
+    RoaringMatrix( ardal::detail::FlatMatrix flat_matrix,
                    std::shared_ptr<const std::vector<int>> row_masses,
-                   std::shared_ptr<const std::vector<int>> col_masses,
-                   std::size_t n_rows,
-                   std::size_t n_cols_bits );
+                   std::shared_ptr<const std::vector<int>> col_masses );
 
     // distance functions
     py::array_t<uint32_t> hamming( int threads = 1 ) const;
@@ -63,11 +63,12 @@ private:
     std::vector<roaring::Roaring> roaring_bitmap_;
 
     // attributes
-    std::shared_ptr<const std::vector<int>> row_masses_;
-    std::shared_ptr<const std::vector<int>> col_masses_;
-    size_t n_rows_;
-    size_t n_cols_;
-    size_t _n_packed_cols;
+    const uint64_t* base_;                                 // pointer to the matrix base
+    const size_t n_rows_;                                  // the number of rows (guids)
+    const size_t n_cols_bits_;                             // the number of columns (alleles)
+    const size_t wpr_;                                     // the number of packed columns
+    std::shared_ptr<const std::vector<int>> row_masses_;   // the mass of each row
+    std::shared_ptr<const std::vector<int>> col_masses_;   // the mass of each column
 
     // distance functions
     uint32_t hammingDistance( size_t i, size_t j ) const;

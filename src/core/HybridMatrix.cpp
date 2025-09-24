@@ -2,131 +2,9 @@
 Copyright 2025 Arthur V. Morris
 */
 #include "HybridMatrix.hpp"
-#include "BitMatrix.hpp"
-#include "RoaringMatrix.hpp"
 #include "utils/bitops.hpp"
 #include "utils/PythonLogger.hpp"
 
-
-// helpers for the vector<vector<uint64_t>> logic
-// NOTE: this will be worked out in future versions as I port Ardal to using pointer+stride logic
-
-
-ardal::detail::PackedVV make_vv_from_packed_numpy( py::array_t<uint64_t, py::array::c_style | py::array::forcecast> packed,
-                                    std::size_t n_cols_bits) {
-    auto buf = packed.request();
-    if (buf.ndim != 2) throw std::runtime_error("packed array must be 2D <u64>");
-
-    const std::size_t n_rows = buf.shape[0];
-    const std::size_t wpr    = buf.shape[1];
-    const std::size_t expect = (n_cols_bits + 63) / 64;
-
-    if (wpr != expect) throw std::runtime_error("words_per_row mismatch");
-
-    if (buf.strides[0] != static_cast<py::ssize_t>(wpr * sizeof(uint64_t)))
-        throw std::runtime_error("packed array must be tightly row-major");
-
-    const uint64_t* base = static_cast<const uint64_t*>(buf.ptr);
-    const uint64_t mask  = ardal::tail_mask(n_cols_bits);
-
-    ardal::detail::PackedVV out;
-    out.vv.assign(n_rows, std::vector<uint64_t>(wpr));
-    out.n_rows = n_rows; out.wpr = wpr;
-
-    for (std::size_t r = 0; r < n_rows; ++r) {
-        const uint64_t* src = base + r * wpr;
-        std::memcpy(out.vv[r].data(), src, wpr * sizeof(uint64_t));
-        if ((n_cols_bits & 63) != 0) out.vv[r].back() &= mask;
-    }
-    return out;
-}
-
-
-std::vector<std::vector<uint64_t>> pack_dense_to_vv( py::array dense,
-                                                     std::size_t n_cols_bits ) {
-    auto buf = dense.request();
-    if (buf.ndim != 2) throw std::runtime_error("dense array must be 2D");
-
-    const std::size_t n_rows = buf.shape[0];
-    const std::size_t n_cols = buf.shape[1];
-
-    if (n_cols_bits != n_cols) throw std::runtime_error("n_cols_bits mismatch");
-
-    const std::size_t wpr  = (n_cols + 63) / 64;
-    const uint64_t mask    = ardal::tail_mask(n_cols_bits);
-    const ptrdiff_t rs = buf.strides[0], cs = buf.strides[1];
-    const char kind = buf.format[0];
-
-    auto read_nz = [&](const char* p)->bool {
-        switch (kind) {
-          case '?': return *reinterpret_cast<const bool*>(p);
-          case 'b': return *reinterpret_cast<const int8_t*>(p) != 0;
-          case 'B': return *reinterpret_cast<const uint8_t*>(p) != 0;
-          case 'h': return *reinterpret_cast<const int16_t*>(p) != 0;
-          case 'H': return *reinterpret_cast<const uint16_t*>(p) != 0;
-          case 'i': return *reinterpret_cast<const int32_t*>(p) != 0;
-          case 'I': return *reinterpret_cast<const uint32_t*>(p) != 0;
-          case 'l': return *reinterpret_cast<const long*>(p) != 0;
-          case 'L': return *reinterpret_cast<const unsigned long*>(p) != 0;
-          case 'q': return *reinterpret_cast<const long long*>(p) != 0;
-          case 'Q': return *reinterpret_cast<const unsigned long long*>(p) != 0;
-          default: throw std::runtime_error("dense dtype must be bool or integer");
-        }
-    };
-
-    std::vector<std::vector<uint64_t>> vv(n_rows, std::vector<uint64_t>(wpr, 0ULL));
-
-    for (ptrdiff_t r = 0; r < static_cast<ptrdiff_t>(n_rows); ++r) {
-        const char* row0 = static_cast<const char*>(buf.ptr) + r * rs;
-        uint64_t* out = vv[static_cast<std::size_t>(r)].data();
-        for (std::size_t w = 0; w < wpr; ++w) {
-            const std::size_t base = w * 64;
-            const std::size_t lim  = std::min<std::size_t>(64, n_cols - base);
-            uint64_t word = 0ULL;
-            const char* cell = row0 + static_cast<ptrdiff_t>(base) * cs;
-            for (std::size_t b = 0; b < lim; ++b)
-                if (read_nz(cell + static_cast<ptrdiff_t>(b) * cs)) word |= (1ULL << b);
-            out[w] = (w + 1 == wpr && (n_cols_bits & 63)) ? (word & mask) : word;
-        }
-    }
-    return vv;
-}
-
-void compute_masses(const std::vector<std::vector<uint64_t>>& vv,
-                    std::size_t n_cols_bits,
-                    std::vector<int>& row_masses,
-                    std::vector<int>& col_masses,
-                    int64_t& total_mass)
-{
-    const std::size_t n_rows = vv.size();
-    if (!n_rows) { total_mass = 0; return; }
-    const std::size_t wpr = vv[0].size();
-    const uint64_t mask   = ardal::tail_mask(n_cols_bits);
-
-    row_masses.assign(n_rows, 0);
-    col_masses.assign(n_cols_bits, 0);
-    total_mass = 0;
-
-    for (std::size_t r = 0; r < n_rows; ++r) {
-        const auto& row = vv[r];
-        uint32_t rm = 0;
-        for (std::size_t w = 0; w < wpr; ++w) {
-            uint64_t x = (w + 1 == wpr && (n_cols_bits & 63)) ? (row[w] & mask) : row[w];
-            rm += ardal::popcnt64(x);
-            while (x) {
-                const uint64_t lsb = x & (~x + 1);
-                const unsigned b   = static_cast<unsigned>(__builtin_ctzll(x));
-                const std::size_t col = (w << 6) | b;
-                if (col < n_cols_bits) ++col_masses[col];
-                x ^= lsb;
-            }
-        }
-        row_masses[r] = static_cast<int>(rm);
-        total_mass += rm;
-    }
-}
-
-} // unnamed namespace
 
 
 namespace ardal {
@@ -159,59 +37,64 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
                             double density_threshold )
   : n_cols_bits_(n_cols_bits)
 {
-    // build the VV
-    ardal::detail::WordsVV vv_matrix;
-    size_t n_rows = 0, wpr = 0;
+    const bool packed = is_bitpacked;
 
-    if (is_bitpacked) {
-        ardal::utils::log_info("Packed array detected.");
-        auto P = make_vv_from_packed_numpy(packed_or_dense_matrix, n_cols_bits);
-        vv_matrix = std::move(P.vv);
-        n_rows = P.n_rows; wpr = P.wpr;
+    if (packed) {
+        // packed -> enforce u64 -> expose as a flat memmap like array with base pointer
+        auto arr = pybind11::cast<pybind11::array_t<uint64_t, pybind11::array::c_style>>(packed_or_dense_matrix);
+        ardal::detail::build_flat_from_packed( arr,
+                                               n_cols_bits_,
+                                               flat_,
+                                               owner_ );
     } else {
-        ardal::utils::log_info("Dense array detected.");
-        vv_matrix = pack_dense_to_vv(packed_or_dense_matrix, n_cols_bits);
-        n_rows = vv_matrix.size();
-        wpr    = vv_matrix.empty() ? 0 : vv_matrix[0].size();
+        // dense -> pack into u64 -> expose as a flat memmap like array with base pointer
+        ardal::detail::pack_dense_into_storage( packed_or_dense_matrix,
+                                                n_cols_bits_,
+                                                storage_,
+                                                flat_ );
     }
 
     // metadata
     std::vector<int> row_masses, col_masses;
     int64_t total_mass = 0;
-    compute_masses(vv_matrix, n_cols_bits, row_masses, col_masses, total_mass);
+    compute_masses(flat_, row_masses, col_masses, total_mass);
 
-    const double density =
-        (n_rows && n_cols_bits)
-            ? static_cast<double>(total_mass) / (static_cast<double>(n_rows) * n_cols_bits)
-            : 0.0;
+    // std::stringstream ss;
+    // ss << "HybridMatrix initialised: flat_.rows=" << flat_.n_rows << " flat_.wpr=" << flat_.wpr << " flat_.n_cols_bits=" << flat_.n_cols_bits;
+    // ardal::utils::log_debug(static_cast<string>(ss.str()));
 
-    // promote to shared ownership (single copy move into shared_ptr)
-    packed_matrix_ = std::make_shared<ardal::detail::WordsVV>(std::move(vv_matrix));
+    density_ = static_cast<double>(total_mass) / ((static_cast<double>(flat_.n_rows) * n_cols_bits));
 
     // share masses
     auto rows_sp = std::make_shared<std::vector<int>>(std::move(row_masses));
     auto cols_sp = std::make_shared<std::vector<int>>(std::move(col_masses));
 
-    // init backends without copying vv (pass shared_ptrs)
-    if (use_roaring_if_sparse && density < density_threshold) {
+    // ----------- INIT BACKENDS -----------
+    // handle roaring backend
+    if (use_roaring_if_sparse && density_ < density_threshold) {
         roaring_enabled = true;
         ardal::utils::log_info("Initialising RoaringMatrix backend");
-        roaring_backend = std::make_unique<RoaringMatrix>(
-            packed_matrix_, rows_sp, cols_sp, n_rows, n_cols_bits);
+        roaring_backend = std::make_unique<RoaringMatrix>( flat_,
+                                                           rows_sp,
+                                                           cols_sp );
     } else {
         roaring_enabled = false;
-        ardal::utils::log_info("Roaring not initialised.");
+        std::stringstream ss;
+        ss << "Roaring not initialised: density=" << density_ << "; density_threshold=" << density_threshold;
+        ardal::utils::log_debug(static_cast<string>(ss.str()));
     }
 
-    bit_backend = std::make_unique<BitMatrix>(
-        vv_, rows_sp, cols_sp, n_rows, n_cols_bits);
+    // handle bit backend
+    bit_backend = std::make_unique<BitMatrix>( flat_,
+                                               rows_sp,
+                                               cols_sp );
 }
 
 
 HybridMatrix::BackendType HybridMatrix::selectBackend( size_t n_cols,
                                                        double density ) const {
     // heuristic backend selection
-    if (n_cols > 20000 && density < 0.02) {
+    if (n_cols > 20000 && density < 0.05 && roaring_enabled) {
         return BackendType::ROARING;
     } else {
         return BackendType::BIT;

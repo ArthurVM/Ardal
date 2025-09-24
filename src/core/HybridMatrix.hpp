@@ -6,7 +6,9 @@ Copyright 2025 Arthur V. Morris
 
 #include <memory>
 #include <iostream>
-#include "core/types.hpp"
+#include "BitMatrix.hpp"
+#include "RoaringMatrix.hpp"
+#include "detail/flat_matrix.hpp"
 
 
 namespace py = pybind11;
@@ -105,11 +107,13 @@ public:
 
 private:  
     // attributes
-    const uint64_t* words_ = nullptr;       // base pointer to rmaj words
     size_t n_rows_ = 0;
     size_t n_cols_bits_ = 0;
     size_t words_per_row_ = 0;
-    size_t density_;
+    double density_;
+    py::array owner_;
+    ardal::detail::FlatMatrix flat_;
+    std::vector<uint64_t> storage_;
     
     // backends
     std::unique_ptr<BitMatrix> bit_backend;

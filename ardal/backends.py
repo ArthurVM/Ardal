@@ -2,8 +2,7 @@
 This exists to avoid circular import issues. """
 
 try:
-    from . import _ardal
-    from . import _ardal_pack
+    from . import ardal
 except ImportError as e:
     raise ImportError(
         "Could not import the compiled Ardal C++ backends. "

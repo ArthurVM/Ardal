@@ -19,7 +19,7 @@ Copyright 2025 Arthur V. Morris
 #include <cmath>
 #include <cstring>
 #include <iostream>
-#include "core/types.hpp"
+#include "detail/flat_matrix.hpp"
 
 
 namespace py = pybind11;
@@ -40,11 +40,9 @@ struct pair_hash {
 class BitMatrix {
 public:
     // constructor: takes a NumPy matrix
-    BitMatrix( std::shared_ptr<const ardal::detail::WordsVV> vv,
+    BitMatrix( ardal::detail::FlatMatrix matrix_,
                std::shared_ptr<const std::vector<int>> row_masses,
-               std::shared_ptr<const std::vector<int>> col_masses,
-               size_t n_rows,
-               size_t n_cols_bits );
+               std::shared_ptr<const std::vector<int>> col_masses );
 
     // distance functions
     py::array_t<uint32_t> hamming( bool fill_cache = false,
@@ -96,16 +94,17 @@ public:
 
 private:
     // bit-packed matrix
-    std::shared_ptr<const ardal::detail::WordsVV> packed_matrix_;       // packed matrix
-    std::vector<const std::uint64_t*> row_ptrs_;         // row pointers
+    ardal::detail::FlatMatrix matrix_;                     // packed matrix
+    std::vector<const std::uint64_t*> row_ptrs_;           // row pointers
 
     // attributes
-    size_t n_rows_;                 // the number of rows (guids)
-    size_t n_cols_;                 // the number of columns (alleles)
-    size_t n_packed_cols_;          // the number of packed columns
+    const uint64_t* base_;                                 // pointer to the matrix base
+    const size_t n_rows_;                                  // the number of rows (guids)
+    const size_t n_cols_bits_;                             // the number of columns (alleles)
+    const size_t wpr_;                                     // the number of packed columns
     std::shared_ptr<const std::vector<int>> row_masses_;   // the mass of each row
     std::shared_ptr<const std::vector<int>> col_masses_;   // the mass of each column
-    double density_;                // the density of the matrix
+    double density_;                                       // the density of the matrix
     uint64_t tail_mask_ = ~0ULL;
 
     // access functions
@@ -125,17 +124,17 @@ private:
     // internal helpers
     // bit unpacking
     inline bool getBit(std::size_t row, std::size_t col) const {
-        if (row >= n_rows_ || col >= n_cols_) return false;
+        if (row >= n_rows_ || col >= n_cols_bits_) return false;
         const std::size_t w = col >> 6;
         const unsigned b = static_cast<unsigned>(col & 63);
         uint64_t word = row_ptrs_[row][w];
-        if (w + 1 == n_packed_cols_) word &= tail_mask_;
+        if (w + 1 == wpr_) word &= tail_mask_;
         return (word >> b) & 1ULL;
     }
 
     inline uint64_t getWord(std::size_t row, std::size_t w) const {
         uint64_t x = row_ptrs_[row][w];
-        if (w + 1 == n_packed_cols_) x &= tail_mask_;
+        if (w + 1 == wpr_) x &= tail_mask_;
         return x;
     }
 };

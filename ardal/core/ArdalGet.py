@@ -63,8 +63,8 @@ class ArdalGet:
             
         log.info(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
         
-        guid_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
-        allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
+        guid_indices = sorted([self._headerUtils.encode_guid(guid) for guid in guids], reverse=False)
+        allele_indices = sorted([self._headerUtils.encode_allele(allele) for allele in alleles], reverse=False)
         
         ## subset the DataFrame
         ## TODO: this is pretty grim, could be done better in C++

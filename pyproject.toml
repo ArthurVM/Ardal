@@ -1,17 +1,14 @@
 [build-system]
 requires = [
-  "scikit-build-core>=0.9",
-  "pybind11>=2.12",
-  "cmake>=3.24",
-  "ninja",
-  # If you include <pybind11/numpy.h> in C++: you need NumPy headers at build time.
-  "numpy>=2.0",
+  "scikit-build-core>=0.11",
+  "pybind11>=2.13",
+  "oldest-supported-numpy"
 ]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "ardal"
-version = "0.3.0-alpha"
+version = "0.3.0"
 description = "High-performance bitpacked and roaring backends for genomic matrices"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,16 +21,24 @@ dependencies = [
   "pyjson",
   "humanize",
 ]
+# classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License"]
 
 [tool.scikit-build]
 build-dir = "build/{wheel_tag}"
+build.verbose = true
 wheel.expand-macos-universal-tags = false
 logging.level = "INFO"
-cmake.verbose = true
-# Make sure your C/C++ sources are included in sdists:
-sdist.include = ["src/**", "cpp/**", "CMakeLists.txt"]
+editable.mode = "redirect"
+sdist.include = [
+  "src/**",
+  "include/**",
+  "src/roaring/**",
+  "CMakeLists.txt",
+  "pyproject.toml",
+  "README.md",
+  "LICENSE"
+]
 
-# ✅ Use a dict/table for defines (no lists here)
 [tool.scikit-build.cmake.define]
 CMAKE_BUILD_TYPE = "Release"
 CMAKE_CXX_STANDARD = "17"

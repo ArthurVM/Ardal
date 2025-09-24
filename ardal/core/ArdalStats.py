@@ -44,10 +44,11 @@ class ArdalStats:
         return dict(sorted(zip(self._headerUtils.headers["alleles"], allele_freq), key=lambda x: x[1], reverse=True))
         
 
-    def alleleEntropy( self ) -> dict:
+    def allele_entropy( self ) -> dict:
         """ Computes the Shannon entropy for each allele in the matrix.
         Entropy H(X) = -p * log2(p) - (1-p) * log2(1-p), where p is the allele frequency.
         """
+        log.info(f"Computing Shannon entropy for all alleles.")
         allele_entropy = self._matrix.columnEntropy()
         entropies_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
         return entropies_dict
@@ -62,6 +63,8 @@ class ArdalStats:
                      ) -> dict:
         """ Computes the co-occurrence of pairs of alleles.
         """
+        log.info(f"Computing allele co-occurrence using threshold {threshold}")
+        
         if alleles != []:
             ## input validation
             self._headerUtils.check_alleles(alleles)
@@ -87,7 +90,7 @@ class ArdalStats:
     @check_guids_list
     def allele_inform( self,
                        guids: List,
-                       metric: str = "kullbackleibler"
+                       method: str = "kullbackleibler"
                        ) -> Union[Dict, None]:
         """
         Calculates scores that measure the association of each allele
@@ -100,8 +103,8 @@ class ArdalStats:
 
         Args:
             guids (list): A list of sample identifiers for the in-group.
-            metrics (string): Specify which metric to use. Default : 'kullbackleibler'.
-                Available metrics:
+            method (string): Specify which metric to use. Default : 'kullbackleibler'.
+                Available methods:
                 - 'kullbackleibler': Kullback-Leibler divergence.
                 - 'jensenshannon': Jensen-Shannon divergence.
                 - 'informationgain': Information Gain.
@@ -110,18 +113,26 @@ class ArdalStats:
             dict: A dictionary of allele_id : score pairs.
         """
         ## input validation
-        available_metrics = {'kullbackleibler', 'jensenshannon', 'informationgain'}
-        lower_metric = metric.lower()
-        if lower_metric not in available_metrics:
-            raise ParameterError(f"Metric '{lower_metric}' is not supported. Available metrics: {list(available_metrics)}")
+        available_methods = {'kullbackleibler', 'jensenshannon', 'informationgain'}
+        lower_method = method.lower()
+        if lower_method not in available_methods:
+            raise ParameterError(f"Method '{lower_method}' is not supported. Available method: {list(available_methods)}")
         
         self._headerUtils.check_guids(guids)
+        
+        log.info(f"Computing allele information.")
 
-        if lower_metric == 'kullbackleibler':
+        if lower_method == 'kullbackleibler':
+            log.debug(f"""method = Kullback-Leibler divergence
+                                 n_guids = {len(guids)}""")
             return self._kl_divergence(guids)
-        if lower_metric == 'jensenshannon':
+        if lower_method == 'jensenshannon':
+            log.debug(f"""method = Jensen-Shannon divergence
+                                 n_guids = {len(guids)}""")
             return self._js_divergence(guids)
-        if lower_metric == 'informationgain':
+        if lower_method == 'informationgain':
+            log.debug(f"""method = Information Gain
+                                 n_guids = {len(guids)}""")
             return self._information_gain(guids)
     
     

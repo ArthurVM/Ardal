@@ -67,9 +67,9 @@ class ArdalHeaderUtils:
     @check_allele_id_format
     @check_bed_paths
     def compute_allele_positions( self,
-                                  allele_id_format: str = "{chr}.{start}.{ref}.{alt}",
-                                  allele_coords_bed: Union[str, None] = None,
-                                  recompute_positions: bool = False
+                                  allele_id_format : str = "{chr}.{start}.{ref}.{alt}",
+                                  allele_coords_bed : Union[str, None] = None,
+                                  recompute_positions : bool = False
                                   ) -> Dict:
         """
         Compute or retrieve allele positions from either BED file or allele ID grammar.
@@ -80,7 +80,7 @@ class ArdalHeaderUtils:
         Returns:
             Dict[str, Dict[int, List[str]]]: Dictionary of chromosome keys to position-to-allele mappings.
         """
-        log.info(f"""Request to compute allele positions with id_format={allele_id_format}, bed={allele_coords_bed}, recompute={recompute_positions}
+        log.info(f"""Request to compute allele positions with allele_id_format={allele_id_format}, bed={allele_coords_bed}, recompute={recompute_positions}
                                     allele_coords_bed = {self._allele_coords_bed}
                                     allele_id_format = {self._allele_id_format}
                                     allele_positions_from_bed = {self._allele_positions_from_bed}
@@ -135,6 +135,9 @@ class ArdalHeaderUtils:
             self._allele_positions_from_bed = True
             self._allele_coords_bed = allele_coords_bed
 
+        ## compute the regex pattern
+        pattern = self._check_allele_format_grammar(allele_id_format=allele_id_format)
+        
         ## decode from allele ID format if requested or not already cached
         if recompute_positions or not self._allele_positions_from_ids:
             log.debug("Decoding allele positions from ID format.")
@@ -144,9 +147,10 @@ class ArdalHeaderUtils:
                 try:
                     chr_key, start, end, ref, alt = self._decode_allele_position(
                         allele_id=allele,
+                        pattern=pattern,
                         allele_id_format=allele_id_format
                     )
-                    if chr_key is not None and start is not None:
+                    if start is not None:
                         allele_positions[str(chr_key)][int(start)].append(allele)
                 except ValueError as e:
                     log.debug(f"Skipping allele ID '{allele}': {e}")
@@ -159,7 +163,8 @@ class ArdalHeaderUtils:
 
     def _decode_allele_position( self,
                                  allele_id : str,
-                                 allele_id_format : str = "{chr}.{start}.{ref}.{alt}"
+                                 pattern : str,
+                                 allele_id_format : str
                                  ) -> Tuple[ Union[str, None], int, Union[int, None], Union[str, None], str]:
         """ Decodes an allele ID string into its constituent parts based on a format string.
 
@@ -176,8 +181,6 @@ class ArdalHeaderUtils:
             ValueError: If the allele_id does not match the allele_id_format.
         """
         re = require_package("re", "re")
-        
-        pattern = self._check_allele_format_grammar(allele_id_format=allele_id_format)
         
         if not allele_id:
             raise ValueError("allele_id cannot be empty.")
@@ -222,8 +225,11 @@ class ArdalHeaderUtils:
                 raise AllelePatternError(f"{p} not a valid placeholder for allele_id_format pattern. Accepted placeholders : {accepted_placeholder_patterns}")
             
         ## check minimum required format
-        if "start" not in pattern_placeholders or "alt" not in pattern_placeholders:
+        if "start" not in pattern_placeholders:
             raise AllelePatternError(f"{p} not a valid placeholder for allele_id_format pattern. Must have at least 'chr' and 'start' placeholders.")
+        
+        if "alt" not in pattern_placeholders and "ref" in pattern_placeholders:
+            log.warning("allele_id_format : 'ref' provided but 'alt' absent. This may be a mistake.")
         
         pattern = re.escape(allele_id_format)
     
@@ -258,13 +264,19 @@ class ArdalHeaderUtils:
     @check_bed_paths
     @check_allele_id_format
     def get_interval_alleles( self,
+                              allele_id_format : Union[str, None],
                               intervals : Union[List, None] = None,
                               intervals_bed : Union[str, None] = None,
                               allele_coords_bed : Union[str, None] = None,
-                              allele_id_format : str = "{chr}.{start}.{ref}.{alt}",
                               delimiter : str = "\t"
                               ) -> List[Set[str]]:
         bisect = require_package("bisect", "bisect")
+        
+        if allele_id_format == None:
+            if self._allele_id_format == None:
+                raise IntervalError("Please provide an allele id format")
+            else:
+                allele_id_format = self._allele_id_format
         
         ## check intervals were provided
         if not intervals and not intervals_bed:
@@ -272,9 +284,9 @@ class ArdalHeaderUtils:
                 
         ## get intervals
         cleaned_intervals = self._get_intervals(intervals=intervals,
+                                                allele_id_format=allele_id_format,
                                                 intervals_bed=intervals_bed,
                                                 allele_coords_bed=allele_coords_bed,
-                                                allele_id_format=allele_id_format,
                                                 delimiter=delimiter)
         
         ## get allele positions
@@ -302,7 +314,7 @@ class ArdalHeaderUtils:
                 continue
             
             sorted_positions = sorted(chr_pos_dict.keys())
-            
+                        
             ## binary search the alleles out
             start_index = bisect.bisect_left(sorted_positions, start)
             for i in range(start_index, len(sorted_positions)):
@@ -319,10 +331,10 @@ class ArdalHeaderUtils:
 
 
     def _get_intervals( self,
+                        allele_id_format : str,
                         intervals : Union[List, None],
                         intervals_bed : Union[str, None] = None,
                         allele_coords_bed : Union[str, None] = None,
-                        allele_id_format : str = "{chr}.{start}.{ref}.{alt}",
                         delimiter : str = " "
                         ) -> List[List]:
         log.info(f"Generating a list of intervals.")
@@ -402,7 +414,7 @@ class ArdalHeaderUtils:
                     start = int(interval[1])
                     end = int(interval[2])
                 elif len(interval) == 2:
-                    chr_key = None
+                    chr_key = "None"
                     start = int(interval[0])
                     end = int(interval[1])
                 elif len(interval) == 1:
@@ -417,7 +429,7 @@ class ArdalHeaderUtils:
                     
             except (ValueError, TypeError, IndexError) as e:
                 raise IntervalError(f"Failed to parse interval {interval} : {e}")
-            
+                        
             cleaned_intervals.append([chr_key, start, end])
             
         return cleaned_intervals
