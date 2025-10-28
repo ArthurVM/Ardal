@@ -8,14 +8,16 @@
 
 *   **Allele Matrix Representation:** Efficiently stores and manipulates binary allele matrices.
 *   **Distance Calculations:**
-    *   Hamming distance: Calculates the number of differing alleles between samples.
-    *   Jaccard distance: Measures the dissimilarity between samples based on shared alleles.
+    *   Hamming distance: Counts the number of positions at which two allele vectors differ. It is best for revealing overall genetic divergence or mutation load between genomes.
+    *   Jaccard index: Measures similarity as the ratio of shared alleles to the union of alleles across two vectors. It is best for revealing shared allele patterns while down-weighting invariant or absent sites.
+    *   Inner Product: Quantifies the raw co-occurrence of alleles between two binary vectors. It is best for highlighting densely co-occurring alleles or lineage-defining variant constellations.
+    *   Cosine distance: Measures angular dissimilarity by normalizing the inner product by the vector magnitudes. It is best for revealing directional similarity in variant composition independent of absolute allele counts.
 *   **Neighborhood Analysis:** Identifies samples within a specified Hamming distance of a target sample, with or without SIMD acceleration.
 *   **Core and Accessory Allele Identification:** Determines the core (present in all samples) and accessory (present in some samples) alleles within a group of samples.
 *   **Unique Allele Identification:** Identifies alleles that are unique to a specific set of samples.
 *   **Data Input:** Supports various data formats, including:
+    *   Bitpacked binary matrices
     *   CSV
-    *   Parquet
     *   NPY/JSON pairs
     *   In-memory data structures (NumPy arrays and dictionaries)
 *   **Data Output:**
@@ -63,10 +65,11 @@ Some example usage for `ardal`:
 
 ### Creating an `Ardal` Object
 From data in memory
-```
+```python
+import numpy as np
 from ardal import Ardal
 
-## create some dummy data
+# create some dummy data
 matrix_data = np.array([
     [1, 0, 1, 1, 1],  # GUID1
     [1, 0, 1, 1, 0],  # GUID2
@@ -76,18 +79,27 @@ matrix_data = np.array([
     [1, 0, 0, 1, 0],  # GUID6
 ], dtype=np.uint8)
 headers = {
-    "guids" : ["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6"],
-    "alleles" : ["chr1.1000.A.T", "chr1.2000.A.T", "chr1.3000.A.T", "chr1.4000.A.T", "chr1.5000.A.T"]
+    "guids": ["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6"],
+    "alleles": ["SNP1", "SNP2", "SNP3", "SNP4", "SNP5"],
 }
 
-## minimum case to create an Ardal object from dummy data
-ard_obj = Ardal(data_source=[headers, matrix_data])
+# create an Ardal object from the in-memory data
+ard_obj = Ardal(
+    data_source=[matrix_data, headers],
+    roaring="auto",            # automatically provision the roaring backend if sparse enough
+    density_threshold=0.05,    # override the default heuristic if required
+    quiet_init=True,           # suppress the initial stats printout
+)
 ```
+
 From data on disk
-```
+```python
+from ardal import Ardal
+
 headers_path = "/path/to/headers.json"
 matrix_path = "/path/to/matrix.npy"
-ard_obj = Ardal(data_source=[headers_path, matrix_path])
+
+ard_obj = Ardal(data_source=[matrix_path, headers_path])
 ```
 You may also specify verbosity level, backend selection protocol (i.e. whether to force roaring or let Ardal decide), and the format of the SNP ids for advanced functionality at object creation
 ```
@@ -99,76 +111,81 @@ ard_obj = Ardal(data_source=[headers_path, matrix_path],
 ```
 ### Compute a Distance Matrix
 You can compute a distance matrix easily using either Hamming or Jaccard distance.
-```
-## calculate a Hamming distance matrix
-hamming_matrix = ard_obj.compare.pairwise(metric="hamming")
+```python
+# calculate a condensed Hamming distance vector
+hamming = ard_obj.distance.pairwise(metric="hamming")
 
-## calculate a Jaccard distance matrix
-jaccard_matrix = ard_obj.compare.pairwise(metric="jaccard")
+# return a square pandas DataFrame using the roaring backend where available
+jaccard_df = ard_obj.distance.pairwise(metric="jaccard", backend="roaring", return_square=True, as_dataframe=True)
 ```
 ### Compute the SNP Neighbourhood of a Sample
 A SNP neighbourhood can be computed by finding all GUIDs which lie within n SNPs of a query GUID.
 This can be achieved with or without SIMD, depending on CPU architecture.
-```
-## find the neighborhood of GUID1 within a Hamming distance of 2
-neighborhood_simd = ard_obj.distance.neighbourhood("GUID1", n=2)
+```python
+# find the neighbourhood of GUID1 within a Hamming distance of 2 (using SIMD)
+neighbourhood_simd = ard_obj.distance.neighbourhood("GUID1", n=2, use_simd=True)
+
+# find the neighbourhood of GUID1 within a Hamming distance of 2 (without SIMD)
+neighbourhood_scalar = ard_obj.distance.neighbourhood("GUID1", n=2, use_simd=False)
 ```
 ### Identifying Unique Alleles
 You can find the alleles which are unique to a given set of GUIDs within the input data.
-```
-## find the SNPs found only in both GUID1 and GUID2
+```python
+# find the SNPs found only in GUID1 and GUID2
 unique_snps = ard_obj.allele.unique(["GUID1", "GUID2"])
+
+# alleles present in all of GUID1/GUID2 yet absent elsewhere
+unique_core = ard_obj.allele.unique_core(["GUID1", "GUID2"])
 ```
 ### Stats
 Ardal supports some pretty useful and powerful techniques for statistical investigation of the database.
 For example, I might want to find a set of alleles which can be used to model a population - perhaps
 ones which represent a lineage or strain. This can be achieved using information theoretic functions such 
 as `.stats.snpInform()`.
-```
-## define our set of ingroup guids
+```python
+import numpy as np
+
+# define our set of ingroup guids
 ingroup_guids = ["GUID1", "GUID2", "GUID3"]
 
-## calculate the Jensen-Shannon divergence of each SNP
-snps = ard.stats.allele_inform(ingroup_guids, metric="jensenshannon")
+# calculate the Jensen–Shannon divergence of each SNP
+scores = ard_obj.stats.allele_inform(ingroup_guids, method="jensenshannon")
 
-## select the top 1% of SNPs
-t = np.percentile(list(snps.values()), 99.0)
-top_snps = [snp for snp, score in snps.items() if score >= t]
+# select the top 1% of SNPs
+threshold = np.percentile(list(scores.values()), 99)
+top_snps = [snp for snp, score in scores.items() if score >= threshold]
 
-## compute the allele co-occurrence to ensure co-occurring SNPs don't result in overfitting
-cooc_snps = ard.stats.allele_cooc(selected_snps, threshold=0.95, threads=10)
-na_snps = [snp for d in list(cooc_snps.values()) for snp in d]
+# compute the allele co-occurrence to ensure co-occurring SNPs don't result in overfitting
+cooc = ard_obj.stats.allele_cooc(top_snps, threshold=0.95, threads=4)
+na_snps = {snp for neighbours in cooc.values() for snp in neighbours}
 model_snps = [snp for snp in top_snps if snp not in na_snps]
 ```
 ### Utlity Functions
 There are a number of general utility functions for getting data, input/output, subsetting, and database inspection.
-```
-## get the allele matrix stats as a JSON
-stats_json = ard_obj.get.matrix_stats()
+```python
+# get the allele matrix stats as a dictionary
+stats = ard_obj.get.matrix_stats()
 
-## or print as a rich text table
-ard_obj.get.matrix_stats(print_stats=True)
+# or print as a rich text table
+ard_obj.get.matrix_stats(print_table=True)
 
-## get the allele matrix as a NumPy array
+# get the allele matrix as a NumPy array
 bit_matrix = ard_obj.get.bit_matrix()
 
-## get the roaring matrix
+# get the roaring matrix (decoded to allele IDs)
 roaring_matrix = ard_obj.get.roaring_matrix()
 
-## get the GUID and Allele headers
+# get the GUID and allele headers
 headers = ard_obj.get.headers()
 
-## get the allele matrix as a Pandas DataFrame
+# get the allele matrix as a Pandas DataFrame
 df = ard_obj.io.to_dataframe()
 
-## or as a dictionary (which will be identical to the .get.roaring_matrix() function in practice)
-allele_dict = ard_obj.io.to_dict()
+# or as a dictionary (optionally choose the backend)
+allele_dict = ard_obj.io.to_dict(backend="auto")
 
-## write the allele matrix to disk as a npy JSON pair
-ard_obj.io.write(file_path="./, output_prefix="out_db")
-
-## or compress the npy to npz
-ard_obj.io.write(file_path="./, output_prefix="out_db", npz=True)
+# write the allele matrix to disk
+ard_obj.io.write(output_prefix="out_db", out_directory="./exports", format="npz")
 ```
 
 # Ardal API Documentation
