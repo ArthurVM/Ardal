@@ -129,7 +129,6 @@ class ArdalAllele:
         guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         unique_allele_indices = self._matrix.uniqueSharedBits(guid_coords, backend=backend)
         decoded_alleles = list({self._headerUtils.decode_allele(idx) for idx in unique_allele_indices})
-        print("U", unique_allele_indices, decoded_alleles)
         
         if len(decoded_alleles) == 0:
             log.warning(f"No unique core alleles found. This is common in large databases. Consider using the stats module if you are looking for alleles which are over-represented in a set of guids.")

@@ -70,7 +70,12 @@ BitMatrix::BitMatrix( ardal::detail::FlatMatrix matrix_,
         throw std::runtime_error("BitMatrix: col_masses size mismatch");
     }
 
-    uint64_t tail_mask_ = ardal::tail_mask(n_cols_bits_);
+    tail_mask_ = ardal::tail_mask(n_cols_bits_);
+
+    row_ptrs_.resize(n_rows_);
+    for (size_t r = 0; r < n_rows_; ++r) {
+        row_ptrs_[r] = base_ + r * wpr_;
+    }
     
     std::stringstream ss;
     ss << "BitMatrix initialised: rows=" << n_rows_ << " wpr=" << wpr_;
@@ -1399,44 +1404,36 @@ BitMatrix::knn_cosine(size_t row_idx, int k, bool use_simd, int threads) const {
 std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_indices,
                                                  bool use_simd ) const {
     if (row_indices.empty()) return {};
+    if (wpr_ == 0 || n_cols_bits_ == 0) return {};
  
     const size_t ingroup_size = row_indices.size();
-    std::vector<uint64_t> group_and(wpr_, ~0ULL);   // initialize with all bits sets
+    std::vector<uint64_t> group_and(wpr_);
 
-    // TODO: this is a bit of a mess
-    if (use_simd) {
-        ardal::utils::log_debug("Running BitMatrix::uniqueSharedBits with AVX2 instructions.");
-        // SIMD ingroup AND
-        size_t k = 0;
-        for (; k + 4 <= wpr_; k += 4) {
-            // get query row
-            const uint64_t* __restrict row_k = base_ + k * wpr_;
-            __m256i acc = _mm256_loadu_si256((__m256i const*)row_k);
-            for (size_t idx = 1; idx < ingroup_size; ++idx) {
-                const uint64_t* __restrict row_idx = base_ + idx * wpr_;
-                __m256i row = _mm256_loadu_si256((__m256i const*)row_idx);
-                acc = _mm256_and_si256(acc, row);
-            }
-            _mm256_storeu_si256((__m256i*)&group_and[k], acc);
+    const size_t first_idx = row_indices[0];
+    if (first_idx >= n_rows_) {
+        throw std::out_of_range("Row index out of bounds in uniqueSharedBits.");
+    }
+    const uint64_t* first_row = row_ptrs_.empty() ? (base_ + first_idx * wpr_) : row_ptrs_[first_idx];
+    std::memcpy(group_and.data(), first_row, wpr_ * sizeof(uint64_t));
+
+    const bool has_tail = (n_cols_bits_ & 63u) != 0u;
+    const uint64_t tail_mask = has_tail ? tail_mask_ : ~0ULL;
+
+    for (size_t pos = 1; pos < ingroup_size; ++pos) {
+        const size_t row_idx = row_indices[pos];
+        if (row_idx >= n_rows_) {
+            throw std::out_of_range("Row index out of bounds in uniqueSharedBits.");
         }
-        // remainder loop for ingroup AND
-        for (; k < wpr_; ++k) {
-            uint64_t acc = *(base_ + k * wpr_);
-            for (size_t idx = 1; idx < ingroup_size; ++idx) {
-                acc &= *(base_ + idx * wpr_);
-            }
-            group_and[k] = acc;
+        const uint64_t* row_ptr = row_ptrs_.empty() ? (base_ + row_idx * wpr_) : row_ptrs_[row_idx];
+
+        // NOTE: `use_simd` currently falls back to scalar AND while ensuring correctness
+        for (size_t w = 0; w < wpr_; ++w) {
+            group_and[w] &= row_ptr[w];
         }
-    } else {
-        ardal::utils::log_debug("Running BitMatrix::uniqueSharedBits with scalar instructions.");
-        // scalar ingroup AND
-        for (size_t k = 0; k < wpr_; ++k) {
-            uint64_t acc = *(base_ + k * wpr_);
-            for (size_t idx = 1; idx < ingroup_size; ++idx) {
-                acc &= *(base_ + idx * wpr_);
-            }
-            group_and[k] = acc;
-        }
+    }
+
+    if (has_tail) {
+        group_and[wpr_ - 1] &= tail_mask;
     }
     
     // check column mass for uniqueness
@@ -1451,10 +1448,8 @@ std::vector<size_t> BitMatrix::uniqueSharedBits( const std::vector<size_t>& row_
         while (chunk != 0) {
             int trailing_zeros = __builtin_ctzll(chunk);
             size_t col_idx = k * 64 + trailing_zeros;
-            if (col_idx < n_cols_bits_) {
-                if (col_idx < n_cols_bits_ && col_masses[col_idx] == ingroup_size) {
-                    unique_bits.push_back(col_idx);
-                }
+            if (col_idx < n_cols_bits_ && col_masses[col_idx] == ingroup_size) {
+                unique_bits.push_back(col_idx);
             }
             chunk &= chunk - 1;   // clear the LSB
         }
