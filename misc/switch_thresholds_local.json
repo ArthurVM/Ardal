@@ -1,0 +1,197 @@
+{
+  "stamp": {
+    "python": "3.13.5",
+    "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.35",
+    "machine": "x86_64",
+    "processor": "x86_64",
+    "arch": "x86_64",
+    "cpus": "0-21",
+    "cpu_model": "Intel(R) Core(TM) Ultra 9 185H",
+    "env_threads": 10
+  },
+  "grid": {
+    "n": 5000,
+    "m": [
+      5000,
+      10000,
+      25000,
+      50000,
+      100000,
+      250000
+    ],
+    "p": [
+      0.0005,
+      0.001,
+      0.0025,
+      0.005,
+      0.01,
+      0.02,
+      0.05,
+      0.1
+    ],
+    "repeats": 7,
+    "warmup": 1
+  },
+  "switchpoints": {
+    "hamming|T10": [
+      {
+        "m": 5000,
+        "p_star": 0.011484063559038946,
+        "note": "interpolated"
+      },
+      {
+        "m": 10000,
+        "p_star": 0.015718175750634937,
+        "note": "interpolated"
+      },
+      {
+        "m": 25000,
+        "p_star": 0.014338732798072145,
+        "note": "interpolated"
+      },
+      {
+        "m": 50000,
+        "p_star": 0.014223330510695811,
+        "note": "interpolated"
+      },
+      {
+        "m": 100000,
+        "p_star": 0.014026131662832179,
+        "note": "interpolated"
+      },
+      {
+        "m": 250000,
+        "p_star": 0.016701129928744028,
+        "note": "interpolated"
+      }
+    ],
+    "nh_radius_5|T10": [
+      {
+        "m": 5000,
+        "p_star": 0.0014370548658059197,
+        "note": "interpolated"
+      },
+      {
+        "m": 10000,
+        "p_star": 0.0017734859182437716,
+        "note": "interpolated"
+      },
+      {
+        "m": 25000,
+        "p_star": 0.0008079078102092175,
+        "note": "interpolated"
+      },
+      {
+        "m": 50000,
+        "p_star": 0.0006497197321951788,
+        "note": "interpolated"
+      },
+      {
+        "m": 100000,
+        "p_star": 0.001,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 250000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      }
+    ],
+    "nh_radius_10|T10": [
+      {
+        "m": 5000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 10000,
+        "p_star": 0.001,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 25000,
+        "p_star": 0.000853337585281594,
+        "note": "interpolated"
+      },
+      {
+        "m": 50000,
+        "p_star": 0.0007093132265519577,
+        "note": "interpolated"
+      },
+      {
+        "m": 100000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 250000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      }
+    ],
+    "nh_radius_50|T10": [
+      {
+        "m": 5000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 10000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 25000,
+        "p_star": 0.0018410482233757487,
+        "note": "interpolated"
+      },
+      {
+        "m": 50000,
+        "p_star": 0.0015850955645135072,
+        "note": "interpolated"
+      },
+      {
+        "m": 100000,
+        "p_star": 0.0009450886398344148,
+        "note": "interpolated"
+      },
+      {
+        "m": 250000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      }
+    ],
+    "nh_radius_100|T10": [
+      {
+        "m": 5000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 10000,
+        "p_star": 0.0005,
+        "note": "no-crossing; nearest (bit>roaring)"
+      },
+      {
+        "m": 25000,
+        "p_star": 0.001944402501426236,
+        "note": "interpolated"
+      },
+      {
+        "m": 50000,
+        "p_star": 0.002084622868934393,
+        "note": "interpolated"
+      },
+      {
+        "m": 100000,
+        "p_star": 0.0014297734393911227,
+        "note": "interpolated"
+      },
+      {
+        "m": 250000,
+        "p_star": 0.0007725387520787444,
+        "note": "interpolated"
+      }
+    ]
+  }
+}

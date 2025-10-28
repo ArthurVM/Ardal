@@ -41,7 +41,8 @@ class ArdalParser:
 
     def __init__(self,
                  input_data_structure: Union[list, str],
-                 verify_hash: bool = False):
+                 verify_hash: bool = False,
+                 is_packed_mem: bool = False):
         self.input_data = input_data_structure
         self.file_format = None
         self.matrix: np.ndarray | None = None
@@ -49,6 +50,7 @@ class ArdalParser:
         self.meta: dict = {}
         self.is_bitpacked: bool = False
         self.verify_hash = verify_hash
+        self.is_packed_mem = is_packed_mem
         self._parse()
 
 
@@ -67,18 +69,30 @@ class ArdalParser:
 
             a, b = self.input_data
 
-            if isinstance(a, np.ndarray) and isinstance(b, dict):
+            if (isinstance(a, np.ndarray) and isinstance(b, dict)) or (isinstance(b, np.ndarray) and isinstance(a, dict)):
+                matrix, headers = self._order_input(a, b)
                 log.info(f"Parsing matrix data from list in memory of form: {[type(i) for i in self.input_data]}")
-                self.matrix, self.headers = np.ascontiguousarray(a), b
+                self.headers = headers
+
+                want_bitpack = self.is_packed_mem or self._is_bitpacked_candidate(matrix)
+                self.matrix = np.ascontiguousarray(matrix)
+
+                if want_bitpack:
+                    if not self._is_bitpacked_candidate(self.matrix):
+                        raise LoadMatrixError("Bitpack matrix must be a 2D uint64 array.")
+                    if self.matrix.dtype != np.dtype("<u8"):
+                        if self.matrix.dtype.kind == "u" and self.matrix.dtype.itemsize == 8:
+                            self.matrix = self.matrix.astype(np.dtype("<u8"), copy=False)
+                        else:
+                            raise LoadMatrixError(f"Bitpack matrix has incompatible dtype: {self.matrix.dtype}")
+                    self.file_format = "bitpack"
+                    self.is_bitpacked = True
+                    self.meta = self._mk_bitpack_meta_from_headers(self.matrix, self.headers)
+                    self._validate_bitpack()
+                    return 0
+
                 self.file_format = "memory_npy"
-                self._validate_dense()
-                self.meta = self._mk_bitpack_meta_from_dense(self.matrix, self.headers)
-                return 0
-            
-            if isinstance(b, np.ndarray) and isinstance(a, dict):
-                log.info(f"Parsing matrix data from list in memory of form: {[type(i) for i in self.input_data]}")
-                self.matrix, self.headers = np.ascontiguousarray(b), a
-                self.file_format = "memory_npy"
+                self.is_bitpacked = False
                 self._validate_dense()
                 self.meta = self._mk_bitpack_meta_from_dense(self.matrix, self.headers)
                 return 0
@@ -136,10 +150,14 @@ class ArdalParser:
             log.info(f"Parsing matrix data from one file path: {self.input_data}")
             
             p = Path(self.input_data)
+            suffix = p.suffix.lower()
+            supported_suffixes = {".json", ".csv", ".parquet", ".npy", ".npz", ".bin"}
+            if suffix not in supported_suffixes:
+                raise UnsupportedFormatError(f"Unsupported file extension: {p.suffix}")
             if not p.exists():
                 raise FileNotFoundError(f"File does not exist: {p}")
 
-            if p.suffix.lower() == ".json":
+            if suffix == ".json":
                 ## might be a bitpack header
                 if self._is_bitpack_header(p):
                     self.matrix, self.headers, self.meta = self._load_bitpack_header(p)
@@ -152,17 +170,18 @@ class ArdalParser:
 
             ## csv
             ## TODO: needs fixing in line with new backend packing strategy
-            if p.suffix.lower() == ".csv":
+            if suffix == ".csv":
                 log.info(f"Detected matrix format: .csv")
-                words, headers, meta = self._load_csv_bitpacked(str(p))
-                self.matrix, self.headers, self.meta = words, headers, meta
+                matrix, headers = self._load_csv(str(p))
+                self.matrix, self.headers = matrix, headers
+                self.meta = self._mk_bitpack_meta_from_dense(self.matrix, self.headers)
                 self.file_format = "csv"
-                self.is_bitpacked = True
+                self.is_bitpacked = False
                 return 0
 
             ## parquet
             ## might remove this
-            if p.suffix.lower() == ".parquet":
+            if suffix == ".parquet":
                 log.info(f"Detected matrix format: .parquet")
                 dense, headers = self._load_parquet(str(p))
                 self._validate_dense_pair(dense, headers)
@@ -170,9 +189,10 @@ class ArdalParser:
                 self.headers = headers
                 self.meta = self._mk_bitpack_meta_from_dense(self.matrix, headers)
                 self.file_format = "parquet"
+                self.is_bitpacked = False
                 return 0
 
-            if p.suffix.lower() in (".npy", ".npz", ".bin"):
+            if suffix in (".npy", ".npz", ".bin"):
                 raise MalformedInputError("Binary file provided without matching headers.json; provide both.")
 
             raise UnsupportedFormatError(f"Unsupported file extension: {p.suffix}")
@@ -223,7 +243,7 @@ class ArdalParser:
     def _validate_bitpack(self) -> None:
         if not isinstance(self.matrix, np.ndarray):
             raise LoadMatrixError("Bitpack matrix must be a NumPy memmap.")
-        if self.matrix.dtype != np.dtype("<u8"):
+        if not self._is_le_uint64(self.matrix):
             raise LoadMatrixError(f"Bitpack dtype must be little-endian uint64 ('<u8'), got {self.matrix.dtype}.")
         if self.matrix.ndim != 2:
             raise LoadMatrixError("Bitpack matrix must be 2-dimensional.")
@@ -342,6 +362,71 @@ class ArdalParser:
 
 
     ## ------------- loaders -------------
+    def _load_csv(self, csv_path: str) -> Tuple[np.ndarray, dict]:
+        """
+        Load a dense CSV where first column is GUID and remaining columns are {0,1}.
+        Returns (matrix: np.ndarray[C-contig, uint8], headers: dict).
+        """
+        path = Path(csv_path)
+        if not path.exists():
+            raise LoadMatrixError(f"CSV file does not exist: {path}")
+
+        with path.open("r", newline="") as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                raise LoadMatrixError("CSV is empty.")
+        if len(header) < 2:
+            raise LoadMatrixError("CSV must have an index column + at least one allele column.")
+
+        alleles = [h.strip() for h in header[1:]]
+        n_cols_bits = len(alleles)
+        if len(set(alleles)) != n_cols_bits:
+            raise LoadMatrixError("Allele headers must be unique.")
+
+        guids: list[str] = []
+        seen_guids: set[str] = set()
+        rows: list[np.ndarray] = []
+
+        with path.open("r", newline="") as f:
+            reader = csv.reader(f)
+            _ = next(reader, None)  # skip header
+            r_global = 0
+            for row in reader:
+                if not row:
+                    continue
+                if len(row) != n_cols_bits + 1:
+                    raise LoadMatrixError(f"Row {r_global} has {len(row)-1} allele columns; expected {n_cols_bits}.")
+
+                guid = row[0].strip()
+                if guid in seen_guids:
+                    raise LoadMatrixError(f"Duplicate GUID encountered: {guid}")
+                seen_guids.add(guid)
+                guids.append(guid)
+
+                vals = row[1:]
+                arr = np.zeros(n_cols_bits, dtype=np.uint8)
+                for j, tok in enumerate(vals):
+                    t = tok.strip()
+                    if t == "1" or t == "1.0":
+                        arr[j] = 1
+                    elif t == "" or t == "0" or t == "0.0":
+                        continue
+                    else:
+                        raise LoadMatrixError(f"Non-binary token at row {r_global}, col {j+1}: '{tok}'")
+                rows.append(arr)
+                r_global += 1
+
+        if rows:
+            matrix = np.vstack(rows).astype(np.uint8, copy=False)
+        else:
+            matrix = np.zeros((0, n_cols_bits), dtype=np.uint8)
+
+        matrix = np.ascontiguousarray(matrix)
+        headers = {"guids": guids, "alleles": alleles}
+        return matrix, headers
+        
 
     def _load_csv_bitpacked(self, csv_path: str, max_chunk_mb: int = 64) -> Tuple[np.memmap, dict, dict]:
         """
@@ -582,22 +667,60 @@ class ArdalParser:
         meta is recalculated when a packed bin is written.
         """
         n_rows, n_cols_bits = matrix.shape
-        words_per_row = np.ceil(n_cols_bits/64)
+        words_per_row = (n_cols_bits + 63) // 64
         return {
             "format": "ardal.bitpack.v1",
             "dtype": "<u8",
             "endianness": "little",
             "row_major": True,
-            "n_rows": n_rows,
-            "n_cols": n_cols_bits,
-            "words_per_row": words_per_row,
+            "n_rows": int(n_rows),
+            "n_cols": int(n_cols_bits),
+            "words_per_row": int(words_per_row),
             "bits_per_word": 64,
-            "row_stride_bytes": words_per_row * 8,
+            "row_stride_bytes": int(words_per_row * 8),
             "data_file": None,
-            "data_nbytes": int(matrix.nbytes)/8,    ## this is dubious...
+            "data_file_resolved": None,
+            "data_nbytes": int(n_rows * words_per_row * 8),
             "data_sha256": None,
-            "generated_by" : "Ardal v" + version("ardal"),
+            "generated_by": self._generated_by_string(),
     }
+
+    def _mk_bitpack_meta_from_headers(self, matrix: np.ndarray, headers: dict) -> dict:
+        if not isinstance(headers, dict):
+            raise LoadMatrixError("Headers must be a dictionary.")
+        if "alleles" not in headers:
+            raise LoadMatrixError("Headers must contain 'alleles' key for bitpack matrices.")
+
+        n_rows, words = matrix.shape
+        alleles = headers["alleles"]
+
+        if not isinstance(alleles, list):
+            raise LoadMatrixError("Alleles must be provided as a list.")
+
+        n_cols_bits = len(alleles)
+        words_per_row = (n_cols_bits + 63) // 64 if n_cols_bits else 0
+
+        if words != words_per_row:
+            raise LoadMatrixError(
+                f"Bitpack matrix words_per_row mismatch: matrix has {words}, expected {words_per_row} for {n_cols_bits} columns."
+            )
+
+        return {
+            "format": "ardal.bitpack.v1",
+            "dtype": "<u8",
+            "endianness": "little",
+            "row_major": True,
+            "n_rows": int(n_rows),
+            "n_cols": int(n_cols_bits),
+            "words_per_row": int(words_per_row),
+            "bits_per_word": 64,
+            "row_stride_bytes": int(words_per_row * 8),
+            "data_file": None,
+            "data_file_resolved": None,
+            "data_nbytes": int(matrix.nbytes),
+            "data_sha256": None,
+            "generated_by": self._generated_by_string(),
+        }
     
     @staticmethod
     def _is_le_uint64( arr: np.ndarray ) -> bool:
@@ -608,3 +731,32 @@ class ArdalParser:
         if dt == np.uint64 and byteorder == "little":
             return True
         return False
+
+    @staticmethod
+    def _is_bitpacked_candidate(arr: np.ndarray) -> bool:
+        return (
+            isinstance(arr, np.ndarray)
+            and arr.ndim == 2
+            and arr.dtype.kind == "u"
+            and arr.dtype.itemsize == 8
+        )
+
+    @staticmethod
+    def _generated_by_string() -> str:
+        try:
+            return "Ardal v" + version("ardal")
+        except PackageNotFoundError:
+            return "Ardal"
+    
+    
+    @staticmethod
+    def _order_input( a : Union[dict,np.ndarray],
+                      b : Union[dict,np.ndarray] ) -> Tuple[np.ndarray, dict]:
+        """ Returns the data tuple in a predictable order
+        """
+        if isinstance(a, np.ndarray) and isinstance(b, dict):
+            return [a, b]
+        elif isinstance(a, dict) and isinstance(b, np.ndarray):
+            return [b, a]
+        else:
+            raise MalformedInputError("Input list from memory must contain two elements: matrix (np.ndarray) and headers (dict).")

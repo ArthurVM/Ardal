@@ -1,0 +1,5 @@
+2025-10-15 14:22:49.210  INFO 3265877 --- [main] u.a.e.ena.EnaFileDownloaderApplication   : Starting EnaFileDownloaderApplication using Java 17.0.10 on morrislab-thinkpad with PID 3265877 (/home/arthur/software/ena_ftp_dl/ena-file-downloader.jar started by arthur in /home/arthur/BioInf/Ardal_MAIN/Ardal)
+2025-10-15 14:22:49.211 DEBUG 3265877 --- [main] u.a.e.ena.EnaFileDownloaderApplication   : Running with Spring Boot v2.4.5, Spring v5.3.6
+2025-10-15 14:22:49.211  INFO 3265877 --- [main] u.a.e.ena.EnaFileDownloaderApplication   : No active profile set, falling back to default profiles: default
+2025-10-15 14:22:49.590  INFO 3265877 --- [main] u.a.e.ena.EnaFileDownloaderApplication   : Started EnaFileDownloaderApplication in 0.603 seconds (JVM running for 0.983)
+2025-10-15 14:22:49.591 ERROR 3265877 --- [main] uk.ac.ebi.ena.app.MainRunner             : Not enough parameters provided. Starting interactive flow..

@@ -71,20 +71,29 @@ endif()
 include(CheckCXXCompilerFlag)
 include(CheckCCompilerFlag)
 
+## optional AVX-512 VPOPCNTDQ (off by default)
+option(ARDAL_ENABLE_AVX512_VPOPCNTDQ "Enable AVX-512 VPOPCNTDQ kernels" OFF)
+
 if(ARDAL_USE_SIMD)
   if(MSVC)
     foreach(tgt IN ITEMS ardal ardal_pack)
       target_compile_options(${tgt} PRIVATE /arch:AVX2)
+      target_compile_definitions(${tgt} PUBLIC ARDAL_HAVE_AVX2_KERNELS=1)
+      target_compile_definitions(${tgt} PUBLIC ARDAL_HAVE_AVX512VPOPCNTDQ_KERNELS=0)
     endforeach()
   else()
+    ## prefer x86-64-v3 if supported
+    ## else fall back to -mavx2 flags
     check_cxx_compiler_flag("-march=x86-64-v3" HAS_X64V3_CXX)
     check_c_compiler_flag("-march=x86-64-v3"  HAS_X64V3_C)
+
     if(HAS_X64V3_CXX AND HAS_X64V3_C)
       foreach(tgt IN ITEMS ardal ardal_pack)
         target_compile_options(${tgt} PRIVATE
           $<$<COMPILE_LANGUAGE:CXX>:-march=x86-64-v3 -ffast-math>
           $<$<COMPILE_LANGUAGE:C>:-march=x86-64-v3>
         )
+        target_compile_definitions(${tgt} PUBLIC ARDAL_HAVE_AVX2_KERNELS=1)
       endforeach()
     else()
       foreach(tgt IN ITEMS ardal ardal_pack)
@@ -92,10 +101,27 @@ if(ARDAL_USE_SIMD)
           $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mbmi -mbmi2 -mpopcnt -mfma -mlzcnt -ffast-math>
           $<$<COMPILE_LANGUAGE:C>:-mavx2 -mbmi -mbmi2 -mpopcnt -mfma -mlzcnt>
         )
+        target_compile_definitions(${tgt} PUBLIC ARDAL_HAVE_AVX2_KERNELS=1)
+      endforeach()
+    endif()
+
+    ## optional AVX-512 VPOPCNTDQ (explicit opt-in)
+    if(ARDAL_ENABLE_AVX512_VPOPCNTDQ)
+      foreach(tgt IN ITEMS ardal ardal_pack)
+        target_compile_options(${tgt} PRIVATE
+          $<$<COMPILE_LANGUAGE:CXX>:-mavx512f -mavx512bw -mavx512vl -mavx512vpopcntdq>
+          $<$<COMPILE_LANGUAGE:C>:-mavx512f -mavx512bw -mavx512vl -mavx512vpopcntdq>
+        )
+        target_compile_definitions(${tgt} PUBLIC ARDAL_HAVE_AVX512VPOPCNTDQ_KERNELS=1)
+      endforeach()
+    else()
+      foreach(tgt IN ITEMS ardal ardal_pack)
+        target_compile_definitions(${tgt} PUBLIC ARDAL_HAVE_AVX512VPOPCNTDQ_KERNELS=0)
       endforeach()
     endif()
   endif()
 
+  ## optional: builds with -march=native
   if(ARDAL_MARCH_NATIVE AND NOT MSVC)
     foreach(tgt IN ITEMS ardal ardal_pack)
       target_compile_options(${tgt} PRIVATE
@@ -104,6 +130,15 @@ if(ARDAL_USE_SIMD)
       )
     endforeach()
   endif()
+
+else()
+  ## SIMD disabled: macros explicitly false
+  foreach(tgt IN ITEMS ardal ardal_pack)
+    target_compile_definitions(${tgt} PUBLIC
+      ARDAL_HAVE_AVX2_KERNELS=0
+      ARDAL_HAVE_AVX512VPOPCNTDQ_KERNELS=0
+    )
+  endforeach()
 endif()
 
 # ------------------------------

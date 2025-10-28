@@ -2,9 +2,11 @@
 Copyright 2025 Arthur V. Morris
 */
 #include "HybridMatrix.hpp"
+#include <algorithm>
+#include <cctype>
 #include "utils/bitops.hpp"
 #include "utils/PythonLogger.hpp"
-
+#include "utils/simd_utils.hpp"
 
 
 namespace ardal {
@@ -88,6 +90,9 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
     bit_backend = std::make_unique<BitMatrix>( flat_,
                                                rows_sp,
                                                cols_sp );
+    
+    // run SIMD diagnostics
+    simd_dispatchers::simd_diag();
 }
 
 
@@ -181,9 +186,42 @@ py::array_t<int> HybridMatrix::innerProduct( bool use_simd,
     }
 }
 
+py::array_t<double> HybridMatrix::cosineDistance( bool use_simd,
+                                                  int threads,
+                                                  const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(n_cols_bits_, density_);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        return roaring_backend->cosineDistance(threads);
+    }
+    return bit_backend->cosineDistanceAll(use_simd, threads);
+}
+
+
+py::array_t<double> HybridMatrix::cosineDistance_subset( const std::vector<size_t> row_indices,
+                                                         const std::vector<size_t> col_indices,
+                                                         bool use_simd,
+                                                         int threads,
+                                                         const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(col_indices.size(), density_);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        return roaring_backend->cosineDistance_subset(row_indices, col_indices, threads);
+    }
+    return bit_backend->cosineDistance_subset(row_indices, col_indices, use_simd, threads);
+}
+
 
 py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
-                                                  int epsilon,
+                                                  uint32_t epsilon,
                                                   bool use_simd,
                                                   int threads,
                                                   const std::string& backend ) const {
@@ -202,7 +240,7 @@ py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
 
 
 py::list HybridMatrix::innerProductNeighbourhood( size_t row,
-                                                  int ip_epsilon,
+                                                  uint32_t ip_epsilon,
                                                   bool use_simd,
                                                   const std::string& backend ) const {
     BackendType chosen_backend = parse_backend(backend);
@@ -216,6 +254,105 @@ py::list HybridMatrix::innerProductNeighbourhood( size_t row,
     } else {
         return bit_backend->innerProductNeighbourhood(row, ip_epsilon, use_simd);
     }
+}
+
+
+py::list HybridMatrix::knn_hamming( size_t row,
+                                    uint32_t k,
+                                    bool use_simd,
+                                    int threads,
+                                    const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(n_cols_bits_, density_);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        return roaring_backend->knn_hamming(row, static_cast<int>(k), threads);
+    } else {
+        return bit_backend->knn_hamming(row, static_cast<int>(k), use_simd, threads);
+    }
+}
+
+
+py::list HybridMatrix::knn_inner_product( size_t row,
+                                          uint32_t k,
+                                          bool use_simd,
+                                          int threads,
+                                          const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(n_cols_bits_, density_);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        return roaring_backend->knn_inner_product(row, static_cast<int>(k), threads);
+    } else {
+        return bit_backend->knn_inner_product(row, static_cast<int>(k), use_simd, threads);
+    }
+}
+
+
+py::list HybridMatrix::knn_jaccard( size_t row,
+                                    uint32_t k,
+                                    bool use_simd,
+                                    int threads,
+                                    const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(n_cols_bits_, density_);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        return roaring_backend->knn_jaccard(row, static_cast<int>(k), threads);
+    } else {
+        return bit_backend->knn_jaccard(row, static_cast<int>(k), use_simd, threads);
+    }
+}
+
+
+py::list HybridMatrix::knn_cosine( size_t row,
+                                   uint32_t k,
+                                   bool use_simd,
+                                   int threads,
+                                   const std::string& backend ) const {
+    BackendType chosen_backend = parse_backend(backend);
+    if (chosen_backend == BackendType::AUTO) {
+        chosen_backend = selectBackend(n_cols_bits_, density_);
+    }
+    if (chosen_backend == BackendType::ROARING) {
+        if (!roaring_enabled)
+            throw std::runtime_error("Roaring backend not available.");
+        return roaring_backend->knn_cosine(row, static_cast<int>(k), threads);
+    } else {
+        return bit_backend->knn_cosine(row, static_cast<int>(k), use_simd, threads);
+    }
+}
+
+
+py::list HybridMatrix::knn( size_t row,
+                            uint32_t k,
+                            const std::string& metric,
+                            bool use_simd,
+                            int threads,
+                            const std::string& backend ) const {
+    std::string metric_lc = metric;
+    std::transform(metric_lc.begin(), metric_lc.end(), metric_lc.begin(),
+                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+
+    if (metric_lc == "hamming") {
+        return knn_hamming(row, k, use_simd, threads, backend);
+    } else if (metric_lc == "inner_product" || metric_lc == "innerproduct") {
+        return knn_inner_product(row, k, use_simd, threads, backend);
+    } else if (metric_lc == "jaccard") {
+        return knn_jaccard(row, k, use_simd, threads, backend);
+    } else if (metric_lc == "cosine") {
+        return knn_cosine(row, k, use_simd, threads, backend);
+    }
+    throw std::invalid_argument("Unsupported metric for knn: " + metric);
 }
 
 
@@ -330,6 +467,12 @@ py::array_t<size_t> HybridMatrix::getSubsetPackedMatrix( const std::vector<size_
                                                          const std::vector<size_t>& col_indices,
                                                          const int threads ) const {
     return bit_backend->getSubsetMatrix(row_indices, col_indices, threads);
+}
+
+
+py::array_t<uint64_t> HybridMatrix::getSubsetPackedMatrix_rows( const std::vector<size_t>& row_indices, 
+                                                                const int threads ) const {
+    return bit_backend->getSubsetMatrix_rows(row_indices, threads);
 }
 
 } // namespace ardal

@@ -4,8 +4,12 @@ Copyright 2025 Arthur V. Morris
 */
 #pragma once
 
+#include <algorithm>
+#include <atomic>
 #include <vector>
 #include <unordered_map>
+#include <queue>
+#include <limits>
 #include <utility>
 #include <cstdint>
 #include <set>
@@ -55,6 +59,12 @@ public:
     py::array_t<int> innerProduct( bool fill_cache = false,
                                    bool use_simd = true,
                                    int threads = 1 ) const;
+    py::array_t<double> cosineDistanceAll( bool use_simd = true,
+                                           int threads = 1 ) const;
+    py::array_t<double> cosineDistance_subset( const std::vector<size_t>& row_indices,
+                                               const std::vector<size_t>& col_indices,
+                                               bool use_simd = true,
+                                               int threads = 1 ) const;
  
     // neighbourhood functions
     py::array_t<int64_t> neighbourhood( size_t row_idx,
@@ -64,6 +74,23 @@ public:
     py::list innerProductNeighbourhood( size_t row_idx,
                                         int ip_epsilon,
                                         bool use_simd = true ) const;
+    py::list knn_hamming( size_t row_idx,
+                          int k,
+                          bool use_simd = true,
+                          int threads = 1 ) const;
+    py::list knn_inner_product( size_t row_idx,
+                                int k,
+                                bool use_simd = true,
+                                int threads = 1 ) const;
+    py::list knn_jaccard( size_t row_idx,
+                          int k,
+                          bool use_simd = true,
+                          int threads = 1 ) const;
+    py::list knn_cosine( size_t row_idx,
+                         int k,
+                         bool use_simd = true,
+                         int threads = 1 ) const;
+
 
     // set operation functions
     std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices,
@@ -90,6 +117,8 @@ public:
     py::array_t<uint64_t> getSubsetMatrix( const std::vector<size_t>& row_indices, 
                                            const std::vector<size_t>& col_indices,
                                            const int threads = 1 ) const;
+    py::array_t<uint64_t> getSubsetMatrix_rows( const std::vector<size_t>& row_indices, 
+                                                const int threads ) const;
     py::array_t<uint64_t> getPackedMatrix( void ) const;
 
 private:

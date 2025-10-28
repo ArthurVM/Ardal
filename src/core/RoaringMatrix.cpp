@@ -3,6 +3,8 @@ Copyright 2025 Arthur V. Morris
 */
 #include "RoaringMatrix.hpp"
 #include "utils/PythonLogger.hpp"
+#include <queue>
+#include <limits>
 
 namespace py = pybind11;
 namespace ardal {
@@ -50,7 +52,6 @@ RoaringMatrix::RoaringMatrix( ardal::detail::FlatMatrix matrix_,
     // This is a temporary fixu until I can work out what is going wrong there.
     // row_masses_.assign(n_rows_, 0);
     // col_masses_.assign(n_cols_bits_, 0);
-    ardal::utils::log_info("GOT HERE 4.");
     ardal::utils::log_info("Constructing Roaring bit-map.");
     // populate roaring bitmaps
     for (size_t i = 0; i < n_rows_; ++i) {
@@ -276,17 +277,27 @@ py::array_t<double> RoaringMatrix::jaccard( int threads ) const {
 double RoaringMatrix::jaccardIndex( size_t i, size_t j ) const {
     const auto& row_masses = *row_masses_;
 
-    const double intersection_size = (roaring_bitmap_[i] & roaring_bitmap_[j]).cardinality();
-    // const double union_size = row_masses_[i] + row_masses_[j] - intersection_size;
-    // const double union_size = (roaring_bitmap_[i] | roaring_bitmap_[j]).cardinality();
-    const double union_size = row_masses[i] + row_masses[j] - intersection_size;
+    // native roaring and_cardinality function
+    const uint64_t inter = roaring_bitmap_[i].and_cardinality(roaring_bitmap_[j]);
 
-    if (union_size == 0) {
-        // if union is 0, both sets are empty and thus identical. Distance is 0.
-        return 0.0;
-    }
-    const double jaccard_index = intersection_size / union_size;
-    return jaccard_index;
+    // union
+    const uint64_t uni = row_masses[i] + row_masses[j] - inter;
+
+    if (uni == 0) return 1.0;
+
+    return static_cast<double>(inter) / static_cast<double>(uni);
+
+    // const double intersection_size = (roaring_bitmap_[i] & roaring_bitmap_[j]).cardinality();
+    // // const double union_size = row_masses_[i] + row_masses_[j] - intersection_size;
+    // // const double union_size = (roaring_bitmap_[i] | roaring_bitmap_[j]).cardinality();
+    // const double union_size = row_masses[i] + row_masses[j] - intersection_size;
+
+    // if (union_size == 0) {
+    //     // if union is 0, both sets are empty and thus identical. Distance is 0.
+    //     return 0.0;
+    // }
+    // const double jaccard_index = intersection_size / union_size;
+    // return jaccard_index;
 }
 
 
@@ -401,6 +412,146 @@ py::array_t<int64_t> RoaringMatrix::neighbourhood( size_t row_idx, int epsilon, 
 
 
 /****************************************************************************************************
+ * ardal::RoaringMatrix::cosineDistance
+ *
+ * Compute the condensed cosine distance matrix using roaring bitmaps.
+ ****************************************************************************************************/
+py::array_t<double> RoaringMatrix::cosineDistance( int threads ) const {
+    if (threads <= 0) {
+        throw std::runtime_error("Thread count must be positive.");
+    }
+    if (n_rows_ <= 1) {
+        return py::array_t<double>(static_cast<py::ssize_t>(0));
+    }
+
+    const auto& row_masses = *row_masses_;
+    std::vector<double> norms(n_rows_);
+    for (size_t i = 0; i < n_rows_; ++i) {
+        const int mass = row_masses[i];
+        norms[i] = mass > 0 ? std::sqrt(static_cast<double>(mass)) : 0.0;
+    }
+
+    const size_t total_pairs = n_rows_ * (n_rows_ - 1) / 2;
+    py::array_t<double> dist_condensed(static_cast<py::ssize_t>(total_pairs));
+    double* dist_ptr = dist_condensed.mutable_data();
+
+    {
+        py::gil_scoped_release release;
+        #pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+        for (size_t i = 0; i < n_rows_; ++i) {
+            const double norm_i = norms[i];
+            const size_t idx_base = (i * (2 * n_rows_ - i - 1)) / 2;
+            const auto& bitmap_i = roaring_bitmap_[i];
+
+            for (size_t j = i + 1; j < n_rows_; ++j) {
+                const double norm_j = norms[j];
+                const double denom = norm_i * norm_j;
+
+                double distance;
+                if (denom == 0.0) {
+                    distance = (norm_i == 0.0 && norm_j == 0.0) ? 0.0 : 1.0;
+                } else {
+                    const uint64_t dot = bitmap_i.and_cardinality(roaring_bitmap_[j]);
+                    double cosine = static_cast<double>(dot) / denom;
+                    if (cosine > 1.0) cosine = 1.0;
+                    else if (cosine < -1.0) cosine = -1.0;
+                    distance = 1.0 - cosine;
+                }
+
+                dist_ptr[idx_base + (j - i - 1)] = distance;
+            }
+        }
+    }
+
+    return dist_condensed;
+}
+
+
+/****************************************************************************************************
+ * ardal::RoaringMatrix::cosineDistance_subset
+ *
+ * Compute the condensed cosine distance matrix on a subset of rows/columns.
+ ****************************************************************************************************/
+py::array_t<double> RoaringMatrix::cosineDistance_subset( const std::vector<size_t>& row_indices,
+                                                          const std::vector<size_t>& col_indices,
+                                                          int threads ) const {
+    if (threads <= 0) {
+        throw std::runtime_error("Thread count must be positive.");
+    }
+
+    const size_t submn_rows_ = row_indices.size();
+    if (submn_rows_ <= 1) {
+        return py::array_t<double>(static_cast<py::ssize_t>(0));
+    }
+
+    const size_t submn_cols_ = col_indices.size();
+    const size_t total_pairs = submn_rows_ * (submn_rows_ - 1) / 2;
+    py::array_t<double> dist_condensed(static_cast<py::ssize_t>(total_pairs));
+    double* dist_ptr = dist_condensed.mutable_data();
+
+    if (submn_cols_ == 0) {
+        std::fill(dist_ptr, dist_ptr + total_pairs, 0.0);
+        return dist_condensed;
+    }
+
+    roaring::Roaring col_mask_bitmap;
+    for (size_t col_idx : col_indices) {
+        if (col_idx >= n_cols_bits_) {
+            throw std::out_of_range("Column index in col_indices is out of bounds.");
+        }
+        col_mask_bitmap.add(static_cast<uint32_t>(col_idx));
+    }
+
+    std::vector<roaring::Roaring> submatrix;
+    submatrix.reserve(submn_rows_);
+    for (size_t row_idx : row_indices) {
+        if (row_idx >= n_rows_) {
+            throw std::out_of_range("Row index in row_indices is out of bounds.");
+        }
+        roaring::Roaring masked = roaring_bitmap_[row_idx];
+        masked &= col_mask_bitmap;
+        submatrix.emplace_back(std::move(masked));
+    }
+
+    std::vector<double> norms(submn_rows_, 0.0);
+    for (size_t i = 0; i < submn_rows_; ++i) {
+        uint64_t mass = submatrix[i].cardinality();
+        norms[i] = mass > 0 ? std::sqrt(static_cast<double>(mass)) : 0.0;
+    }
+
+    {
+        py::gil_scoped_release release;
+        #pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+        for (size_t i = 0; i < submn_rows_; ++i) {
+            const double norm_i = norms[i];
+            const size_t idx_base = (i * (2 * submn_rows_ - i - 1)) / 2;
+            const auto& bitmap_i = submatrix[i];
+
+            for (size_t j = i + 1; j < submn_rows_; ++j) {
+                const double norm_j = norms[j];
+                const double denom = norm_i * norm_j;
+
+                double distance;
+                if (denom == 0.0) {
+                    distance = (norm_i == 0.0 && norm_j == 0.0) ? 0.0 : 1.0;
+                } else {
+                    const uint64_t dot = bitmap_i.and_cardinality(submatrix[j]);
+                    double cosine = static_cast<double>(dot) / denom;
+                    if (cosine > 1.0) cosine = 1.0;
+                    else if (cosine < -1.0) cosine = -1.0;
+                    distance = 1.0 - cosine;
+                }
+
+                dist_ptr[idx_base + (j - i - 1)] = distance;
+            }
+        }
+    }
+
+    return dist_condensed;
+}
+
+
+/****************************************************************************************************
  * ardal::RoaringMatrix::innerProduct
  *
  * Calculate the inner product between all pairs of rows using Roaring bitmaps.
@@ -506,6 +657,435 @@ py::list RoaringMatrix::innerProductNeighbourhood( size_t row_idx, int ip_epsilo
         }
     }
     return ipe_n;
+}
+
+
+py::list RoaringMatrix::knn_hamming( size_t row_idx, int k, int threads ) const {
+    struct Neighbor {
+        uint32_t id;
+        uint32_t dist;
+    };
+    struct ByMaxDistance {
+        bool operator()(const Neighbor& a, const Neighbor& b) const noexcept {
+            if (a.dist == b.dist) return a.id < b.id;
+            return a.dist < b.dist;
+        }
+    };
+    auto asc_dist_id = [](const Neighbor& a, const Neighbor& b) noexcept {
+        return (a.dist < b.dist) || (a.dist == b.dist && a.id < b.id);
+    };
+
+    const size_t n = n_rows_;
+    if (row_idx >= n || n == 0 || k <= 0) {
+        return py::list();
+    }
+    const uint32_t k_eff = std::min<uint32_t>(static_cast<uint32_t>(k), n > 1 ? uint32_t(n - 1) : 0);
+    if (k_eff == 0) {
+        return py::list();
+    }
+
+    ardal::utils::log_info("Running RoaringMatrix::knn_hamming.");
+
+    std::vector<Neighbor> final_neighbors;
+    {
+        py::gil_scoped_release release;
+
+        const int T = std::max(1, threads);
+        std::vector<std::vector<Neighbor>> buckets(T);
+
+#if defined(_OPENMP)
+        #pragma omp parallel num_threads(T)
+#endif
+        {
+            std::priority_queue<Neighbor, std::vector<Neighbor>, ByMaxDistance> heap;
+
+#if defined(_OPENMP)
+            #pragma omp for schedule(static)
+#endif
+            for (uint32_t j = 0; j < n; ++j) {
+                if (j == row_idx) continue;
+
+                const uint32_t dist = hammingDistance(row_idx, j);
+
+                if (heap.size() < k_eff) {
+                    heap.push(Neighbor{j, dist});
+                } else {
+                    const Neighbor& top = heap.top();
+                    if (dist < top.dist || (dist == top.dist && j < top.id)) {
+                        heap.pop();
+                        heap.push(Neighbor{j, dist});
+                    }
+                }
+            }
+
+            std::vector<Neighbor> local;
+            local.reserve(heap.size());
+            while (!heap.empty()) {
+                local.push_back(heap.top());
+                heap.pop();
+            }
+            std::sort(local.begin(), local.end(), asc_dist_id);
+
+#if defined(_OPENMP)
+            const int tid = omp_get_thread_num();
+#else
+            const int tid = 0;
+#endif
+            buckets[tid] = std::move(local);
+        }
+
+        size_t total = 0;
+        for (const auto& v : buckets) total += v.size();
+        std::vector<Neighbor> all;
+        all.reserve(total);
+        for (auto& v : buckets) {
+            all.insert(all.end(), v.begin(), v.end());
+        }
+
+        if (all.size() > k_eff) {
+            std::nth_element(all.begin(), all.begin() + k_eff, all.end(), asc_dist_id);
+            all.resize(k_eff);
+        }
+        std::sort(all.begin(), all.end(), asc_dist_id);
+        final_neighbors = std::move(all);
+    }
+
+    py::list result;
+    for (const auto& nb : final_neighbors) {
+        result.append(py::make_tuple(static_cast<int64_t>(nb.id), static_cast<int64_t>(nb.dist)));
+    }
+    return result;
+}
+
+
+py::list RoaringMatrix::knn_inner_product( size_t row_idx, int k, int threads ) const {
+    struct Candidate {
+        uint32_t id;
+        uint32_t score;
+    };
+    struct MinScore {
+        bool operator()(const Candidate& a, const Candidate& b) const noexcept {
+            if (a.score == b.score) return a.id > b.id;
+            return a.score > b.score;
+        }
+    };
+    struct DescScore {
+        bool operator()(const Candidate& a, const Candidate& b) const noexcept {
+            if (a.score == b.score) return a.id < b.id;
+            return a.score > b.score;
+        }
+    };
+
+    const size_t n = n_rows_;
+    if (row_idx >= n || n == 0 || k <= 0) {
+        return py::list();
+    }
+    const uint32_t k_eff = std::min<uint32_t>(static_cast<uint32_t>(k), n > 1 ? uint32_t(n - 1) : 0);
+    if (k_eff == 0) {
+        return py::list();
+    }
+
+    ardal::utils::log_info("Running RoaringMatrix::knn_inner_product.");
+
+    std::vector<Candidate> final_candidates;
+    {
+        py::gil_scoped_release release;
+
+        const int T = std::max(1, threads);
+        std::vector<std::vector<Candidate>> buckets(T);
+
+#if defined(_OPENMP)
+        #pragma omp parallel num_threads(T)
+#endif
+        {
+            std::priority_queue<Candidate, std::vector<Candidate>, MinScore> heap;
+
+#if defined(_OPENMP)
+            #pragma omp for schedule(static)
+#endif
+            for (uint32_t j = 0; j < n; ++j) {
+                if (j == row_idx) continue;
+
+                const uint32_t score = innerProductRowwise(row_idx, j);
+
+                if (heap.size() < k_eff) {
+                    heap.push(Candidate{j, score});
+                } else {
+                    const Candidate& top = heap.top();
+                    if (score > top.score || (score == top.score && j < top.id)) {
+                        heap.pop();
+                        heap.push(Candidate{j, score});
+                    }
+                }
+            }
+
+            std::vector<Candidate> local;
+            local.reserve(heap.size());
+            while (!heap.empty()) {
+                local.push_back(heap.top());
+                heap.pop();
+            }
+            std::sort(local.begin(), local.end(), DescScore{});
+
+#if defined(_OPENMP)
+            const int tid = omp_get_thread_num();
+#else
+            const int tid = 0;
+#endif
+            buckets[tid] = std::move(local);
+        }
+
+        size_t total = 0;
+        for (const auto& v : buckets) total += v.size();
+        std::vector<Candidate> all;
+        all.reserve(total);
+        for (auto& v : buckets) {
+            all.insert(all.end(), v.begin(), v.end());
+        }
+
+        DescScore desc;
+        if (all.size() > k_eff) {
+            std::nth_element(all.begin(), all.begin() + k_eff, all.end(), desc);
+            all.resize(k_eff);
+        }
+        std::sort(all.begin(), all.end(), desc);
+        final_candidates = std::move(all);
+    }
+
+    py::list result;
+    for (const auto& cand : final_candidates) {
+        result.append(py::make_tuple(static_cast<int64_t>(cand.id), static_cast<int64_t>(cand.score)));
+    }
+    return result;
+}
+
+
+py::list RoaringMatrix::knn_jaccard( size_t row_idx, int k, int threads ) const {
+    struct Candidate {
+        uint32_t id;
+        double score;
+    };
+    struct MinScore {
+        bool operator()(const Candidate& a, const Candidate& b) const noexcept {
+            if (a.score == b.score) return a.id > b.id;
+            return a.score > b.score;
+        }
+    };
+    struct DescScore {
+        bool operator()(const Candidate& a, const Candidate& b) const noexcept {
+            if (a.score == b.score) return a.id < b.id;
+            return a.score > b.score;
+        }
+    };
+
+    const size_t n = n_rows_;
+    if (row_idx >= n || n == 0 || k <= 0) {
+        return py::list();
+    }
+    const uint32_t k_eff = std::min<uint32_t>(static_cast<uint32_t>(k), n > 1 ? uint32_t(n - 1) : 0);
+    if (k_eff == 0) {
+        return py::list();
+    }
+
+    ardal::utils::log_info("Running RoaringMatrix::knn_jaccard.");
+
+    const uint32_t mass_query = static_cast<uint32_t>((*row_masses_)[row_idx]);
+
+    std::vector<Candidate> final_candidates;
+    {
+        py::gil_scoped_release release;
+
+        const int T = std::max(1, threads);
+        std::vector<std::vector<Candidate>> buckets(T);
+
+#if defined(_OPENMP)
+        #pragma omp parallel num_threads(T)
+#endif
+        {
+            std::priority_queue<Candidate, std::vector<Candidate>, MinScore> heap;
+
+#if defined(_OPENMP)
+            #pragma omp for schedule(static)
+#endif
+            for (uint32_t j = 0; j < n; ++j) {
+                if (j == row_idx) continue;
+
+                const uint32_t intersection = innerProductRowwise(row_idx, j);
+                const uint32_t mass_other = static_cast<uint32_t>((*row_masses_)[j]);
+                const uint32_t union_cnt = mass_query + mass_other - intersection;
+
+                double score;
+                if (union_cnt == 0) {
+                    score = (mass_query == 0 && mass_other == 0) ? 1.0 : 0.0;
+                } else {
+                    score = static_cast<double>(intersection) / static_cast<double>(union_cnt);
+                }
+
+                if (heap.size() < k_eff) {
+                    heap.push(Candidate{j, score});
+                } else {
+                    const Candidate& top = heap.top();
+                    if (score > top.score || (score == top.score && j < top.id)) {
+                        heap.pop();
+                        heap.push(Candidate{j, score});
+                    }
+                }
+            }
+
+            std::vector<Candidate> local;
+            local.reserve(heap.size());
+            while (!heap.empty()) {
+                local.push_back(heap.top());
+                heap.pop();
+            }
+            std::sort(local.begin(), local.end(), DescScore{});
+
+#if defined(_OPENMP)
+            const int tid = omp_get_thread_num();
+#else
+            const int tid = 0;
+#endif
+            buckets[tid] = std::move(local);
+        }
+
+        size_t total = 0;
+        for (const auto& v : buckets) total += v.size();
+        std::vector<Candidate> all;
+        all.reserve(total);
+        for (auto& v : buckets) {
+            all.insert(all.end(), v.begin(), v.end());
+        }
+
+        DescScore desc;
+        if (all.size() > k_eff) {
+            std::nth_element(all.begin(), all.begin() + k_eff, all.end(), desc);
+            all.resize(k_eff);
+        }
+        std::sort(all.begin(), all.end(), desc);
+        final_candidates = std::move(all);
+    }
+
+    py::list result;
+    for (const auto& cand : final_candidates) {
+        result.append(py::make_tuple(static_cast<int64_t>(cand.id), cand.score));
+    }
+    return result;
+}
+
+
+py::list RoaringMatrix::knn_cosine( size_t row_idx, int k, int threads ) const {
+    struct Candidate {
+        uint32_t id;
+        double score;
+    };
+    struct MinScore {
+        bool operator()(const Candidate& a, const Candidate& b) const noexcept {
+            if (a.score == b.score) return a.id > b.id;
+            return a.score > b.score;
+        }
+    };
+    struct DescScore {
+        bool operator()(const Candidate& a, const Candidate& b) const noexcept {
+            if (a.score == b.score) return a.id < b.id;
+            return a.score > b.score;
+        }
+    };
+
+    const size_t n = n_rows_;
+    if (row_idx >= n || n == 0 || k <= 0) {
+        return py::list();
+    }
+    const uint32_t k_eff = std::min<uint32_t>(static_cast<uint32_t>(k), n > 1 ? uint32_t(n - 1) : 0);
+    if (k_eff == 0) {
+        return py::list();
+    }
+
+    ardal::utils::log_info("Running RoaringMatrix::knn_cosine.");
+
+    const uint32_t mass_query = static_cast<uint32_t>((*row_masses_)[row_idx]);
+    const double norm_query = mass_query > 0 ? std::sqrt(static_cast<double>(mass_query)) : 0.0;
+
+    std::vector<Candidate> final_candidates;
+    {
+        py::gil_scoped_release release;
+
+        const int T = std::max(1, threads);
+        std::vector<std::vector<Candidate>> buckets(T);
+
+#if defined(_OPENMP)
+        #pragma omp parallel num_threads(T)
+#endif
+        {
+            std::priority_queue<Candidate, std::vector<Candidate>, MinScore> heap;
+
+#if defined(_OPENMP)
+            #pragma omp for schedule(static)
+#endif
+            for (uint32_t j = 0; j < n; ++j) {
+                if (j == row_idx) continue;
+
+                const uint32_t intersection = innerProductRowwise(row_idx, j);
+                const uint32_t mass_other = static_cast<uint32_t>((*row_masses_)[j]);
+                const double norm_other = mass_other > 0 ? std::sqrt(static_cast<double>(mass_other)) : 0.0;
+                const double denom = norm_query * norm_other;
+
+                double score = 0.0;
+                if (denom > 0.0) {
+                    score = static_cast<double>(intersection) / denom;
+                    if (score > 1.0) score = 1.0;
+                } else if (norm_query == 0.0 && norm_other == 0.0) {
+                    score = 0.0;
+                }
+
+                if (heap.size() < k_eff) {
+                    heap.push(Candidate{j, score});
+                } else {
+                    const Candidate& top = heap.top();
+                    if (score > top.score || (score == top.score && j < top.id)) {
+                        heap.pop();
+                        heap.push(Candidate{j, score});
+                    }
+                }
+            }
+
+            std::vector<Candidate> local;
+            local.reserve(heap.size());
+            while (!heap.empty()) {
+                local.push_back(heap.top());
+                heap.pop();
+            }
+            std::sort(local.begin(), local.end(), DescScore{});
+
+#if defined(_OPENMP)
+            const int tid = omp_get_thread_num();
+#else
+            const int tid = 0;
+#endif
+            buckets[tid] = std::move(local);
+        }
+
+        size_t total = 0;
+        for (const auto& v : buckets) total += v.size();
+        std::vector<Candidate> all;
+        all.reserve(total);
+        for (auto& v : buckets) {
+            all.insert(all.end(), v.begin(), v.end());
+        }
+
+        DescScore desc;
+        if (all.size() > k_eff) {
+            std::nth_element(all.begin(), all.begin() + k_eff, all.end(), desc);
+            all.resize(k_eff);
+        }
+        std::sort(all.begin(), all.end(), desc);
+        final_candidates = std::move(all);
+    }
+
+    py::list result;
+    for (const auto& cand : final_candidates) {
+        result.append(py::make_tuple(static_cast<int64_t>(cand.id), cand.score));
+    }
+    return result;
 }
 
 
@@ -743,6 +1323,7 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
                 // ss << "col " << i;
                 // ardal::utils::log_info(static_cast<string>(ss.str()));
 
+                // local_map[i] = std::move(cooccurring_partners);
                 if (!cooccurring_partners.empty()) {
                     local_map[i] = std::move(cooccurring_partners);
                 }
@@ -845,6 +1426,8 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
                         cooccurring_partners.push_back(j);
                     }
                 }
+
+                // local_map[i] = std::move(cooccurring_partners);
                 if (!cooccurring_partners.empty()) {
                     local_map[i] = std::move(cooccurring_partners);
                 }

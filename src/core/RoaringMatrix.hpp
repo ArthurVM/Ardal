@@ -10,6 +10,8 @@ Copyright 2025 Arthur V. Morris
 #include <utility>
 #include <cstdint>
 #include <set>
+#include <queue>
+#include <limits>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -19,6 +21,7 @@ Copyright 2025 Arthur V. Morris
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <algorithm>
 #include "roaring/roaring.hh"
 #include "detail/flat_matrix.hpp"
 #include "utils/bitops.hpp"
@@ -41,10 +44,18 @@ public:
                                           int threads = 1 ) const;
     py::array_t<double> jaccard( int threads = 1 ) const;
     py::array_t<int> innerProduct( int threads = 1 ) const;
+    py::array_t<double> cosineDistance( int threads = 1 ) const;
+    py::array_t<double> cosineDistance_subset( const std::vector<size_t>& row_indices,
+                                               const std::vector<size_t>& col_indices,
+                                               int threads = 1 ) const;
  
     // neighbourhood functions
     py::array_t<int64_t> neighbourhood( size_t row_idx, int epsilon, int threads = 1 ) const;
     py::list innerProductNeighbourhood( size_t row_idx, int ip_epsilon, int threads = 1 ) const;
+    py::list knn_hamming( size_t row_idx, int k, int threads = 1 ) const;
+    py::list knn_inner_product( size_t row_idx, int k, int threads = 1 ) const;
+    py::list knn_jaccard( size_t row_idx, int k, int threads = 1 ) const;
+    py::list knn_cosine( size_t row_idx, int k, int threads = 1 ) const;
 
     // set operation functions
     std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices ) const;

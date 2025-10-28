@@ -3,6 +3,7 @@ Copyright 2025 Arthur V. Morris
 */
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <string>
 #include "../core/BitMatrix.hpp"
 #include "../core/HybridMatrix.hpp"
 #include "../utils/Logger.hpp"
@@ -44,6 +45,18 @@ PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
             py::arg("threads") = 1,
             py::arg("backend") = "auto")
 
+        .def("cosineDistance", &ardal::HybridMatrix::cosineDistance,
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
+            py::arg("backend") = "auto")
+
+        .def("cosineDistance_subset", &ardal::HybridMatrix::cosineDistance_subset,
+            py::arg("row_indices"),
+            py::arg("col_indices"),
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
+            py::arg("backend") = "auto")
+
         .def("neighbourhood", &ardal::HybridMatrix::neighbourhood,
             py::arg("row_idx"),
             py::arg("epsilon"),
@@ -55,6 +68,42 @@ PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
             py::arg("row_idx"),
             py::arg("ip_epsilon"),
             py::arg("use_simd") = true,
+            py::arg("backend") = "auto")
+
+        .def("knn_hamming", &ardal::HybridMatrix::knn_hamming,
+            py::arg("row_idx"),
+            py::arg("k"),
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
+            py::arg("backend") = "auto")
+
+        .def("knn_inner_product", &ardal::HybridMatrix::knn_inner_product,
+            py::arg("row_idx"),
+            py::arg("k"),
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
+            py::arg("backend") = "auto")
+
+        .def("knn_jaccard", &ardal::HybridMatrix::knn_jaccard,
+            py::arg("row_idx"),
+            py::arg("k"),
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
+            py::arg("backend") = "auto")
+
+        .def("knn_cosine", &ardal::HybridMatrix::knn_cosine,
+            py::arg("row_idx"),
+            py::arg("k"),
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
+            py::arg("backend") = "auto")
+
+        .def("knn", &ardal::HybridMatrix::knn,
+            py::arg("row_idx"),
+            py::arg("k"),
+            py::arg("metric") = std::string("hamming"),
+            py::arg("use_simd") = true,
+            py::arg("threads") = 1,
             py::arg("backend") = "auto")
 
         .def("uniqueSharedBits", &ardal::HybridMatrix::uniqueSharedBits,
@@ -108,5 +157,9 @@ PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
         .def("getSubsetPackedMatrix", &ardal::HybridMatrix::getSubsetPackedMatrix,
             py::arg("row_indices"),
             py::arg("col_indices"),
+            py::arg("threads") = 1)
+        
+        .def("getSubsetPackedMatrix_rows", &ardal::HybridMatrix::getSubsetPackedMatrix_rows,
+            py::arg("row_indices"),
             py::arg("threads") = 1);
 }

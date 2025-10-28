@@ -40,19 +40,59 @@ public:
     py::array_t<int> innerProduct( bool use_simd = true,
                                    int threads = 1,
                                    const std::string& backend = "auto" ) const;
+    
+    py::array_t<double> cosineDistance( bool use_simd = true,
+                                        int threads = 1,
+                                        const std::string& backend = "auto" ) const;
+    py::array_t<double> cosineDistance_subset( const std::vector<size_t> row_indices,
+                                               const std::vector<size_t> col_indices,
+                                               bool use_simd = true,
+                                               int threads = 1,
+                                               const std::string& backend = "auto" ) const;
  
 
     // neighbourhood functions: BitMatrix and RoaringMatrix
     py::array_t<int64_t> neighbourhood( size_t row_idx,
-                                        int epsilon,
+                                        uint32_t epsilon,
                                         bool use_simd = true,
                                         int threads = 1,
                                         const std::string& backend = "auto" )  const;
 
     py::list innerProductNeighbourhood( size_t row_idx,
-                                        int ip_epsilon,
+                                        uint32_t ip_epsilon,
                                         bool use_simd = true,
                                         const std::string& backend = "auto" ) const;
+
+    py::list knn_hamming( size_t row,
+                          uint32_t k,
+                          bool use_simd = true,
+                          int threads = 1,
+                          const std::string& backend = "auto" ) const;
+
+    py::list knn_inner_product( size_t row,
+                                uint32_t k,
+                                bool use_simd = true,
+                                int threads = 1,
+                                const std::string& backend = "auto" ) const;
+
+    py::list knn_jaccard( size_t row,
+                          uint32_t k,
+                          bool use_simd = true,
+                          int threads = 1,
+                          const std::string& backend = "auto" ) const;
+
+    py::list knn_cosine( size_t row,
+                         uint32_t k,
+                         bool use_simd = true,
+                         int threads = 1,
+                         const std::string& backend = "auto" ) const;
+
+    py::list knn( size_t row,
+                  uint32_t k,
+                  const std::string& metric,
+                  bool use_simd = true,
+                  int threads = 1,
+                  const std::string& backend = "auto" ) const;
 
 
     // set operation functions: BitMatrix
@@ -103,7 +143,9 @@ public:
     py::array_t<size_t> getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
                                                const std::vector<size_t>& col_indices,
                                                const int threads ) const;
-
+    
+    py::array_t<uint64_t> getSubsetPackedMatrix_rows( const std::vector<size_t>& row_indices, 
+                                                      const int threads ) const;
 
 private:  
     // attributes
