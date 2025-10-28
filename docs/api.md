@@ -1,184 +1,219 @@
 # Ardal API Documentation
 
-The Ardal framework provides modular, high-performance operations for binary SNP matrices and associated metadata in pathogen genomics. The following API documentation outlines the purpose and usage of each core module.
+The Ardal framework provides modular, high-performance operations for binary SNP matrices and their associated metadata. The API is organised into a lightweight Python frontend with pluggable component classes backed by C++ bindings exposed through `pybind11`. This document reflects the current (0.3.x) Python surface.
 
 ---
 
 ## `Ardal`
-**Purpose**: Main user-facing interface to the Ardal API. Constructs a wrapped `HybridMatrix` and exposes submodules for I/O, querying, statistics, and comparison.
+Main user-facing entry-point. Wraps the `_ardal.HybridMatrix` backend and exposes component classes for I/O, querying, statistics, and distance calculations.
 
-### Constructor:
+### Constructor
 ```python
-Ardal(data_source: str,
-      use_roaring_if_sparse: bool = True,
-      density_threshold: float = 0.02,
-      force_roaring: bool = False,
-      __ref: bool = False,
-      file_format: str = None)
+Ardal(
+    data_source: Union[
+        str,
+        Tuple[str, str],
+        Tuple[np.ndarray, Mapping[str, Sequence[str]]],
+        list
+    ],
+    roaring: Union[str, bool] = "auto",
+    density_threshold: float = 0.1,
+    allele_id_format: Optional[str] = None,
+    allele_coords_bed: Optional[str] = None,
+    verbosity: Union[int, str] = "error",
+    quiet_init: bool = False,
+    allele_positions: Optional[Dict[str, Tuple[str, int]]] = None,
+)
 ```
+- `data_source`: single path, pair of paths, or in-memory `[matrix, headers]`/`[headers, matrix]`.
+- `roaring`: `"auto"`, `"true"`, `"false"`, or boolean to control roaring backend provisioning.
+- `density_threshold`: heuristic for auto backend selection when `roaring="auto"`.
+- `allele_id_format` / `allele_coords_bed`: optional position decoding helpers passed to the header utilities.
+- `verbosity`: logging level (`"debug"`, `"info"`, `"warn"`, `"error"`, `"critical"`, `"silent"` or logging constant).
+- `quiet_init`: suppress the initial `matrix_stats` table.
+- `allele_positions`: optional pre-computed allele position map.
 
-### Attributes:
-- `.io`: Instance of `ArdalIO` for data export/import
-- `.get`: Instance of `ArdalGet` for matrix subsetting and introspection
-- `.allele`: Instance of `ArdalAllele` for SNP querying
-- `.compare`: Instance of `ArdalCompare` for pairwise distances and neighbourhoods
-- `.stats`: Instance of `ArdalStats` for statistical analysis
+### Attributes
+- `.io`: `ArdalIO` instance for export/import helpers.
+- `.get`: `ArdalGet` instance for subsetting, metadata, and matrix materialisation.
+- `.allele`: `ArdalAllele` instance for allele-centric queries.
+- `.distance`: `ArdalDistance` instance for pairwise distances, neighbourhoods, and k-NN.
+- `.stats`: `ArdalStats` instance for statistical summaries.
+- `.roaring`: boolean indicating whether a roaring backend was initialised.
 
-**Notes**:
-- Internally uses `HybridMatrix` from the `_ardal` C++ backend.
-- Automatically detects and constructs Roaring or bitpacked representations.
-- Performs an initial `matrixStats()` printout for user feedback.
+### Methods
+- `set_verbosity(level_param: Union[int, str]) -> None`: adjust logging level for the root logger and subordinate components.
 
 ---
 
 ## `ArdalAllele`
-**Purpose**: Provides allele-centric queries on the binary SNP matrix.
+Allele-centric utilities that operate on the binary matrix and decoded headers.
 
-### Methods:
+### Methods
+- `unique(guids: List[str], backend: str = "auto") -> Dict[str, Set[str]]`  
+  Returns alleles present in each provided GUID and absent from all others. `backend` accepts `"auto"`, `"bit"`, or `"roaring"`.
 
-#### `unique(guids: list, force_bit_backend: bool = False) -> dict`
-Find SNPs unique to each GUID (present in one, absent in all others).
-- **Input**: list of GUIDs
-- **Returns**: `{guid: set of unique SNPs}`
-- **Raises**: `ValueError` on invalid input
+- `unique_core(guids: List[str], backend: str = "auto") -> List[str]`  
+  Alleles present in **all** provided GUIDs and absent elsewhere. Logs a warning if none are found.
 
-#### `guidsWithAlleles(alleles: list, force_bit_backend: bool = False) -> set`
-Find GUIDs that contain *all* specified alleles.
-- **Input**: list/set of allele IDs
-- **Returns**: set of GUIDs
+- `guids_with_alleles(alleles: List[str], backend: str = "auto") -> List[str]`  
+  GUIDs containing every allele in `alleles`.
 
-#### `matchNames(expression: str) -> set`
-Wildcard pattern match on allele names.
-- `*` is used for globbing
+- `match_names(expression: str) -> List[str]`  
+  Wildcard (`*`) expression match against allele IDs.
+
+- `interval(...) -> List[str]`  
+  Fetch alleles that fall within user-supplied genomic intervals or BED coordinates. Supports optional `intervals`, `intervals_bed`, `allele_coords_bed`, and `allele_id_format`.
+
+- `count() -> Dict[str, int]`  
+  Per-GUID allele counts (row sums).
+
+- `get_positions() -> Dict[str, Tuple[str, int]]`  
+  Mapping of allele ID → `(chromosome, position)` derived from header metadata or supplied lookup.
 
 ---
 
-## `ArdalCompare`
-**Purpose**: Distance and neighbourhood computation.
+## `ArdalDistance`
+Pairwise distance matrices, epsilon-neighbourhoods, and k-nearest neighbour queries.
 
-### Methods:
+### Methods
+- `pairwise(...) -> Union[np.ndarray, pd.DataFrame]`  
+  ```python
+  pairwise(
+      guids: Optional[List[str]] = None,
+      alleles: Optional[List[str]] = None,
+      intervals: Optional[List] = None,
+      intervals_bed: Optional[str] = None,
+      allele_coords_bed: Optional[str] = None,
+      metric: str = "hamming",
+      use_simd: bool = True,
+      threads: int = 1,
+      backend: str = "auto",
+      allele_id_format: str = "{chr}.{start}.{ref}.{alt}",
+      return_square: bool = False,
+      as_dataframe: bool = False,
+  )
+  ```
+  Produces a condensed 1D distance vector by default, or an `n × n` array/DataFrame when `return_square=True`. Supported metrics: `"hamming"`, `"jaccard"`, `"inner_product"`, `"cosine"`. Interval filters allow region-restricted computations. Raises `ParameterError` or `MemoryError` for invalid requests.
 
-#### `pairwise(metric='hamming', use_simd=True, threads=1, force_bit_backend=False) -> pd.DataFrame`
-Calculate all-vs-all distance matrix.
-- **Metrics**: `'hamming'`, `'jaccard'`, `'inner_product'`
-- **Returns**: `pandas.DataFrame`
-- **Raises**: `MemoryError`, `ValueError`
+- `snv_neighbourhood(guid: str, n: int) -> Dict[str, int]`  
+  Experimental positional neighbourhood based on decoded allele IDs. Assumes coordinate-encoded IDs and is not production ready.
 
-#### `snvNeighbourhood(guid: str, n: int) -> dict`
-Find GUIDs within `n` differing SNP positions (by parsed string position).
-- **Warning**: Not production ready, assumes `{ref}{pos}{alt}` allele ID format
+- `neighbourhood(guid: str, n: int, use_simd: bool = True, threads: int = 1, backend: str = "auto", metric: str = "hamming") -> Dict[str, int]`  
+  Hamming or inner-product neighbourhood search up to radius `n`. Returns `{guid: distance}`.
 
-#### `neighbourhood(guid: str, n: int, use_simd=True, threads=1, force_bit_backend=False) -> dict`
-Hamming-distance neighbourhood within `n` allelic differences.
+- `knn(guid: str, k: int, use_simd: bool = True, threads: int = 1, backend: str = "auto", metric: str = "hamming") -> List[Tuple[str, float]]`  
+  k-nearest neighbours for the requested metric (`"hamming"`, `"inner_product"`, `"jaccard"`, `"cosine"`). Returns a list sorted by similarity/distance with per-neighbour scores.
 
 ---
 
 ## `ArdalGet`
-**Purpose**: Matrix subsetting, conversion, and summarisation.
+Matrix subsetting, metadata inspection, and conversion helpers.
 
-### Methods:
+### Methods
+- `subset(...) -> Union["Ardal", List[Any]]`  
+  ```python
+  subset(
+      guids: List[str] = [],
+      alleles: List[str] = [],
+      data_only: bool = False,
+      threads: int = 1,
+      child_verbosity: str = "silent",
+      child_quiet_init: bool = True,
+  )
+  ```
+  Subset by GUID and/or allele. Returns a new `Ardal` instance unless `data_only=True`, where it returns `[matrix, headers]`. Accepts packed backends and can materialise dense rows when only GUIDs are filtered.
 
-#### `subset(guid_list=[], allele_list=[]) -> list[np.ndarray, dict]`
-Subset matrix by GUID and/or allele.
-- **Returns**: `[new_matrix, new_headers]`
-- **Raises**: `ParameterError`, `InvalidGUIDQueryError`, `InvalidAlleleQueryError`
+- `matrix_stats(print_table: bool = False) -> Dict[str, Any]`  
+  Summary of counts, density, and byte sizes. Optionally prints a formatted table.
 
-#### `matrixStats(print_stats=False) -> dict`
-Return metadata and memory stats for the matrix.
+- `density() -> float`  
+  Matrix density (fraction of set bits).
 
-#### `density() -> float`
-Return sparsity ratio of the matrix.
+- `bit_matrix() -> np.ndarray`  
+  Dense uint8 representation of the bit matrix.
 
-#### `bitMatrix() -> np.ndarray`
-Return matrix as dense bit array.
+- `packed_matrix() -> np.ndarray`  
+  `<u8` bit-packed matrix (words-per-row × GUIDs).
 
-#### `roaringMatrix(decode=True) -> dict`
-Return roaring bitmap matrix.
-- **Raises**: `RoaringError` if not initialised with roaring
+- `roaring_matrix(decode: bool = True) -> Union[List[np.ndarray], Dict[str, List[str]]]`  
+  Roaring bitmap view; optionally decoded to allele IDs. Raises `RoaringError` if the roaring backend was not initialised.
 
-#### `headers() -> dict`
-Return headers (metadata) dictionary.
-
-#### `snpCount() -> dict`
-Return SNP count per GUID.
+- `headers() -> Dict[str, List[str]]`  
+  Access the GUID and allele headers.
 
 ---
 
 ## `ArdalIO`
-**Purpose**: Matrix I/O, conversion to formats.
+I/O and serialisation helpers.
 
-### Methods:
+### Methods
+- `to_dataframe() -> pd.DataFrame`  
+  Dense DataFrame with GUID rows and allele columns.
 
-#### `toDataFrame() -> pd.DataFrame`
-Convert matrix to Pandas DataFrame.
+- `to_dict(backend: str = "auto") -> Dict[str, List[str]]`  
+  Dictionary mapping GUID → allele list. Supports `"auto"`, `"bit"`, and `"roaring"` backend selection.
 
-#### `toDict(force_bit_backend=False) -> dict`
-Return dictionary `{guid: list of alleles}`
+- `write(output_prefix: str, out_directory: str = "./", format: str = "bin") -> None`  
+  Persist the matrix plus headers. `format` supports `"npy"`, `"npz"`, and `"bin"` (bit-packed). Raises `MatrixWriteError` and `ParameterError` for invalid destinations.
 
-#### `write(file_path, output_prefix, npz=False)`
-Save matrix to disk (as `.npy` or `.npz` + headers).
-- **Raises**: `MatrixWriteError`
-
-#### `makeFastas(guids=[], ref=None, allele_id_format="{ref}.{chr}.{start}.{alt}")`
-Experimental. Generate simulated FASTA per sample using SNPs.
+- `make_fastas(...)`  
+  Placeholder for FASTA generation; currently raises `NotImplementedError`.
 
 ---
 
 ## `ArdalStats`
-**Purpose**: Statistical measures on SNP distribution.
+Statistical summaries and divergence metrics.
 
-### Methods:
+### Methods
+- `allele_frequency(guids: List[str] = []) -> Dict[str, float]`  
+  Allele frequencies within the supplied GUID subset (defaults to all GUIDs).
 
-#### `af(guids=[]) -> dict`
-Compute allele frequency across provided GUIDs (or all).
+- `allele_entropy() -> Dict[str, float]`  
+  Shannon entropy for every allele.
 
-#### `alleleEntropy() -> dict`
-Shannon entropy for each allele.
+- `allele_cooc(alleles: List[str] = [], threshold: float = 0.95, threads: int = 1) -> Dict[str, List[str]]`  
+  Allele co-occurrence above `threshold`. Subset to specific alleles or compute across the entire matrix.
 
-#### `alleleCooc(allele_indices=[], threshold=0.95, threads=1) -> dict`
-Return alleles co-occurring above threshold with specified alleles (or all).
+- `allele_inform(guids: List[str], method: str = "kullbackleibler") -> Dict[str, float]`  
+  Divergence-style scores contrasting in-group vs out-group (`"kullbackleibler"`, `"jensenshannon"`, `"informationgain"`).
 
-#### `snpInform(guids, metric='kullbackleibler') -> dict`
-Score SNPs by in-group vs out-group discriminative power.
-- **Metrics**: `'kullbackleibler'`, `'jensenshannon'`, `'informationgain'`
-
-#### `testSnpAssociations(...)`
-Stub for future statistical tests (chi2, Fisher’s exact).
+- `test_associations(guids: List[str], tests: Optional[List[str]] = None) -> Dict[str, Dict[str, Dict[str, float]]]`  
+  Wrapper for chi-squared and Fisher exact tests on 2×2 allele contingency tables. Returns nested dictionaries keyed by allele → test → statistic/p-value.
 
 ---
 
 ## `ArdalParser`
-**Purpose**: Load matrix + headers from disk or memory.
+Input loader responsible for normalising dense or bit-packed sources.
 
-### Constructor:
+### Constructor
 ```python
-ArdalParser(input_data_structure, file_format=None, prefix=None)
+ArdalParser(
+    input_data_structure: Union[list, str],
+    verify_hash: bool = False,
+    is_packed_mem: bool = False,
+)
 ```
-- Supports CSV, Parquet, NPY/JSON pair, or in-memory `[np.ndarray, dict]`
 
-### Attributes:
-- `matrix`: ndarray allele matrix
-- `headers`: dict with keys `guids`, `alleles`
+### Attributes
+- `matrix`: Dense `np.ndarray` or `<u8` memory map ready for the backend.
+- `headers`: `{"guids": [...], "alleles": [...]}` dictionary.
+- `meta`: Bit-pack metadata when applicable (row/column counts, strides).
+- `file_format`: Detected source format (`"csv"`, `"parquet"`, `"npy"`, `"npz"`, `"bitpack"`, etc.).
+- `is_bitpacked`: Boolean flag indicating whether the matrix is already packed.
 
----
-
-## Utility Functions (from `utilities.py`)
-
-- `checkGUIDs(guids, headers, filter=False)`
-- `checkAlleles(alleles, headers, filter=False)`
-- `encodeGuid(guid, headers) -> int`
-- `decodeGuid(index, headers) -> str`
-- `encodeAllele(allele, headers) -> int`
-- `decodeAllele(index, headers) -> str`
-- `decodeAlleleID(allele_id, allele_id_format) -> tuple`
+Supported inputs include CSV, Parquet, NPY/JSON, NPZ/JSON, bit-packed `{headers.json, matrix.bin}` pairs, and in-memory `[matrix, headers]` combinations.
 
 ---
 
-## Notes
-- All methods assume headers contain correct `guids` and `alleles` keys.
-- BitMatrix backend is used by default unless RoaringMatrix is enabled and appropriate.
-- Roaring matrix must be explicitly enabled at object creation.
+## Backend Selection Helpers
+Most high-level methods accept a `backend` argument with values:
+- `"auto"` (default): Heuristic selection using matrix density and build-time roaring availability.
+- `"bit"`: Force the bit-packed backend.
+- `"roaring"`: Force the roaring bitmap backend (raises if unavailable).
+
+SIMD acceleration can be toggled via `use_simd` flags on distance-related calls; thread parallelism is exposed through `threads` parameters where supported.
 
 ---
 
-For advanced usage and performance tuning (e.g. SIMD, multi-threading, cache tuning), refer to the `BitMatrix` and `HybridMatrix` C++ bindings exposed in the backend.
+For additional performance tuning, consult the C++ backend headers (`BitMatrix`, `RoaringMatrix`, `HybridMatrix`) and the utilities under `ardal/utils`.
