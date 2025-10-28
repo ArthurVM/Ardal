@@ -1,7 +1,6 @@
 # Ardal: A Package for Allele Matrix Analysis
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/ArthurVM/Ardal/actions/workflows/conda.yml/badge.svg)](https://github.com/ArthurVM/Ardal/actions/workflows/conda.yml/)
 
 **Ardal** is a Python package designed for efficient analysis of allele matrices, particularly in the context of genomics and population genetics. It provides tools for calculating distances between samples, identifying core and accessory alleles, and performing other common operations on allele data. Ardal leverages a C++ backend for performance-critical operations, using `pybind11` to create seamless Python bindings.
 
@@ -51,9 +50,12 @@ Ardal requires a C++ compiler to build the C++ extension.
     This will clone the repository, navigate to the project directory, and install the package.
 
 3. **Using Conda**
+   
+   NOTE: Placeholder. Currently not in use.
+   
     ```bash
     conda build .
-    conda install /path/to/your/conda-bld/noarch/ardal-0.1.0-py_0.tar.bz2
+    conda install /path/to/conda-bld/noarch/ardal-0.1.0-py_0.tar.bz2
     ```
     This will build and install the package using conda.
 
@@ -98,6 +100,14 @@ headers_path = "/path/to/headers.json"
 matrix_path = "/path/to/matrix.npy"
 
 ard_obj = Ardal(data_source=[matrix_path, headers_path])
+```
+You may also specify verbosity level, backend selection protocol (i.e. whether to force roaring or let Ardal decide), and the format of the SNP ids for advanced functionality at object creation
+```
+ard_obj = Ardal(data_source=[headers_path, matrix_path],
+                roaring="auto",
+                allele_id_format="{chr}.{start}.{ref}.{alt}",
+                quiet_init=False,
+                verbosity="debug")
 ```
 ### Compute a Distance Matrix
 You can compute a distance matrix easily using either Hamming or Jaccard distance.
