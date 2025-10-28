@@ -17,8 +17,8 @@
 *   **Core and Accessory Allele Identification:** Determines the core (present in all samples) and accessory (present in some samples) alleles within a group of samples.
 *   **Unique Allele Identification:** Identifies alleles that are unique to a specific set of samples.
 *   **Data Input:** Supports various data formats, including:
+    *   Bitpacked binary matrices
     *   CSV
-    *   Parquet
     *   NPY/JSON pairs
     *   In-memory data structures (NumPy arrays and dictionaries)
 *   **Data Output:**
