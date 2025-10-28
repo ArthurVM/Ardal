@@ -53,7 +53,7 @@ def test_ardal_init_fail__malformed_string():
     with pytest.raises(FileNotFoundError, match=f"File does not exist: not_a_file.npy"):
         Ardal(data_source="not_a_file.npy", quiet_init=True)
         
-    with pytest.raises(UnsupportedFormatError, match="Unsupported file format: must be csv, parquet, npy, or npz"):
+    with pytest.raises(UnsupportedFormatError, match="Unsupported file extension: .txt"):
         Ardal(data_source="./data/wrong_extension.txt", quiet_init=True)
         
 
@@ -61,13 +61,13 @@ def test_ardal_init_fail__malformed_list(test_data_mem):
     with pytest.raises(MalformedInputError, match="Input list must contain two elements: matrix and headers."):
         Ardal(data_source=["too", "many", "elements"], quiet_init=True)
 
-    with pytest.raises(FileNotFoundError, match="One or more file paths do not exist: ./data/not_a_file.npy, ./data/sim_headers.json"):
+    with pytest.raises(FileNotFoundError, match="One or more file paths do not exist: data/not_a_file.npy, data/sim_headers.json"):
         Ardal(data_source=["./data/not_a_file.npy", "./data/sim_headers.json"], quiet_init=True)
         
-    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers::json, matrix::np.matrix\\] or two file paths."):
+    with pytest.raises(MalformedInputError, match="If list input, it must be \\[headers::dict, matrix::np.ndarray\\] or \\[headers.json, matrix.bin\\] or dense pairs."):
         Ardal(data_source=[1, 2], quiet_init=True)
 
-    with pytest.raises(MalformedInputError, match="If list input, must contain either \\[headers::json, matrix::np.matrix\\] or two file paths."):
+    with pytest.raises(MalformedInputError, match="If list input, it must be \\[headers::dict, matrix::np.ndarray\\] or \\[headers.json, matrix.bin\\] or dense pairs."):
         Ardal(data_source=[[], test_data_mem[1]], quiet_init=True)
 
 def test_ardal_init_fail__malformed_data(test_data_mem):
@@ -144,7 +144,7 @@ def test_roaring_flag(test_data_mem):
 ## general small tests
 def test_stats_methods(test_data_mem):
     ardal = Ardal(data_source=test_data_mem, quiet_init=True)
-    entropy = ardal.stats.alleleEntropy()
+    entropy = ardal.stats.allele_entropy()
     assert isinstance(entropy, dict)
     
 
@@ -152,13 +152,73 @@ def test_distance_pairwise(test_data_mem):
     ardal = Ardal(data_source=test_data_mem, quiet_init=True)
     df = ardal.distance.pairwise()
     assert hasattr(df, "shape")
-    
+
 
 def test_get_matrix_stats(test_data_mem):
     ardal = Ardal(data_source=test_data_mem, quiet_init=True)
     stats = ardal.get.matrix_stats()
     assert isinstance(stats, dict)
-    
+
+
+def test_cosine_distance_matrix(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    if not hasattr(ardal._hybrid_matrix, "cosineDistance"):
+        pytest.skip("cosineDistance backend not available in this build.")
+    mat = ardal._hybrid_matrix.cosineDistance(use_simd=True, threads=1, backend="bit")
+    assert mat.ndim == 1
+    dense = test_data_mem[0].astype(np.float64, copy=False)
+    dot = dense @ dense.T
+    norms = np.linalg.norm(dense, axis=1)
+    denom = norms[:, None] * norms[None, :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cosine = np.divide(dot, denom, out=np.zeros_like(dot, dtype=np.float64), where=denom > 0.0)
+    zero_mask = norms == 0.0
+    only_one_zero = np.logical_xor(zero_mask[:, None], zero_mask[None, :])
+    cosine = np.where(only_one_zero, 0.0, cosine)
+    expected = 1.0 - cosine
+    expected = np.where(np.logical_and(zero_mask[:, None], zero_mask[None, :]), 0.0, expected)
+    iu, ju = np.triu_indices(expected.shape[0], 1)
+    expected_condensed = expected[iu, ju]
+    np.testing.assert_allclose(mat, expected_condensed, rtol=1e-7, atol=1e-9)
+
+
+def test_distance_pairwise_cosine(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    if not hasattr(ardal._hybrid_matrix, "cosineDistance"):
+        pytest.skip("cosineDistance backend not available in this build.")
+    dist = ardal.distance.pairwise(metric="cosine", threads=1)
+    dense = test_data_mem[0].astype(np.float64, copy=False)
+    dot = dense @ dense.T
+    norms = np.linalg.norm(dense, axis=1)
+    denom = norms[:, None] * norms[None, :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cosine = np.divide(dot, denom, out=np.zeros_like(dot, dtype=np.float64), where=denom > 0.0)
+    zero_mask = norms == 0.0
+    only_one_zero = np.logical_xor(zero_mask[:, None], zero_mask[None, :])
+    cosine = np.where(only_one_zero, 0.0, cosine)
+    expected = 1.0 - cosine
+    expected = np.where(np.logical_and(zero_mask[:, None], zero_mask[None, :]), 0.0, expected)
+    iu, ju = np.triu_indices(expected.shape[0], 1)
+    expected_condensed = expected[iu, ju]
+    np.testing.assert_allclose(dist, expected_condensed, rtol=1e-7, atol=1e-9)
+
+
+def test_knn_metric_selection(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    if not hasattr(ardal._hybrid_matrix, "knn_hamming"):
+        pytest.skip("metric-aware knn backend not available in this build.")
+    metrics = ["hamming", "inner_product", "jaccard", "cosine"]
+    for metric in metrics:
+        neighbours = ardal.distance.knn("GUID1", 3, metric=metric, backend="bit")
+        assert len(neighbours) == 3
+
+
+def test_neighbourhood_metric_selection(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    ham = ardal.distance.neighbourhood("GUID1", 3, metric="hamming", backend="bit")
+    assert isinstance(ham, dict) and len(ham) > 0
+    ip = ardal.distance.neighbourhood("GUID1", 1, metric="inner_product", backend="bit")
+    assert isinstance(ip, dict)
 
 # def test_with_coords_bed(matrix_npy, coords_bed_file):
 #     ardal = Ardal(data_source=matrix_npy, coords_bed=coords_bed_file, quiet_init=True)

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import time
 from collections import defaultdict
-from typing import Union, List
+from typing import Union, List, Dict
 
 from ..utils.misc import *
 from ..utils.exceptions import *
@@ -50,6 +50,7 @@ class ArdalDistance:
                   ) -> Union[np.ndarray, pd.DataFrame]:
         """
         Compute pairwise distances.
+        Can be Hamming (default), Jaccard, or Inner-Product distance.
 
         Returns:
             - If return_square=False (default): 1D condensed NumPy array of length n*(n-1)//2
@@ -64,7 +65,7 @@ class ArdalDistance:
         """
         naturalsize = require_package("humanize", attr="naturalsize")
 
-        log.debug("[PAIRWISE] Starting pairwise")
+        log.info("[PAIRWISE] Starting pairwise")
 
         ## function specific checks
         self._check_pairwise_args(
@@ -109,7 +110,7 @@ class ArdalDistance:
 
         ## get interval alleles
         if intervals:
-            log.debug("[PAIRWISE] Constructing intervals")
+            log.info("[PAIRWISE] Constructing intervals")
             alleles = self._headerUtils.get_interval_alleles(
                 intervals=intervals,
                 intervals_bed=intervals_bed,
@@ -117,7 +118,7 @@ class ArdalDistance:
                 allele_id_format=allele_id_format,
             )
             local_args["alleles"] = alleles
-            log.debug("[PAIRWISE] Interval constructed.")
+            log.info("[PAIRWISE] Interval constructed.")
 
         ## ------ memory guard (based on requested output shape & real dtype) ------
         n = len(guids)
@@ -131,7 +132,7 @@ class ArdalDistance:
         natural_est = naturalsize(est_bytes, binary=True)
 
         total_memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        log.debug(
+        log.info(
             f"[PAIRWISE] Planning {n}x{n} {metric} distance matrix ({out_dtype}) with shape "
             f"{'square' if return_square else 'condensed'}, est ~{natural_est}."
         )
@@ -164,7 +165,7 @@ class ArdalDistance:
         ## construct dataframe
         ## NOTE: this could be extremely expensive for large matrices
         if as_dataframe:
-            log.debug("[PAIRWISE] Building pandas dataframe. For large N this could take some time.")
+            log.info("[PAIRWISE] Building pandas dataframe. For large N this could take some time.")
             return pd.DataFrame(mat, index=guids, columns=guids)
         return mat
 
@@ -176,6 +177,8 @@ class ArdalDistance:
             return np.float32
         elif m in ("hamming", "inner_product"):
             return np.uint32
+        elif m == "cosine":
+            return np.float64
         raise ParameterError(f"Unknown metric: {metric}")
 
 
@@ -184,7 +187,7 @@ class ArdalDistance:
         """
         Build nxn square array from condensed vector.
         """
-        log.debug("Expanding the condensed matrix.")
+        log.info("[PAIRWISE] Expanding the condensed matrix.")
         mat = np.zeros((n, n), dtype=dtype)
         iu, ju = np.triu_indices(n, 1)
         mat[iu, ju] = condensed
@@ -213,7 +216,7 @@ class ArdalDistance:
             np.ndarray: a condensed (lower triangle) distance matrix.
         """
         s = time.time()
-        log.debug(f"[PAIRWISE] Starting global {metric} distance calculations...")
+        log.info(f"[PAIRWISE] Starting global {metric} distance calculations...")
 
         if metric == "jaccard":
             dist_tri = self._matrix.jaccard(use_simd=use_simd, threads=threads, backend=backend)
@@ -221,10 +224,12 @@ class ArdalDistance:
             dist_tri = self._matrix.hamming(use_simd=use_simd, threads=threads, backend=backend)
         elif metric == "inner_product":
             dist_tri = self._matrix.innerProduct(use_simd=use_simd, threads=threads, backend=backend)
+        elif metric == "cosine":
+            dist_tri = self._matrix.cosineDistance(use_simd=use_simd, threads=threads, backend=backend)
         else:
             raise ParameterError(f"Unknown metric: {metric}")
 
-        log.debug(f"[PAIRWISE] Finished {metric} distance calculations in {time.time()-s:.3f}s.")
+        log.info(f"[PAIRWISE] Finished {metric} distance calculations in {time.time()-s:.3f}s.")
         return dist_tri  ## condensed with correct dtype from backend
 
 
@@ -254,10 +259,10 @@ class ArdalDistance:
         """
         s = time.time()
 
-        row_indices = [self._headerUtils.encode_guid(g) for g in guids]
-        col_indices = [self._headerUtils.encode_allele(a) for a in alleles]
+        row_indices = sorted([self._headerUtils.encode_guid(g) for g in guids], reverse=False)
+        col_indices = sorted([self._headerUtils.encode_allele(a) for a in alleles], reverse=False)
 
-        log.debug(
+        log.info(
             f"[PAIRWISE] Starting local {metric} on {len(col_indices)}x{len(row_indices)} subset."
         )
 
@@ -273,10 +278,14 @@ class ArdalDistance:
             dist_tri = self._matrix.innerProduct_subset(
                 row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
             )
+        elif metric == "cosine":
+            dist_tri = self._matrix.cosineDistance_subset(
+                row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
+            )
         else:
             raise ParameterError(f"Unknown metric: {metric}")
 
-        log.debug(f"[PAIRWISE] Finished local {metric} distance calculations in {time.time()-s:.3f}s.")
+        log.info(f"[PAIRWISE] Finished local {metric} distance calculations in {time.time()-s:.3f}s.")
         return dist_tri
     
     
@@ -290,7 +299,7 @@ class ArdalDistance:
                               return_square : bool = False,
                               as_dataframe : bool = False
                               ) -> None:
-        ACCEPTED_DIST_FUNCTIONS = ["jaccard", "hamming", "inner_product"]
+        ACCEPTED_DIST_FUNCTIONS = ["jaccard", "hamming", "inner_product", "cosine"]
         
         ## check the specified distance function is valid
         validate_type(metric, str, "metric")
@@ -316,7 +325,7 @@ class ArdalDistance:
         WARNING : NOT PRODUCTION READY
         assumes allele ID of form {ref_nucleotide}{pos}{alt_nucleotide} and so the pos can be indexed out with [1:-1]
         """
-        log.critical("snvNeighbourhood not production ready. May produce unstable results.")
+        log.critical("snv_neighbourhood not production ready. May produce unstable results.")
         
         validate_type(guid, str, "guid")
         validate_type(n, int, "n")
@@ -351,25 +360,141 @@ class ArdalDistance:
                        n : int,
                        use_simd : bool = True,
                        threads : int = 1,
-                       backend : str = "auto" ) -> dict:
-        """ get the allele neighbourhood of a GUID using hamming distance
+                       backend : str = "auto",
+                       metric : str = "hamming" ) -> dict:
+        """ get the allele neighbourhood of a GUID using specified metric
         """
-
         validate_type(guid, str, "guid")
         validate_type(n, int, "n")
+        validate_type(metric, str, "metric")
         if n < 0:
             raise ParameterError("n must be non-negative.")
         if n == 0:
             return {}
+        metric_lower = metric.lower()
+        acceptable_metrics = {"hamming", "inner_product", "innerproduct"}
+        if metric_lower not in acceptable_metrics:
+            raise ParameterError(f"metric '{metric}' not supported for neighbourhood. Choose from {sorted(acceptable_metrics)}.")
         
         self._headerUtils.check_guids([guid])
 
         guid_coord = self._headerUtils.encode_guid(guid)
-        ncoords = self._matrix.neighbourhood(row_idx=guid_coord,
-                                             epsilon=n,
+        if metric_lower == "hamming":
+            ncoords = self._matrix.neighbourhood(row_idx=guid_coord,
+                                                 epsilon=n,
+                                                 use_simd=use_simd,
+                                                 threads=threads,
+                                                 backend=backend)
+            neighbourhood = {self._headerUtils.decode_guid(coord) : int(dist) for coord, dist in ncoords}
+        else:
+            if not hasattr(self._matrix, "innerProductNeighbourhood"):
+                raise RuntimeError("inner_product neighbourhood requires a backend with innerProductNeighbourhood support.")
+            ncoords = self._matrix.innerProductNeighbourhood(row_idx=guid_coord,
+                                                             ip_epsilon=n,
+                                                             use_simd=use_simd,
+                                                             backend=backend)
+            neighbourhood = {self._headerUtils.decode_guid(coord) : int(dist) for coord, dist in ncoords}
+
+        return neighbourhood
+
+
+    @check_backend_argument
+    @check_thread_count
+    @check_use_simd
+    def knn( self,
+             guid : str,
+             k : int,
+             use_simd : bool = True,
+             threads : int = 1,
+             backend : str = "auto",
+             metric : str = "hamming" ) -> Dict:
+        """knn
+        Find the k nearest-neighbours
+
+        Args:
+            guid (str): _description_
+            k (int): _description_
+            use_simd (bool, optional): _description_. Defaults to True.
+            threads (int, optional): _description_. Defaults to 1.
+            backend (str, optional): _description_. Defaults to "auto".
+            metric (str, optional): similarity/distance metric ('hamming', 'inner_product',
+                'jaccard', 'cosine'). Defaults to "hamming".
+
+        Returns:
+            List: _description_
+        """
+        validate_type(guid, str, "guid")
+        validate_type(k, int, "k")
+        validate_type(metric, str, "metric")
+        if k < 0:
+            raise ParameterError("k must be non-negative.")
+        if k == 0:
+            return {}
+        metric_lower = metric.lower()
+        acceptable_metrics = {"hamming", "inner_product", "innerproduct", "jaccard", "cosine"}
+        if metric_lower not in acceptable_metrics:
+            raise ParameterError(f"metric '{metric}' not supported. Choose from {sorted(acceptable_metrics)}.")
+
+        self._headerUtils.check_guids([guid])
+
+        guid_coord = self._headerUtils.encode_guid(guid)
+
+        def _legacy_knn(include_metric: bool):  # pragma: no cover
+            try:
+                if include_metric:
+                    return self._matrix.knn(row_idx=guid_coord,
+                                             k=k,
+                                             metric=metric_lower,
                                              use_simd=use_simd,
                                              threads=threads,
                                              backend=backend)
-        neighbourhood = {self._headerUtils.decode_guid(coord) : hdist for coord, hdist in ncoords}
+                else:
+                    return self._matrix.knn(row_idx=guid_coord,
+                                             k=k,
+                                             use_simd=use_simd,
+                                             threads=threads,
+                                             backend=backend)
+            except TypeError as exc:
+                raise RuntimeError(
+                    f"knn metric '{metric_lower}' requires a rebuilt backend with metric-aware bindings."
+                ) from exc
 
-        return neighbourhood
+        if metric_lower == "hamming":
+            if hasattr(self._matrix, "knn_hamming"):
+                ncoords = self._matrix.knn_hamming(row_idx=guid_coord,
+                                                   k=k,
+                                                   use_simd=use_simd,
+                                                   threads=threads,
+                                                   backend=backend)
+            else:
+                ncoords = _legacy_knn(include_metric=False)
+        elif metric_lower in ("inner_product", "innerproduct"):
+            if hasattr(self._matrix, "knn_inner_product"):
+                ncoords = self._matrix.knn_inner_product(row_idx=guid_coord,
+                                                         k=k,
+                                                         use_simd=use_simd,
+                                                         threads=threads,
+                                                         backend=backend)
+            else:
+                ncoords = _legacy_knn(include_metric=True)
+        elif metric_lower == "jaccard":
+            if hasattr(self._matrix, "knn_jaccard"):
+                ncoords = self._matrix.knn_jaccard(row_idx=guid_coord,
+                                                   k=k,
+                                                   use_simd=use_simd,
+                                                   threads=threads,
+                                                   backend=backend)
+            else:
+                ncoords = _legacy_knn(include_metric=True)
+        else:  # cosine
+            if hasattr(self._matrix, "knn_cosine"):
+                ncoords = self._matrix.knn_cosine(row_idx=guid_coord,
+                                                  k=k,
+                                                  use_simd=use_simd,
+                                                  threads=threads,
+                                                  backend=backend)
+            else:
+                ncoords = _legacy_knn(include_metric=True)
+        neighbours = {self._headerUtils.decode_guid(coord) : dist for coord, dist in ncoords}
+
+        return neighbours

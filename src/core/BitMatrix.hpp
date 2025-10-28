@@ -4,8 +4,12 @@ Copyright 2025 Arthur V. Morris
 */
 #pragma once
 
+#include <algorithm>
+#include <atomic>
 #include <vector>
 #include <unordered_map>
+#include <queue>
+#include <limits>
 #include <utility>
 #include <cstdint>
 #include <set>
@@ -14,10 +18,18 @@ Copyright 2025 Arthur V. Morris
 #include <pybind11/stl.h>
 #include <immintrin.h>
 #include <omp.h>
+#include <chrono>
+#include <stdexcept>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include "detail/flat_matrix.hpp"
+
 
 namespace py = pybind11;
-namespace _ardal {
+namespace ardal {
 
+    
 // custom hash function for std::pair
 struct pair_hash {
     template <class T1, class T2>
@@ -32,7 +44,9 @@ struct pair_hash {
 class BitMatrix {
 public:
     // constructor: takes a NumPy matrix
-    BitMatrix( py::array_t<uint8_t> input_matrix );
+    BitMatrix( ardal::detail::FlatMatrix matrix_,
+               std::shared_ptr<const std::vector<int>> row_masses,
+               std::shared_ptr<const std::vector<int>> col_masses );
 
     // distance functions
     py::array_t<uint32_t> hamming( bool fill_cache = false,
@@ -45,6 +59,12 @@ public:
     py::array_t<int> innerProduct( bool fill_cache = false,
                                    bool use_simd = true,
                                    int threads = 1 ) const;
+    py::array_t<double> cosineDistanceAll( bool use_simd = true,
+                                           int threads = 1 ) const;
+    py::array_t<double> cosineDistance_subset( const std::vector<size_t>& row_indices,
+                                               const std::vector<size_t>& col_indices,
+                                               bool use_simd = true,
+                                               int threads = 1 ) const;
  
     // neighbourhood functions
     py::array_t<int64_t> neighbourhood( size_t row_idx,
@@ -54,6 +74,23 @@ public:
     py::list innerProductNeighbourhood( size_t row_idx,
                                         int ip_epsilon,
                                         bool use_simd = true ) const;
+    py::list knn_hamming( size_t row_idx,
+                          int k,
+                          bool use_simd = true,
+                          int threads = 1 ) const;
+    py::list knn_inner_product( size_t row_idx,
+                                int k,
+                                bool use_simd = true,
+                                int threads = 1 ) const;
+    py::list knn_jaccard( size_t row_idx,
+                          int k,
+                          bool use_simd = true,
+                          int threads = 1 ) const;
+    py::list knn_cosine( size_t row_idx,
+                         int k,
+                         bool use_simd = true,
+                         int threads = 1 ) const;
+
 
     // set operation functions
     std::vector<size_t> uniqueSharedBits( const std::vector<size_t>& row_indices,
@@ -70,9 +107,9 @@ public:
 
     // get functions
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
-    py::array_t<int> getRowMasses( void );
-    const std::vector<int>& getRowMassesVector( void );
-    py::array_t<int> getColumnMasses( void );
+    py::array_t<int> getRowMasses( void ) const;
+    const std::vector<int>& getRowMassesVector( void ) const;
+    py::array_t<int> getColumnMasses( void ) const;
     double getDensity( void ) const;
     size_t getNCols( void ) const;
     size_t getNRows( void ) const;
@@ -80,18 +117,24 @@ public:
     py::array_t<uint64_t> getSubsetMatrix( const std::vector<size_t>& row_indices, 
                                            const std::vector<size_t>& col_indices,
                                            const int threads = 1 ) const;
+    py::array_t<uint64_t> getSubsetMatrix_rows( const std::vector<size_t>& row_indices, 
+                                                const int threads ) const;
+    py::array_t<uint64_t> getPackedMatrix( void ) const;
 
 private:
     // bit-packed matrix
-    std::vector<std::vector<uint64_t>> _packed_matrix;
+    ardal::detail::FlatMatrix matrix_;                     // packed matrix
+    std::vector<const std::uint64_t*> row_ptrs_;           // row pointers
 
     // attributes
-    size_t _n_rows;                 // the number of rows (guids)
-    size_t _n_cols;                 // the number of columns (alleles)
-    size_t _packed_cols;            // the number of packed columns
-    std::vector<int> _row_masses;   // the mass of each row
-    std::vector<int> _col_masses;   // the mass of each column
-    double _density;                // the density of the matrix
+    const uint64_t* base_;                                 // pointer to the matrix base
+    const size_t n_rows_;                                  // the number of rows (guids)
+    const size_t n_cols_bits_;                             // the number of columns (alleles)
+    const size_t wpr_;                                     // the number of packed columns
+    std::shared_ptr<const std::vector<int>> row_masses_;   // the mass of each row
+    std::shared_ptr<const std::vector<int>> col_masses_;   // the mass of each column
+    double density_;                                       // the density of the matrix
+    uint64_t tail_mask_ = ~0ULL;
 
     // access functions
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
@@ -101,22 +144,6 @@ private:
                                                            const std::vector<size_t>& col_indices,
                                                            const int threads = 1 ) const;
 
-    // distance functions
-    uint32_t hammingDistance_scalar( size_t i, size_t j ) const;
-    uint32_t hammingDistance_SIMD( size_t i, size_t j ) const;
-
-    // neighbourhood functions
-    int epsilonNeighbourhood_scalar( size_t i,
-                                     size_t j,
-                                     int epsilon ) const;
-    int epsilonNeighbourhood_SIMD( size_t i,
-                                   size_t j,
-                                   int epsilon ) const;
-    int innerProduct_scalar( size_t i,
-                             size_t j ) const;
-    int innerProduct_SIMD( size_t i,
-                           size_t j ) const;
-
     // statistics helper functions
     double density( void ) const;
 
@@ -125,10 +152,20 @@ private:
 
     // internal helpers
     // bit unpacking
-    inline bool getBit( size_t row, size_t col ) const {
-        uint64_t byte = _packed_matrix[row][col / 64];
-        return (byte >> (col % 64)) & 1;
+    inline bool getBit(std::size_t row, std::size_t col) const {
+        if (row >= n_rows_ || col >= n_cols_bits_) return false;
+        const std::size_t w = col >> 6;
+        const unsigned b = static_cast<unsigned>(col & 63);
+        uint64_t word = row_ptrs_[row][w];
+        if (w + 1 == wpr_) word &= tail_mask_;
+        return (word >> b) & 1ULL;
+    }
+
+    inline uint64_t getWord(std::size_t row, std::size_t w) const {
+        uint64_t x = row_ptrs_[row][w];
+        if (w + 1 == wpr_) x &= tail_mask_;
+        return x;
     }
 };
 
-} // namespace _ardal
+} // namespace ardal

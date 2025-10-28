@@ -56,7 +56,7 @@ class ArdalAllele:
         unique_alleles = defaultdict(set)
         for guid in guids:
             guid_unique_alleles = self._matrix.uniqueSharedBits([self._headerUtils.encode_guid(guid)], 
-                                                              backend=backend)
+                                                                 backend=backend)
             unique_alleles[guid] = {self._headerUtils.decode_allele(idx) for idx in guid_unique_alleles}
         
         return unique_alleles
@@ -129,7 +129,6 @@ class ArdalAllele:
         guid_coords = [self._headerUtils.encode_guid(guid) for guid in guids]
         unique_allele_indices = self._matrix.uniqueSharedBits(guid_coords, backend=backend)
         decoded_alleles = list({self._headerUtils.decode_allele(idx) for idx in unique_allele_indices})
-        print("U", unique_allele_indices, decoded_alleles)
         
         if len(decoded_alleles) == 0:
             log.warning(f"No unique core alleles found. This is common in large databases. Consider using the stats module if you are looking for alleles which are over-represented in a set of guids.")
@@ -150,10 +149,11 @@ class ArdalAllele:
                   intervals : Union[List, None] = None,
                   intervals_bed : Union[str, None] = None,
                   allele_coords_bed : Union[str, None] = None,
-                  allele_id_format : str = "{chr}.{start}.{ref}.{alt}"
+                  allele_id_format : Union[str, None] = None
                   ) -> List:
         """ Return a list of alleles which fall within the given genomic intervals.
         """
+        print(allele_id_format)
         return self._headerUtils.get_interval_alleles(intervals=intervals,
                                                       allele_id_format=allele_id_format,
                                                       intervals_bed=intervals_bed,

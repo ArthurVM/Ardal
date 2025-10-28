@@ -43,7 +43,9 @@ def test_check_alleles_invalid(headerUtils_component):
 
 
 def test_decode_allele_position(headerUtils_component):
-    chr_, start, end, ref, alt = headerUtils_component._decode_allele_position("chr1.100.A.T")
+    allele_id_format = "{chr}.{start}.{ref}.{alt}"
+    pattern = headerUtils_component._check_allele_format_grammar(allele_id_format=allele_id_format)
+    chr_, start, end, ref, alt = headerUtils_component._decode_allele_position(allele_id="chr1.100.A.T", allele_id_format=allele_id_format, pattern=pattern)
     assert chr_ == "chr1"
     assert start == 100
     assert ref == "A"

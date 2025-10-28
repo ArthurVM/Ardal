@@ -1,0 +1,47 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.11",
+  "pybind11>=2.13",
+  "oldest-supported-numpy"
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "ardal"
+version = "0.3.0"
+description = "High-performance bitpacked and roaring backends for genomic matrices"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Arthur V. Morris", email = "ArthurVM@github.com" }]
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=2.0",
+  "pandas",
+  "scipy",
+  "pyjson",
+  "humanize",
+]
+# classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License"]
+
+[tool.scikit-build]
+build-dir = "build/{wheel_tag}"
+build.verbose = true
+wheel.expand-macos-universal-tags = false
+logging.level = "INFO"
+editable.mode = "redirect"
+sdist.include = [
+  "src/**",
+  "include/**",
+  "src/roaring/**",
+  "CMakeLists.txt",
+  "pyproject.toml",
+  "README.md",
+  "LICENSE"
+]
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
+CMAKE_CXX_STANDARD = "17"
+CMAKE_COLOR_DIAGNOSTICS = "ON"
+ARDAL_USE_OPENMP = "ON"
+ARDAL_USE_SIMD = "ON"

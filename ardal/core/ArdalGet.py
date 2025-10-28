@@ -53,31 +53,45 @@ class ArdalGet:
         if guids:
             self._headerUtils.check_guids(guids)
         else:
-            guids = self._headerUtils.headers["guids"]
+            guids = list(self._headerUtils.headers["guids"])
 
         ## check alleles
         if alleles:
             self._headerUtils.check_alleles(alleles)
+            rows_only_flag = False
         else:
-            alleles = self._headerUtils.headers["alleles"]
+            ## default to all alleles when no explicit subset requested
+            alleles = list(self._headerUtils.headers["alleles"])
+            rows_only_flag = True
             
-        log.debug(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
+        log.info(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
         
-        guid_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
-        allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
+        guid_indices = sorted([self._headerUtils.encode_guid(guid) for guid in guids], reverse=False)
+        allele_indices = sorted([self._headerUtils.encode_allele(allele) for allele in alleles], reverse=False) if not rows_only_flag else []
         
-        ## subset the DataFrame
-        ## TODO: this is pretty grim, could be done better in C++
-        # subset_df = pd.DataFrame(self._matrix.getBitMatrix(), index=self._headerUtils.headers["guids"], columns=self._headerUtils.headers["alleles"]).loc[guids, alleles]
-        # sub_matrix = subset_df.values.astype(np.uint8)
-        
-        sub_matrix = self._matrix.getSubsetPackedMatrix(guid_indices,
-                                                        allele_indices,
-                                                        threads)
+        sub_matrix = self._matrix.getSubsetPackedMatrix_rows(guid_indices, threads)
+        if sub_matrix.dtype.byteorder not in ('<', '='):
+            sub_matrix = sub_matrix.byteswap().newbyteorder('<')
+        sub_matrix = np.asarray(sub_matrix, dtype=np.uint64, copy=False)
+        if sub_matrix.ndim == 1:
+            sub_matrix = sub_matrix.reshape(1, sub_matrix.shape[0])
+
+        if not rows_only_flag:
+            allele_idx = np.asarray(allele_indices, dtype=np.uint64)
+            word_idx = (allele_idx >> np.uint64(6)).astype(np.intp, copy=False)
+            bit_offsets = (allele_idx & np.uint64(63)).astype(np.uint64, copy=False)
+            selected_words = np.take(sub_matrix, word_idx, axis=1)
+            shifted = np.right_shift(selected_words, bit_offsets[np.newaxis, :])
+            sub_matrix = (shifted & np.uint64(1)).astype(np.uint8, copy=False)
 
         ## create new headers and matrix for the new Ardal object
         sub_headers = {"guids": guids, "alleles": alleles}
-        
+
+        if rows_only_flag and data_only:
+            ## materialise dense form for users that requested data only
+            dense_full = self._matrix.getBitMatrix()
+            sub_matrix = dense_full[guid_indices, :].astype(np.uint8, copy=False)
+
         if not data_only:
             ## return an ardal object initialised with the subset data
             return Ardal(data_source=[sub_matrix, sub_headers],
@@ -99,7 +113,7 @@ class ArdalGet:
         n_alleles = len(self._headerUtils.headers["alleles"])
         density = self.density()
         roaring = self.roaring
-        bit_matrix_size_bytes = self.bit_matrix().nbytes
+        bit_matrix_size_bytes = self.packed_matrix().nbytes
         if self.roaring:
             roaring_mat = self.roaring_matrix(decode=False)
             roaring_size_bytes = sum(arr.nbytes for arr in roaring_mat)
@@ -145,11 +159,17 @@ class ArdalGet:
         return self._matrix.getBitMatrix()
     
 
-    def hybrid_matrix( self ):
-        """ Return the hybrid_matrix.
+    def packed_matrix( self ):
+        """ Return the 64-bit packed matrix.
         """
-        return self._matrix
-
+        arr = self._matrix.getPackedMatrix()
+        
+        ## ensure little endian
+        if arr.dtype.byteorder not in ('<', '='):
+            arr = arr.byteswap().newbyteorder('<')
+            
+        return arr
+        
     
     def roaring_matrix( self,
                        decode : bool=True
@@ -179,3 +199,20 @@ class ArdalGet:
         """
         return self._headerUtils.headers
     
+    
+    def meta( self ) -> dict:
+        """ Return the allele matrix metadata.
+        """
+        return self._headerUtils.meta
+    
+    
+    def row_masses( self ) -> dict:
+        """ Return the row masses.
+        """
+        return self._matrix.getRowMasses()
+    
+    
+    def column_masses( self ) -> dict:
+        """ Return the col masses.
+        """
+        return self._matrix.getColumnMasses()

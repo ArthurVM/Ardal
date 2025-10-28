@@ -71,6 +71,30 @@ def test_data_mem():
 
 
 @pytest.fixture(scope="session")
+def meta(test_data_mem):
+    n_rows = len(test_data_mem[0])
+    n_cols = len(test_data_mem[0][0])
+    wpr = np.ceil(n_cols/64)
+    meta = {
+        "format": "ardal.bitpack.v1",
+        "dtype": "<u8",
+        "endianness": "little",
+        "row_major": True,
+        "n_rows": n_rows,
+        "n_cols": n_cols,
+        "words_per_row": wpr,
+        "bits_per_word": 64,
+        "row_stride_bytes": wpr * 8,
+        "data_file": None,
+        "data_file_resolved": None,
+        "data_nbytes": int(n_rows * wpr * 8),
+        "data_sha256": None,
+        "generated_by" : "test",
+        }
+    return meta
+
+
+@pytest.fixture(scope="session")
 def headers(test_data_mem):
     return test_data_mem[1]
 
@@ -112,14 +136,14 @@ def ardal_object_simdata(test_data_matrix_npz):
 def hybrid_matrix(test_data_mem, ardal_object):
     """Creates a hybrid_matrix object for testing."""
     # Assuming default parameters from the Ardal constructor
-    return ardal_object.get.hybrid_matrix()
+    return ardal_object._hybrid_matrix
 
 
 @pytest.fixture(scope="session")
-def headerUtils_component(test_data_mem):
+def headerUtils_component(test_data_mem, meta):
     """Creates a headerUtils object for testing."""
     matrix, headers = test_data_mem
-    return ArdalHeaderUtils(headers)
+    return ArdalHeaderUtils(headers, meta)
 
 
 @pytest.fixture(scope="session")
@@ -143,8 +167,9 @@ def allele_component(headerUtils_component, hybrid_matrix):
 @pytest.fixture(scope="session")
 def allele_component_simdata(ardal_object_simdata):
     """Creates an ArdalAllele component for testing the intervalAlleles function."""
-    hybrid_matrix = ardal_object_simdata.get.hybrid_matrix()
-    headerUtils_component = ArdalHeaderUtils(ardal_object_simdata.get.headers())
+    hybrid_matrix = ardal_object_simdata._hybrid_matrix
+    meta = ardal_object_simdata._meta
+    headerUtils_component = ArdalHeaderUtils(headers=ardal_object_simdata.get.headers(), meta=meta, allele_id_format="{chr}.{start}.{ref}.{alt}")
     return ArdalAllele(headerUtils_component, hybrid_matrix, hybrid_matrix.roaringEnabled())
 
 

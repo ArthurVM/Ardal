@@ -5,15 +5,20 @@ Copyright 2025 Arthur V. Morris
 #pragma once
 
 #include <memory>
+#include <iostream>
 #include "BitMatrix.hpp"
 #include "RoaringMatrix.hpp"
+#include "detail/flat_matrix.hpp"
+
 
 namespace py = pybind11;
-namespace _ardal {
+namespace ardal {
 
 class HybridMatrix {
 public:
-    HybridMatrix( py::array_t<uint8_t> matrix,
+    HybridMatrix( py::array packed_or_dense_matrix,
+                  bool is_bitpacked,
+                  size_t n_cols_bits,
                   bool use_roaring_if_sparse = true,
                   double density_threshold = 0.02 );
 
@@ -35,19 +40,59 @@ public:
     py::array_t<int> innerProduct( bool use_simd = true,
                                    int threads = 1,
                                    const std::string& backend = "auto" ) const;
+    
+    py::array_t<double> cosineDistance( bool use_simd = true,
+                                        int threads = 1,
+                                        const std::string& backend = "auto" ) const;
+    py::array_t<double> cosineDistance_subset( const std::vector<size_t> row_indices,
+                                               const std::vector<size_t> col_indices,
+                                               bool use_simd = true,
+                                               int threads = 1,
+                                               const std::string& backend = "auto" ) const;
  
 
     // neighbourhood functions: BitMatrix and RoaringMatrix
     py::array_t<int64_t> neighbourhood( size_t row_idx,
-                                        int epsilon,
+                                        uint32_t epsilon,
                                         bool use_simd = true,
                                         int threads = 1,
                                         const std::string& backend = "auto" )  const;
 
     py::list innerProductNeighbourhood( size_t row_idx,
-                                        int ip_epsilon,
+                                        uint32_t ip_epsilon,
                                         bool use_simd = true,
                                         const std::string& backend = "auto" ) const;
+
+    py::list knn_hamming( size_t row,
+                          uint32_t k,
+                          bool use_simd = true,
+                          int threads = 1,
+                          const std::string& backend = "auto" ) const;
+
+    py::list knn_inner_product( size_t row,
+                                uint32_t k,
+                                bool use_simd = true,
+                                int threads = 1,
+                                const std::string& backend = "auto" ) const;
+
+    py::list knn_jaccard( size_t row,
+                          uint32_t k,
+                          bool use_simd = true,
+                          int threads = 1,
+                          const std::string& backend = "auto" ) const;
+
+    py::list knn_cosine( size_t row,
+                         uint32_t k,
+                         bool use_simd = true,
+                         int threads = 1,
+                         const std::string& backend = "auto" ) const;
+
+    py::list knn( size_t row,
+                  uint32_t k,
+                  const std::string& metric,
+                  bool use_simd = true,
+                  int threads = 1,
+                  const std::string& backend = "auto" ) const;
 
 
     // set operation functions: BitMatrix
@@ -81,13 +126,15 @@ public:
     
 
     // get functions: BitMatrix
-    py::array_t<int> getRowMasses( void );
+    py::array_t<int> getRowMasses( void ) const;
 
-    py::array_t<int> getColumnMasses( void );
+    py::array_t<int> getColumnMasses( void ) const;
 
     double getDensity( void ) const;
 
     py::array_t<uint8_t> getBitMatrix( void ) const;
+
+    py::array_t<uint64_t> getPackedMatrix( void ) const;
 
     py::list getRoaringMatrix( void ) const;
 
@@ -96,16 +143,24 @@ public:
     py::array_t<size_t> getSubsetPackedMatrix( const std::vector<size_t>& row_indices, 
                                                const std::vector<size_t>& col_indices,
                                                const int threads ) const;
+    
+    py::array_t<uint64_t> getSubsetPackedMatrix_rows( const std::vector<size_t>& row_indices, 
+                                                      const int threads ) const;
 
-
-private:
+private:  
+    // attributes
+    size_t n_rows_ = 0;
+    size_t n_cols_bits_ = 0;
+    size_t words_per_row_ = 0;
+    double density_;
+    py::array owner_;
+    ardal::detail::FlatMatrix flat_;
+    std::vector<uint64_t> storage_;
+    
+    // backends
     std::unique_ptr<BitMatrix> bit_backend;
     std::unique_ptr<RoaringMatrix> roaring_backend;
-    
-    // attributes
-    bool roaring_enabled;
-    double density;
-    size_t _n_cols;
+    bool roaring_enabled = false;
     
     // backend selector
     enum class BackendType { AUTO, BIT, ROARING };
@@ -119,4 +174,4 @@ private:
     }
 };
 
-} // namespace _ardal
+} // namespace ardal

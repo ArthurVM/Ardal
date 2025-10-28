@@ -128,7 +128,7 @@ def runmerged(args):
             ## Handles multi allelic sites
             for allele_index in call['GT']:
                 if allele_index != 0 and allele_index != None and len(record.alleles[allele_index]) == 1 and record.qual >= args.qual:
-                    allele_id = f"{record.chrom}.{record.pos}.{record.alleles[allele_index]}"
+                    allele_id = f"{record.chrom}.{record.pos}.{record.ref}.{record.alleles[allele_index]}"
 
                     if allele_id not in allele_dict:
                         for s in samples:
