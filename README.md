@@ -9,8 +9,10 @@
 
 *   **Allele Matrix Representation:** Efficiently stores and manipulates binary allele matrices.
 *   **Distance Calculations:**
-    *   Hamming distance: Calculates the number of differing alleles between samples.
-    *   Jaccard distance: Measures the dissimilarity between samples based on shared alleles.
+    *   Hamming distance: Counts the number of positions at which two allele vectors differ. It is best for revealing overall genetic divergence or mutation load between genomes.
+    *   Jaccard index: Measures similarity as the ratio of shared alleles to the union of alleles across two vectors. It is best for revealing shared allele patterns while down-weighting invariant or absent sites.
+    *   Inner Product: Quantifies the raw co-occurrence of alleles between two binary vectors. It is best for highlighting densely co-occurring alleles or lineage-defining variant constellations.
+    *   Cosine distance: Measures angular dissimilarity by normalizing the inner product by the vector magnitudes. It is best for revealing directional similarity in variant composition independent of absolute allele counts.
 *   **Neighborhood Analysis:** Identifies samples within a specified Hamming distance of a target sample, with or without SIMD acceleration.
 *   **Core and Accessory Allele Identification:** Determines the core (present in all samples) and accessory (present in some samples) alleles within a group of samples.
 *   **Unique Allele Identification:** Identifies alleles that are unique to a specific set of samples.
