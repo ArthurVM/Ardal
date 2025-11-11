@@ -2,11 +2,12 @@
 This module provides functionality for working with alleles in the Ardal framework.
 """
 from collections import defaultdict
+from math import ceil
 from typing import List, Union, Dict
 
 from ..utils.misc import require_package
 from ..utils.decorators import check_backend_argument, check_guids_list, check_alleles_list, check_allele_id_format, check_bed_paths
-from ..utils.exceptions import EmptySelectionError, RegexError
+from ..utils.exceptions import EmptySelectionError, RegexError, ParameterError
 from ..utils.validators import validate_type
 from ..utils.misc import wildcard_to_regex
 from ..utils.logger import get_logger
@@ -135,7 +136,7 @@ class ArdalAllele:
             
         return decoded_alleles
     
-    
+
     def count( self ) -> dict:
         """ Return a dictionary of allele counts for each GUID.
         """
@@ -163,6 +164,134 @@ class ArdalAllele:
     def get_positions( self
                        ) -> Dict:
         return self._headerUtils.get_allele_positions()
+
+
+    def _tally_allele_counts(self,
+                             row_indices: List[int],
+                             backend: str = "auto") -> Dict[int, int]:
+        """
+        Helper function to count allele occurrences across a set of rows.
+        """
+        allele_counts: Dict[int, int] = defaultdict(int)
+        for row_idx in row_indices:
+            allele_indices = self._matrix.getSetBitIndices(row_idx, backend=backend)
+            for allele_idx in allele_indices:
+                allele_counts[int(allele_idx)] += 1
+        return allele_counts
+
+
+    def _decode_allele_counts(self,
+                              allele_counts: Dict[int, int]) -> Dict[str, int]:
+        """
+        Helper function to decode allele indices to identifiers.
+        """
+        return {
+            self._headerUtils.decode_allele(idx): count
+            for idx, count in allele_counts.items()
+        }
+
+
+    @check_backend_argument
+    @check_guids_list
+    def core( self,
+              guids: List,
+              *,
+              backend: str = "auto",
+              missingness: float = 0.0,
+              return_counts: bool = False ) -> Union[set, Dict[str, int]]:
+        """
+        Compute the core genome alleles for a group of GUIDs.
+
+        Core alleles are present in at least (1 - missingness) fraction of the provided GUIDs.
+        With missingness=0.0, an allele must be present in every GUID.
+        """
+        if not guids:
+            raise EmptySelectionError("guids list cannot be empty.")
+        # validate_type(missingness, (int, float), "missingness")
+        missingness = float(missingness)
+        if missingness < 0 or missingness > 1:
+            raise ParameterError("missingness must be between 0 and 1.")
+
+        row_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
+        allele_counts = self._tally_allele_counts(row_indices, backend=backend)
+        required_count = ceil((1 - missingness) * len(row_indices))
+
+        if required_count <= 0:
+            required_count = 1
+
+        filtered_counts = {
+            idx: count for idx, count in allele_counts.items() if count >= required_count
+        }
+
+        decoded = self._decode_allele_counts(filtered_counts)
+        if return_counts:
+            return decoded
+        return set(decoded.keys())
+
+
+    @check_backend_argument
+    def pan( self,
+             guids: Union[List, None] = None,
+             *,
+             backend: str = "auto",
+             return_counts: bool = False ) -> Union[set, Dict[str, int]]:
+        """
+        Compute the pan-genome alleles (union) for the provided GUIDs.
+        If guids is None, the full matrix is used.
+        """
+        if not guids:
+            guids = self._headerUtils.headers["guids"]
+        else:
+            self._headerUtils.check_guids(guids)
+
+        if not guids:
+            raise EmptySelectionError("guids list cannot be empty.")
+
+        row_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
+        allele_counts = self._tally_allele_counts(row_indices, backend=backend)
+        decoded = self._decode_allele_counts(allele_counts)
+
+        if return_counts:
+            return decoded
+        return set(decoded.keys())
+
+
+    @check_backend_argument
+    @check_guids_list
+    def genome_summary( self,
+                        guids: List,
+                        *,
+                        backend: str = "auto",
+                        missingness: float = 0.0,
+                        return_counts: bool = False ) -> Dict[str, Union[set, Dict[str, int], List[str]]]:
+        """
+        Convenience helper returning unique, core, and pan-genome alleles for a group of GUIDs.
+
+        Returns:
+            dict: {
+                "unique": set of alleles unique to the group (shared by all group members and absent elsewhere),
+                "core": set/dict of alleles present in at least (1-missingness) of the group,
+                "pan": set/dict of alleles present in any of the group members
+            }
+        """
+        core_result = self.core(
+            guids,
+            backend=backend,
+            missingness=missingness,
+            return_counts=return_counts,
+        )
+        pan_result = self.pan(
+            guids,
+            backend=backend,
+            return_counts=return_counts,
+        )
+        unique_result = set(self.unique_core(guids, backend=backend))
+
+        return {
+            "unique": unique_result,
+            "core": core_result,
+            "pan": pan_result,
+        }
     
     
     # def core( self, guids : list, missingness : float = 0.0, return_counts : bool = False ) -> set:

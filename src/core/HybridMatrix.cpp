@@ -4,6 +4,8 @@ Copyright 2025 Arthur V. Morris
 #include "HybridMatrix.hpp"
 #include <algorithm>
 #include <cctype>
+#include <utility>
+#include "SnvFallbackBackend.hpp"
 #include "utils/bitops.hpp"
 #include "utils/PythonLogger.hpp"
 #include "utils/simd_utils.hpp"
@@ -65,6 +67,8 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
     // ss << "HybridMatrix initialised: flat_.rows=" << flat_.n_rows << " flat_.wpr=" << flat_.wpr << " flat_.n_cols_bits=" << flat_.n_cols_bits;
     // ardal::utils::log_debug(static_cast<string>(ss.str()));
 
+    n_rows_ = flat_.n_rows;
+    words_per_row_ = flat_.wpr;
     density_ = static_cast<double>(total_mass) / ((static_cast<double>(flat_.n_rows) * n_cols_bits));
 
     // share masses
@@ -94,6 +98,9 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
     // run SIMD diagnostics
     simd_dispatchers::simd_diag();
 }
+
+
+HybridMatrix::~HybridMatrix() = default;
 
 
 HybridMatrix::BackendType HybridMatrix::selectBackend( size_t n_cols,
@@ -239,6 +246,19 @@ py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
 }
 
 
+py::array_t<int64_t> HybridMatrix::snvNeighbourhood( size_t row,
+                                                     uint32_t epsilon,
+                                                     int threads ) const {
+    if (roaring_enabled && roaring_backend) {
+        return roaring_backend->snvNeighbourhood(row, epsilon, threads);
+    }
+    if (!snv_fallback_backend_) {
+        throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+    }
+    return snv_fallback_backend_->snvNeighbourhood(row, epsilon, threads);
+}
+
+
 py::list HybridMatrix::innerProductNeighbourhood( size_t row,
                                                   uint32_t ip_epsilon,
                                                   bool use_simd,
@@ -314,6 +334,19 @@ py::list HybridMatrix::knn_jaccard( size_t row,
 }
 
 
+py::list HybridMatrix::knnSnv( size_t row,
+                               uint32_t k,
+                               int threads ) const {
+    if (roaring_enabled && roaring_backend) {
+        return roaring_backend->knnSnv(row, static_cast<int>(k), threads);
+    }
+    if (!snv_fallback_backend_) {
+        throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+    }
+    return snv_fallback_backend_->knnSnv(row, k, threads);
+}
+
+
 py::list HybridMatrix::knn_cosine( size_t row,
                                    uint32_t k,
                                    bool use_simd,
@@ -351,6 +384,8 @@ py::list HybridMatrix::knn( size_t row,
         return knn_jaccard(row, k, use_simd, threads, backend);
     } else if (metric_lc == "cosine") {
         return knn_cosine(row, k, use_simd, threads, backend);
+    } else if (metric_lc == "snv") {
+        return knnSnv(row, k, threads);
     }
     throw std::invalid_argument("Unsupported metric for knn: " + metric);
 }
@@ -414,6 +449,43 @@ py::array_t<double> HybridMatrix::jsDivergence( const std::vector<size_t>& input
 
 py::array_t<double> HybridMatrix::informationGain( const std::vector<size_t>& input_guids ) const {
     return bit_backend->informationGain(input_guids);
+}
+
+
+void HybridMatrix::prepareSnvView( py::array_t<uint32_t> allele_to_locus,
+                                   py::array_t<uint8_t> allele_to_base ) {
+    if (roaring_enabled) {
+        roaring_backend->prepareSnvView(std::move(allele_to_locus), std::move(allele_to_base));
+    } else {
+        if (!snv_fallback_backend_) {
+            snv_fallback_backend_ = std::make_unique<SnvFallbackBackend>(flat_, n_cols_bits_);
+        }
+        snv_fallback_backend_->prepare(std::move(allele_to_locus), std::move(allele_to_base));
+    }
+}
+
+
+py::array_t<uint32_t> HybridMatrix::snvHamming( int threads ) const {
+    if (roaring_enabled) {
+        return roaring_backend->snvHamming(threads);
+    }
+    if (!snv_fallback_backend_) {
+        throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+    }
+    return snv_fallback_backend_->snvHamming(threads);
+}
+
+
+py::array_t<uint32_t> HybridMatrix::snvHamming_subset( const std::vector<size_t>& row_indices,
+                                                      const std::vector<size_t>& col_indices,
+                                                      int threads ) const {
+    if (roaring_enabled) {
+        return roaring_backend->snvHamming_subset(row_indices, col_indices, threads);
+    }
+    if (!snv_fallback_backend_) {
+        throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+    }
+    return snv_fallback_backend_->snvHamming_subset(row_indices, col_indices, threads);
 }
 
 

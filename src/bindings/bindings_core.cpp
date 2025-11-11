@@ -161,5 +161,27 @@ PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
         
         .def("getSubsetPackedMatrix_rows", &ardal::HybridMatrix::getSubsetPackedMatrix_rows,
             py::arg("row_indices"),
+            py::arg("threads") = 1)
+
+        .def("prepareSnvView", &ardal::HybridMatrix::prepareSnvView,
+            py::arg("allele_to_locus"),
+            py::arg("allele_to_base"))
+
+        .def("snvHamming", &ardal::HybridMatrix::snvHamming,
+            py::arg("threads") = 1)
+
+        .def("snvHamming_subset", &ardal::HybridMatrix::snvHamming_subset,
+            py::arg("row_indices"),
+            py::arg("col_indices"),
+            py::arg("threads") = 1)
+
+        .def("snvNeighbourhood", &ardal::HybridMatrix::snvNeighbourhood,
+            py::arg("row_idx"),
+            py::arg("epsilon"),
+            py::arg("threads") = 1)
+
+        .def("knnSnv", &ardal::HybridMatrix::knnSnv,
+            py::arg("row_idx"),
+            py::arg("k"),
             py::arg("threads") = 1);
 }

@@ -44,8 +44,48 @@ def test_unique_core(allele_component):
     
     unique = allele_component.unique_core(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5", "GUID6", "GUID7", "GUID8", "GUID9"])
     assert unique == ['chr1.10.A.T']
-    
-    
+
+
+def test_core_genome(allele_component):
+    """
+    Tests the new core genome helper.
+    """
+    expected = {'chr1.1.A.T', 'chr1.5.A.T', 'chr1.6.A.T', 'chr1.7.A.T', 'chr1.8.A.T', 'chr1.10.A.T'}
+    core = allele_component.core(["GUID1", "GUID2"])
+    assert core == expected
+
+    relaxed_core = allele_component.core(["GUID1", "GUID2", "GUID3"], missingness=0.34)
+    assert 'chr1.1.A.T' in relaxed_core
+    assert 'chr1.2.A.T' not in relaxed_core
+
+    core_counts = allele_component.core(["GUID1", "GUID2"], return_counts=True)
+    assert core_counts['chr1.1.A.T'] == 2
+    assert core_counts['chr1.7.A.T'] == 2
+
+
+def test_pan_genome(allele_component):
+    """
+    Tests the pan genome helper.
+    """
+    pan = allele_component.pan(["GUID1", "GUID3"])
+    expected = {'chr1.1.A.T', 'chr1.2.A.T', 'chr1.5.A.T', 'chr1.6.A.T', 'chr1.7.A.T', 'chr1.8.A.T', 'chr1.10.A.T'}
+    assert pan == expected
+
+    pan_counts = allele_component.pan(["GUID6", "GUID7"], return_counts=True)
+    assert pan_counts['chr1.3.A.T'] == 2
+    assert pan_counts['chr1.9.A.T'] == 2
+
+
+def test_genome_summary(allele_component):
+    """
+    Tests the combined genome summary helper.
+    """
+    summary = allele_component.genome_summary(["GUID1", "GUID2"])
+    assert summary["core"] == {'chr1.1.A.T', 'chr1.5.A.T', 'chr1.6.A.T', 'chr1.7.A.T', 'chr1.8.A.T', 'chr1.10.A.T'}
+    assert summary["pan"] == summary["core"]
+    assert summary["unique"] == set(allele_component.unique_core(["GUID1", "GUID2"]))
+
+
 def test_guids_with_alleles(allele_component):
     """
     Tests the guids_with_alleles method of the ArdalGet class.

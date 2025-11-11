@@ -64,6 +64,20 @@ public:
     py::array_t<size_t> getSetBitIndices( size_t row_idx ) const;
     py::list getRoaringMatrix( void ) const;
 
+    // SNV functions
+    void prepareSnvView( py::array_t<uint32_t> allele_to_locus,
+                         py::array_t<uint8_t> allele_to_base );
+    py::array_t<uint32_t> snvHamming( int threads = 1 ) const;
+    py::array_t<uint32_t> snvHamming_subset( const std::vector<size_t>& row_indices,
+                                            const std::vector<size_t>& col_indices,
+                                            int threads = 1 ) const;
+    py::array_t<int64_t> snvNeighbourhood( size_t row_idx,
+                                           uint32_t epsilon,
+                                           int threads = 1 ) const;
+    py::list knnSnv( size_t row_idx,
+                     int k,
+                     int threads = 1 ) const;
+
     // colwise functions
     py::dict bitCooccurrence_all( double threshold, int threads = 1 ) const;
     py::dict bitCooccurrence_subset( const std::vector<size_t>& col_indices, double threshold, int threads ) const;
@@ -88,6 +102,16 @@ private:
 
     // utility functions
     std::vector<roaring::Roaring> colwiseRoaringFromRowwise( void ) const;
+
+    // SNV helpers
+    void ensure_snv_vectors() const;
+    uint32_t snvDistance(size_t i, size_t j) const;
+
+    std::vector<uint32_t> allele_to_locus_;
+    std::vector<uint8_t> allele_to_base_;
+    mutable std::vector<std::vector<uint64_t>> snv_vectors_;
+    mutable bool snv_lookup_loaded_ = false;
+    mutable bool snv_vectors_ready_ = false;
 };
 
 } // namespace ardal

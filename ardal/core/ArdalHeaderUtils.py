@@ -6,7 +6,7 @@ from typing import Union, List, Tuple, Set, Dict
 
 from ..utils.misc import require_package
 from ..utils.decorators import check_allele_id_format, check_bed_paths, check_alleles_list, check_guids_list, validate_type
-from ..utils.exceptions import AllelePatternError, IntervalError, InvalidGUIDQueryError, InvalidAlleleQueryError
+from ..utils.exceptions import AllelePatternError, IntervalError, InvalidGUIDQueryError, InvalidAlleleQueryError, ParameterError
 from ..utils.logger import get_logger
 
 log = get_logger()
@@ -26,9 +26,13 @@ class ArdalHeaderUtils:
         self.meta = meta
         self.n_guids = len(self.headers['guids'])
         self.n_alleles = len(self.headers['alleles'])
+        self.allele_positions = None
         self._allele_coords_bed = allele_coords_bed
         self._allele_id_format = allele_id_format
         self._decoded_headers = self._decode_headers()
+        self._snv_lookup_cache = None
+        self._snv_lookup_format = None
+        self._site_lookup_cache = None
         
         ## allele positions were not provided
         if not allele_positions:
@@ -62,6 +66,98 @@ class ArdalHeaderUtils:
         return  { "guids" : dict(zip(self.headers["guids"], range(len(self.headers["guids"])))),
                   "alleles" : dict(zip(self.headers["alleles"], range(len(self.headers["alleles"]))))
                 }
+
+
+    def get_snv_lookup( self,
+                        allele_id_format : Union[str, None] = None,
+                        *,
+                        force: bool = False
+                        ) -> Tuple[np.ndarray, np.ndarray, int]:
+        """
+        Return lookup arrays mapping alleles to SNV loci and nucleotide bins.
+
+        Args:
+            allele_id_format: Format string used to decode allele identifiers.
+            force: When True, rebuild the lookup even if the cached format matches.
+        """
+        ## return cache if it already exists and not forced to rebuild
+        if (
+            not force
+            and self._snv_lookup_cache is not None
+            and self._snv_lookup_format == allele_id_format
+        ):
+            return self._snv_lookup_cache
+
+        ## else build/rebuild
+        allele_id_format = allele_id_format or self._allele_id_format
+        if allele_id_format is None:
+            raise AllelePatternError("Allele ID format required to build SNV lookup.")
+        
+        pattern = self._check_allele_format_grammar(allele_id_format=allele_id_format)
+        base_map = {"A": 1, "C": 2, "G": 3, "T": 4}
+
+        n_alleles = self.n_alleles
+        allele_to_locus = np.full(n_alleles, np.uint32(np.iinfo(np.uint32).max), dtype=np.uint32)
+        allele_to_base = np.zeros(n_alleles, dtype=np.uint8)
+
+        locus_to_alts: Dict[Tuple[str, int], Set[str]] = defaultdict(set)
+        parsed_entries: List[Tuple[int, Tuple[str, int], str]] = []
+        bad_loci: Set[Tuple[str, int]] = set()
+
+        for idx, allele_id in enumerate(self.headers["alleles"]):
+            try:
+                chr_key, start, _, ref, alt = self._decode_allele_position(
+                    allele_id=allele_id,
+                    pattern=pattern,
+                    allele_id_format=allele_id_format,
+                )
+            except ValueError as exc:
+                log.debug(f"Skipping allele '{allele_id}' for SNV lookup: {exc}")
+                continue
+
+            if start is None:
+                bad_loci.add((str(chr_key), None))
+                continue
+
+            locus_key = (str(chr_key), int(start))
+            ref_base = (ref or "").upper()
+            alt_base = (alt or "").upper()
+
+            if not alt_base or len(alt_base) != 1 or alt_base not in base_map:
+                bad_loci.add(locus_key)
+                continue
+            if ref_base and len(ref_base) != 1:
+                bad_loci.add(locus_key)
+                continue
+
+            locus_to_alts[locus_key].add(alt_base)
+            parsed_entries.append((idx, locus_key, alt_base))
+
+        for locus_key, alt_set in locus_to_alts.items():
+            if len(alt_set) > 1:
+                bad_loci.add(locus_key)
+
+        valid_loci = [lk for lk in locus_to_alts.keys() if lk not in bad_loci]
+        valid_loci.sort(key=lambda item: (item[0], item[1]))
+        locus_id_map: Dict[Tuple[str, int], int] = {
+            locus: idx for idx, locus in enumerate(valid_loci)
+        }
+
+        for allele_idx, locus_key, alt_base in parsed_entries:
+            locus_id = locus_id_map.get(locus_key)
+            if locus_id is None:
+                continue
+            allele_to_locus[allele_idx] = np.uint32(locus_id)
+            allele_to_base[allele_idx] = base_map[alt_base]
+
+        snv_loci = len(valid_loci)
+        self._snv_lookup_cache = (allele_to_locus, allele_to_base, snv_loci)
+        self._snv_lookup_format = allele_id_format
+        log.info(
+            f"Constructed SNV lookup with {snv_loci} loci. "
+            f"Skipped {len(bad_loci)} loci due to non-SNP, multi-allelic, or ambiguous bases."
+        )
+        return self._snv_lookup_cache
 
 
     @check_allele_id_format
@@ -543,6 +639,95 @@ class ArdalHeaderUtils:
             for pos, alleles in pos_dict.items()
             for allele in alleles
         }
+
+
+    def count_sites_for_alleles(self,
+                                alleles: List[str],
+                                allele_id_format: Union[str, None] = None) -> int:
+        """
+        Count unique genomic sites represented by the provided allele IDs.
+
+        Args:
+            alleles: Allele identifiers to include in the site count.
+            allele_id_format: Optional override for decoding allele positions if they
+                have not already been computed.
+
+        Returns:
+            Number of unique (chromosome, position) sites covered by the alleles.
+        """
+        if alleles is None:
+            return 0
+
+        if not isinstance(alleles, list):
+            alleles = list(alleles)
+        validate_type(alleles, list, "alleles")
+
+        have_positions = bool(self._allele_positions_from_bed or self._allele_positions_from_ids)
+        fmt_to_use = allele_id_format or self._allele_id_format
+
+        if not have_positions:
+            if fmt_to_use is None:
+                raise ParameterError(
+                    "Normalizing distances requires allele positions. Provide 'allele_positions' "
+                    "or supply 'allele_id_format' so positions can be decoded."
+                )
+            self.ensure_id_positions(fmt_to_use)
+        elif allele_id_format and fmt_to_use != self._allele_id_format:
+            self.ensure_id_positions(allele_id_format, force=True)
+
+        allele_position_map = self.get_allele_positions()
+        unique_sites = set()
+        missing_alleles = []
+
+        for allele in alleles:
+            coord = allele_position_map.get(allele)
+            if coord is None:
+                missing_alleles.append(allele)
+                continue
+            chr_key, pos = coord
+            if chr_key is None or pos is None:
+                continue
+            unique_sites.add((str(chr_key), int(pos)))
+
+        if missing_alleles:
+            log.warning(
+                "Could not determine positions for %d allele(s); they were excluded from the site count.",
+                len(missing_alleles),
+            )
+
+        return len(unique_sites)
+
+
+    def has_id_positions(self) -> bool:
+        """Return True if allele positions have been decoded from allele IDs."""
+        return bool(self._allele_positions_from_ids and self._allele_id_format)
+
+
+    def get_cached_allele_id_format(self) -> Union[str, None]:
+        """Return the cached allele ID format used for allele ID decoding."""
+        return self._allele_id_format
+
+
+    def ensure_id_positions(self,
+                            allele_id_format: str,
+                            *,
+                            force: bool = False) -> None:
+        """
+        Ensure allele positions are decoded from allele IDs for the given format.
+
+        Args:
+            allele_id_format: The allele ID grammar to use for decoding.
+            force: When True, recompute positions even if already cached for the same format.
+        """
+        validate_type(allele_id_format, str, "allele_id_format")
+
+        recompute = force or (self._allele_positions_from_ids and self._allele_id_format != allele_id_format)
+        if recompute or not self._allele_positions_from_ids or self._allele_id_format != allele_id_format:
+            self.compute_allele_positions(
+                allele_id_format=allele_id_format,
+                allele_coords_bed=self._allele_coords_bed,
+                recompute_positions=recompute
+            )
         
         
     def get_allele_posmap( self

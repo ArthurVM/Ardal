@@ -124,10 +124,19 @@ class ArdalGet:
             total_size_bytes = bit_matrix_size_bytes
         bit_matrix_size = naturalsize(bit_matrix_size_bytes, binary=True)
         total_size = naturalsize(total_size_bytes, binary=True)
+        
+        if self._headerUtils.allele_positions:
+            sequences = len(self._headerUtils.allele_positions.keys())
+            sites = sum([len(s) for chr, s in self._headerUtils.allele_positions.items()])
+        else:
+            sequences = None
+            sites = None
 
         stats = {
             "Number of GUIDs"     : n_guids,
             "Number of Alleles"   : n_alleles,
+            "Number of Sequences" : sequences,
+            "Number of Sites"     : sites,
             "Matrix Density"      : density,
             "Roaring Enabled"     : roaring,
             "Bit Matrix Size"     : bit_matrix_size,

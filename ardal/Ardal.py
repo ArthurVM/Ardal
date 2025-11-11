@@ -41,7 +41,7 @@ class Ardal(object):
     def __init__( self,
                   data_source : Union[str, pd.DataFrame, Tuple[str, str], Tuple[np.ndarray, Dict]],
                   roaring : Union[str, bool] = "auto",
-                  density_threshold : float = 0.1,
+                  density_threshold : float = 0.20,
                   allele_id_format : Union[str, None] = None,
                   allele_coords_bed : Union[str, None] = None,
                   verbosity : Union[int, str] = "error",

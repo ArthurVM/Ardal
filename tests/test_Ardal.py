@@ -154,6 +154,42 @@ def test_distance_pairwise(test_data_mem):
     assert hasattr(df, "shape")
 
 
+def test_distance_pairwise_jaccard(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, roaring=True, quiet_init=True)
+    if not hasattr(ardal._hybrid_matrix, "jaccard") or not ardal.roaring:
+        pytest.skip("Jaccard distance backend not available in this build.")
+    dist = ardal.distance.pairwise(metric="jaccard", backend="roaring", threads=1)
+    dense = test_data_mem[0].astype(np.uint8, copy=False)
+    dense_bool = dense.astype(bool, copy=False)
+    intersection = np.logical_and(
+        dense_bool[:, None, :], dense_bool[None, :, :]
+    ).sum(axis=2, dtype=np.int32)
+    union = np.logical_or(
+        dense_bool[:, None, :], dense_bool[None, :, :]
+    ).sum(axis=2, dtype=np.int32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        similarity = np.divide(
+            intersection,
+            union,
+            out=np.ones_like(intersection, dtype=np.float32),
+            where=union > 0,
+        )
+    expected_full = similarity.astype(np.float32, copy=False)
+    iu, ju = np.triu_indices(expected_full.shape[0], 1)
+    expected_condensed = expected_full[iu, ju]
+    np.testing.assert_allclose(dist, expected_condensed, rtol=1e-6, atol=1e-7)
+
+
+def test_distance_pairwise_inner_product(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    dist = ardal.distance.pairwise(metric="inner_product", backend="bit", threads=1)
+    dense = test_data_mem[0].astype(np.uint32, copy=False)
+    gram = dense @ dense.T
+    iu, ju = np.triu_indices(gram.shape[0], 1)
+    expected_condensed = gram[iu, ju].astype(np.uint32, copy=False)
+    np.testing.assert_array_equal(dist, expected_condensed)
+
+
 def test_get_matrix_stats(test_data_mem):
     ardal = Ardal(data_source=test_data_mem, quiet_init=True)
     stats = ardal.get.matrix_stats()
@@ -203,13 +239,31 @@ def test_distance_pairwise_cosine(test_data_mem):
     np.testing.assert_allclose(dist, expected_condensed, rtol=1e-7, atol=1e-9)
 
 
+def test_distance_pairwise_snv(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    if not hasattr(ardal._hybrid_matrix, "snvHamming"):
+        pytest.skip("SNV distance backend not available in this build.")
+    hamming = ardal.distance.pairwise(metric="hamming", threads=1)
+    snv = ardal.distance.pairwise(
+        metric="snv",
+        threads=1,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+    )
+    np.testing.assert_array_equal(snv, hamming)
+
+
 def test_knn_metric_selection(test_data_mem):
     ardal = Ardal(data_source=test_data_mem, quiet_init=True)
     if not hasattr(ardal._hybrid_matrix, "knn_hamming"):
         pytest.skip("metric-aware knn backend not available in this build.")
     metrics = ["hamming", "inner_product", "jaccard", "cosine"]
+    if hasattr(ardal._hybrid_matrix, "knnSnv"):
+        metrics.append("snv")
     for metric in metrics:
-        neighbours = ardal.distance.knn("GUID1", 3, metric=metric, backend="bit")
+        kwargs = {"metric": metric, "backend": "bit"}
+        if metric == "snv":
+            kwargs["allele_id_format"] = "{chr}.{start}.{ref}.{alt}"
+        neighbours = ardal.distance.knn("GUID1", 3, **kwargs)
         assert len(neighbours) == 3
 
 
@@ -219,6 +273,15 @@ def test_neighbourhood_metric_selection(test_data_mem):
     assert isinstance(ham, dict) and len(ham) > 0
     ip = ardal.distance.neighbourhood("GUID1", 1, metric="inner_product", backend="bit")
     assert isinstance(ip, dict)
+    if hasattr(ardal._hybrid_matrix, "snvHamming"):
+        snv = ardal.distance.neighbourhood(
+            "GUID1",
+            3,
+            metric="snv",
+            backend="bit",
+            allele_id_format="{chr}.{start}.{ref}.{alt}",
+        )
+        assert isinstance(snv, dict)
 
 # def test_with_coords_bed(matrix_npy, coords_bed_file):
 #     ardal = Ardal(data_source=matrix_npy, coords_bed=coords_bed_file, quiet_init=True)
