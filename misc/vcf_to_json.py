@@ -3,7 +3,8 @@
 vcf_snps_to_json.py
 
 Read one or more VCF/VCF.GZ files, filter by quality, keep SNPs only,
-and write a JSON mapping: {sample_id: [ "CHROM.POS.REF.ALT", ... ], ... }.
+and write JSON payloads containing both allele calls and non-callable (missing)
+positions inferred from `samtools depth -aa` BED/BED.GZ files.
 
 Defaults:
   - QUAL >= 30
@@ -17,12 +18,14 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import os
 import re
+import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 DNA4 = {"A", "C", "G", "T"}
+VCF_SUFFIXES: Tuple[str, ...] = (".raw.vcf", ".raw.vcf.gz", ".vcf.gz", ".vcf")
+DEPTH_SUFFIXES: Tuple[str, ...] = (".depth.bed.gz", ".depth.bed", ".bed.gz", ".bed")
 
 def open_maybe_gzip(path: Path):
     return gzip.open(path, "rt") if path.suffix == ".gz" else open(path, "rt")
@@ -127,23 +130,96 @@ def derive_sample_id(path: Path, sample_regex: str | None, sample_regex_group: i
                 pass
     return base
 
-def iter_vcf_files(input_path: Path) -> Iterable[Path]:
-    if input_path.is_file():
-        if input_path.suffix in (".vcf",) or input_path.suffixes[-2:] == [".vcf", ".gz"]:
-            yield input_path
-        else:
-            raise ValueError(f"Unsupported file extension for {input_path}")
-    else:
-        for p in sorted(input_path.rglob("*")):
-            if p.is_file() and (p.suffix == ".vcf" or p.suffixes[-2:] == [".vcf", ".gz"]):
-                yield p
+def strip_suffix(name: str, suffixes: Tuple[str, ...]) -> str:
+    for suffix in sorted(suffixes, key=len, reverse=True):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+def collect_files(path: Path, suffixes: Tuple[str, ...]) -> List[Path]:
+    if path.is_file():
+        if any(path.name.endswith(sfx) for sfx in suffixes):
+            return [path]
+        raise ValueError(f"{path} does not match expected suffixes: {suffixes}")
+
+    files: List[Path] = []
+    for candidate in path.rglob("*"):
+        if candidate.is_file() and any(candidate.name.endswith(sfx) for sfx in suffixes):
+            files.append(candidate)
+    return sorted(files)
+
+def pair_files(vcf_path: Path, depth_path: Path | None) -> List[Tuple[Path, Path | None]]:
+    if vcf_path is None:
+        raise ValueError("A VCF input path must be provided.")
+
+    vcf_files = collect_files(vcf_path, VCF_SUFFIXES)
+    if not vcf_files:
+        raise SystemExit(f"No VCF files found under {vcf_path}")
+
+    if depth_path is None:
+        depth_path = vcf_path if vcf_path.is_dir() else vcf_path.parent
+    depth_files = collect_files(depth_path, DEPTH_SUFFIXES)
+    if not depth_files:
+        print(f"Warning: no BED/BED.GZ depth files found under {depth_path}; missing lists will be empty.",
+              file=sys.stderr)
+
+    depth_lookup: Dict[str, Path] = {}
+    for depth in depth_files:
+        key = strip_suffix(depth.name, DEPTH_SUFFIXES)
+        if key in depth_lookup:
+            raise SystemExit(f"Duplicate depth files with base '{key}': {depth_lookup[key]} vs {depth}")
+        depth_lookup[key] = depth
+
+    pairs: List[Tuple[Path, Path | None]] = []
+    missing_depth: List[str] = []
+    for vcf in vcf_files:
+        key = strip_suffix(vcf.name, VCF_SUFFIXES)
+        depth = depth_lookup.get(key)
+        if depth is None:
+            missing_depth.append(vcf.name)
+        pairs.append((vcf, depth))
+
+    if missing_depth:
+        print(
+            "Warning: missing depth BED files for the following VCFs (matched by basename): "
+            + ", ".join(missing_depth),
+            file=sys.stderr,
+        )
+
+    return sorted(pairs, key=lambda pair: str(pair[0]))
+
+def missing_positions_from_bed(depth_path: Path, min_depth: int) -> List[str]:
+    missing: List[str] = []
+    seen: Set[str] = set()
+    with open_maybe_gzip(depth_path) as fh:
+        for line in fh:
+            if not line or line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 3:
+                continue
+            chrom, pos, depth_str = parts[:3]
+            try:
+                depth_val = int(float(depth_str))
+            except ValueError:
+                continue
+            if depth_val >= min_depth:
+                continue
+            key = f"{chrom}.{pos}"
+            if key not in seen:
+                seen.add(key)
+                missing.append(key)
+    return missing
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Collect SNP IDs from VCFs into JSON: {sample_id: [chr.pos.ref.alt, ...], ...}"
+        description="Collect SNP IDs and missing coverage positions into JSON payloads."
     )
-    ap.add_argument("input", type=Path, help="VCF file or directory containing VCF/VCF.GZ files")
-    ap.add_argument("-o", "--outdir", type=Path, default="./", help="Output directory")
+    ap.add_argument("-v", "--vcf_in", type=Path, required=True,
+                    help="VCF file or directory containing VCF/VCF.GZ files")
+    ap.add_argument("-d", "--depth_in", type=Path, default=None,
+                    help="Depth BED/BED.GZ file(s) from `samtools depth -aa`; defaults to scanning the VCF directory")
+    ap.add_argument("-o", "--outdir", type=Path, default=Path("./"), help="Output directory")
     ap.add_argument("--min-qual", type=float, default=30.0, help="Minimum QUAL (default: 30)")
     ap.add_argument("--allow-filtered", action="store_true",
                     help="Allow FILTER values other than PASS/. (default: require PASS or .)")
@@ -155,38 +231,41 @@ def main():
                     help="Optional regex to extract sample_id from filename (applied to basename without .vcf[.gz])")
     ap.add_argument("--sample-regex-group", type=int, default=1,
                     help="Capture group index to take from --sample-regex (default: 1)")
+    ap.add_argument("--min-missing-depth", type=int, default=10,
+                    help="Positions with coverage < this value are marked as missing (default: 10)")
     args = ap.parse_args()
 
-    inputs = list(iter_vcf_files(args.input))
-    if not inputs:
-        raise SystemExit(f"No VCF files found in {args.input}")
+    args.outdir.mkdir(parents=True, exist_ok=True)
 
-    il = len(inputs)
-    for i, vcf in enumerate(inputs):
-        
-        result: Dict[str, List[str]] = {}
-        
+    inputs = pair_files(args.vcf_in, args.depth_in)
+    total = len(inputs)
+    for idx, (vcf, depth) in enumerate(inputs, start=1):
         sample_id = derive_sample_id(vcf, args.sample_regex, args.sample_regex_group)
-        print(f"\r {i}/{il} : {sample_id}", end="             ", flush=True)
-        
-        out = f"{args.outdir}/{sample_id}_snps.json"
-        
-        if os.path.exists(out):
+        print(f"\r {idx}/{total} : {sample_id}", end="             ", flush=True)
+
+        out_path = args.outdir / f"{sample_id}_snps.json"
+        if out_path.exists():
             continue
-            
-        snps = snp_ids_from_vcf(
+
+        alleles = snp_ids_from_vcf(
             vcf_path=vcf,
             min_qual=args.min_qual,
             allow_filtered=args.allow_filtered,
             accept_missing_qual=args.accept_missing_qual,
             min_dp=args.min_dp,
         )
-        # Deduplicate and sort for stability
-        result[sample_id] = sorted(set(snps))
+        if depth is None:
+            missing: List[str] = []
+        else:
+            missing = missing_positions_from_bed(depth, args.min_missing_depth)
 
-        with open(out, "w") as outfh:
-            json.dump(result, outfh, indent=2)
-        # print(f"Wrote {out} with {len(result[sample_id])} SNPs.")
+        payload = {
+            "alleles": sorted(set(alleles)),
+            "missing": missing,
+        }
+
+        with open(out_path, "w") as outfh:
+            json.dump(payload, outfh, indent=2)
 
 if __name__ == "__main__":
     main()

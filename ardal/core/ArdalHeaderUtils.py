@@ -20,7 +20,8 @@ class ArdalHeaderUtils:
                   meta : dict,
                   allele_coords_bed : Union[str, None] = None,
                   allele_id_format : Union[str, None] = None,
-                  allele_positions : Union[Dict, None] = None ):
+                  allele_positions : Union[Dict, None] = None,
+                  missing_masks: Union[Dict, None] = None ):
 
         self.headers = headers
         self.meta = meta
@@ -33,6 +34,8 @@ class ArdalHeaderUtils:
         self._snv_lookup_cache = None
         self._snv_lookup_format = None
         self._site_lookup_cache = None
+        self._missing_masks: Dict[str, List] = {}
+        self._missing_mask_rows: Union[List[List[int]], None] = None
         
         ## allele positions were not provided
         if not allele_positions:
@@ -53,6 +56,8 @@ class ArdalHeaderUtils:
             self.allele_positions = allele_positions
             self._allele_positions_from_bed = False
             self._allele_positions_from_ids = True
+
+        self._init_missing_masks(missing_masks)
             
         log.info(f"""Initialised HeaderUtils object with {len(self.headers['guids'])} GUIDs and {len(self.headers['alleles'])} alleles.
                                     allele_coords_bed = {self._allele_coords_bed}
@@ -639,6 +644,55 @@ class ArdalHeaderUtils:
             for pos, alleles in pos_dict.items()
             for allele in alleles
         }
+
+
+    def _init_missing_masks(self, missing_masks: Union[Dict, None]) -> None:
+        guid_list = self.headers.get("guids", []) if isinstance(self.headers, dict) else []
+        per_guid = {guid: [] for guid in guid_list}
+
+        if not missing_masks or not isinstance(missing_masks, dict):
+            self._missing_masks = per_guid
+            return
+
+        raw_per_guid = missing_masks.get("column_masks") or missing_masks.get("missing_masks")
+        if isinstance(raw_per_guid, dict):
+            for guid, sites in raw_per_guid.items():
+                if guid not in per_guid:
+                    continue
+                if isinstance(sites, (list, tuple, set)):
+                    per_guid[guid] = list(sites)
+                elif sites is None:
+                    per_guid[guid] = []
+                else:
+                    per_guid[guid] = [sites]
+
+        self._missing_masks = per_guid
+
+
+    def has_missing_mask(self) -> bool:
+        return any(self._missing_masks.values())
+
+
+    def get_guid_missing_mask(self, guid: str) -> List:
+        return self._missing_masks.get(guid, [])
+
+
+    def get_missing_mask_rows(self) -> Union[List[List[int]], None]:
+        """
+        Return a row-aligned list of missing-column indices for each GUID.
+        """
+        if not self.has_missing_mask():
+            return None
+        if self._missing_mask_rows is not None:
+            return self._missing_mask_rows
+
+        rows: List[List[int]] = []
+        for guid in self.headers.get("guids", []):
+            cols = self._missing_masks.get(guid, [])
+            rows.append(list(cols))
+
+        self._missing_mask_rows = rows
+        return self._missing_mask_rows
 
 
     def count_sites_for_alleles(self,

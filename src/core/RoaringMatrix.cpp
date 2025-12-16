@@ -7,44 +7,11 @@ Copyright 2025 Arthur V. Morris
 #include <queue>
 #include <limits>
 #include <unordered_set>
+#include <tuple>
 
 namespace py = pybind11;
 namespace ardal {
 
-namespace {
-
-inline uint32_t compute_snv_distance( const std::vector<uint64_t>& lhs,
-                                      const std::vector<uint64_t>& rhs ) {
-    std::size_t p = 0;
-    std::size_t q = 0;
-    uint32_t dist = 0;
-
-    while (p < lhs.size() && q < rhs.size()) {
-        const uint64_t li = lhs[p];
-        const uint64_t ri = rhs[q];
-        const uint32_t locus_l = static_cast<uint32_t>(li >> 3);
-        const uint32_t locus_r = static_cast<uint32_t>(ri >> 3);
-
-        if (locus_l == locus_r) {
-            const uint32_t base_l = static_cast<uint32_t>(li & 0x7u);
-            const uint32_t base_r = static_cast<uint32_t>(ri & 0x7u);
-            if (base_l != base_r) ++dist;
-            ++p;
-            ++q;
-        } else if (locus_l < locus_r) {
-            ++dist;
-            ++p;
-        } else {
-            ++dist;
-            ++q;
-        }
-    }
-
-    dist += static_cast<uint32_t>((lhs.size() - p) + (rhs.size() - q));
-    return dist;
-}
-
-} // namespace
 
 
 /****************************************************************************************************
@@ -69,7 +36,8 @@ inline uint32_t compute_snv_distance( const std::vector<uint64_t>& lhs,
  ****************************************************************************************************/
 RoaringMatrix::RoaringMatrix( ardal::detail::FlatMatrix matrix_,
                               std::shared_ptr<const std::vector<int>> row_masses,
-                              std::shared_ptr<const std::vector<int>> col_masses )
+                              std::shared_ptr<const std::vector<int>> col_masses,
+                              const std::vector<std::vector<uint32_t>>* missing_mask )
   : row_masses_(std::move(row_masses)),
     col_masses_(std::move(col_masses)),
     base_(matrix_.base),
@@ -107,6 +75,36 @@ RoaringMatrix::RoaringMatrix( ardal::detail::FlatMatrix matrix_,
         }
     }
 
+    if (missing_mask && !missing_mask->empty()) {
+        if (missing_mask->size() != n_rows_) {
+            throw std::runtime_error("RoaringMatrix: missing_mask row count mismatch");
+        }
+        missing_masks_.resize(n_rows_);
+        missing_mask_empty_.resize(n_rows_, true);
+        for (size_t i = 0; i < n_rows_; ++i) {
+            const auto& cols = (*missing_mask)[i];
+            if (cols.empty()) {
+                missing_mask_empty_[i] = true;
+                continue;
+            }
+            roaring::Roaring mask;
+            for (uint32_t col : cols) {
+                if (col < n_cols_bits_) {
+                    mask.add(col);
+                }
+            }
+            if (!mask.isEmpty()) {
+                missing_masks_[i] = std::move(mask);
+                has_missing_mask_ = true;
+                missing_mask_empty_[i] = false;
+            } else {
+                missing_mask_empty_[i] = true;
+            }
+        }
+    } else {
+        missing_mask_empty_.assign(n_rows_, true);
+    }
+
     std::stringstream ss;
     ss << "n_rows_ = " << n_rows_ << "; " << "n_cols_bits_ = " << n_cols_bits_ << "; " << "roaring_bitmap_.size() = " << roaring_bitmap_.size();
     ardal::utils::log_debug(static_cast<string>(ss.str()));
@@ -133,7 +131,7 @@ RoaringMatrix::RoaringMatrix( ardal::detail::FlatMatrix matrix_,
  *                     the pairwise Hamming distances. The length of the array is n*(n-1)/2,
  *                     where 'n' is the number of rows in the matrix.
  ****************************************************************************************************/
-py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
+py::array_t<uint32_t> RoaringMatrix::hamming( int threads, bool mask_missing ) const {
     ardal::utils::log_info("Running RoaringMatrix::hamming with scalar instructions.");
 
     const size_t total_pairs = n_rows_ * (n_rows_ - 1) / 2;
@@ -144,11 +142,13 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
 
         auto dist_ptr = dist_matrix.mutable_data();
 
+        const bool apply_mask = mask_missing && has_missing_mask_;
         #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (size_t i = 0; i < n_rows_; ++i) {
             for (size_t j = i + 1; j < n_rows_; ++j) {
                 size_t idx = (i * (2 * n_rows_ - i - 1)) / 2 + (j - i - 1);
-                dist_ptr[idx] = hammingDistance(i, j);
+                dist_ptr[idx] = apply_mask ? maskedHammingDistance(i, j)
+                                           : hammingDistance(i, j);
             }
         }
     }     
@@ -177,54 +177,95 @@ py::array_t<uint32_t> RoaringMatrix::hamming( int threads ) const {
  ****************************************************************************************************/
 py::array_t<uint32_t> RoaringMatrix::hamming_subset( const std::vector<size_t>& row_indices,
                                                      const std::vector<size_t>& col_indices,
-                                                     int threads ) const {
+                                                     int threads,
+                                                     bool mask_missing ) const {
     ardal::utils::log_info("Running RoaringMatrix::hamming_subset with scalar instructions.");
 
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
 
-    // create matrix mask
-    roaring::Roaring col_mask_bitmap;
-    for (size_t col_idx : col_indices) {
-        if (col_idx >= n_cols_bits_) {
-            throw std::out_of_range("Column index in col_indices is out of bounds.");
-        }
-        col_mask_bitmap.add(col_idx);
-    }
-
-    // create a submatrix using the mask and original matrix
-    std::vector<roaring::Roaring> submatrix;
-    submatrix.reserve(row_indices.size());
     for (size_t row_idx : row_indices) {
         if (row_idx >= n_rows_) {
             throw std::out_of_range("Row index in row_indices is out of bounds.");
         }
-        submatrix.push_back(roaring_bitmap_.at(row_idx) & col_mask_bitmap);
     }
 
-    // hamming distance stuff
-    const size_t submn_rows_ = submatrix.size();
-    if (submn_rows_ == 0) {
-        return py::array_t<uint32_t>(0);
+    const size_t submn_rows_ = row_indices.size();
+    if (submn_rows_ <= 1) {
+        return py::array_t<uint32_t>(static_cast<py::ssize_t>(0));
     }
     const size_t total_pairs = submn_rows_ * (submn_rows_ - 1) / 2;
-    py::array_t<uint32_t> dist_matrix(total_pairs);
+    if (col_indices.empty()) {
+        py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
+        std::fill_n(zeros.mutable_data(), static_cast<py::ssize_t>(total_pairs), uint32_t{0});
+        return zeros;
+    }
 
-    py::gil_scoped_release release;   // release GIL for full parallel region
+    const bool use_mask = !isFullColumnSelection(col_indices);
+    std::vector<roaring::Roaring> masked_rows;
+    std::vector<int> masked_masses;
+    std::vector<roaring::Roaring> masked_missing;
+    roaring::Roaring column_mask;
 
-    #pragma omp parallel num_threads(threads)
-    {
-        auto dist_ptr = dist_matrix.mutable_data();
-
-        #pragma omp for schedule(dynamic, 1)
+    if (use_mask) {
+        column_mask = buildColumnMask(col_indices);
+        if (column_mask.isEmpty()) {
+            py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
+            std::fill_n(zeros.mutable_data(), static_cast<py::ssize_t>(total_pairs), uint32_t{0});
+            return zeros;
+        }
+        masked_rows.resize(submn_rows_);
+        masked_masses.resize(submn_rows_);
+        if (mask_missing && has_missing_mask_) {
+            masked_missing.resize(submn_rows_);
+        }
         for (size_t i = 0; i < submn_rows_; ++i) {
-            for (size_t j = i + 1; j < submn_rows_; ++j) {
-                size_t idx = (i * (2 * submn_rows_ - i - 1)) / 2 + (j - i - 1);
-                dist_ptr[idx] = (submatrix[i] ^ submatrix[j]).cardinality();
+            masked_rows[i] = roaring_bitmap_.at(row_indices[i]) & column_mask;
+            masked_masses[i] = static_cast<int>(masked_rows[i].cardinality());
+            if (!masked_missing.empty()) {
+                masked_missing[i] = missing_masks_[row_indices[i]] & column_mask;
             }
         }
-    }   // end parallel region
+    }
+
+    py::array_t<uint32_t> dist_matrix(static_cast<py::ssize_t>(total_pairs));
+
+    py::gil_scoped_release release;   // release GIL for full parallel region
+    auto dist_ptr = dist_matrix.mutable_data();
+
+    const bool apply_mask = mask_missing && has_missing_mask_;
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+    for (size_t i = 0; i < submn_rows_; ++i) {
+        const size_t idx_base = (i * (2 * submn_rows_ - i - 1)) / 2;
+        for (size_t j = i + 1; j < submn_rows_; ++j) {
+            uint32_t dist_val;
+            if (use_mask) {
+                if (apply_mask) {
+                    roaring::Roaring diff = masked_rows[i] ^ masked_rows[j];
+                    if (!masked_missing.empty()) {
+                        roaring::Roaring mask_union = masked_missing[i];
+                        mask_union |= masked_missing[j];
+                        diff -= mask_union;
+                    }
+                    dist_val = static_cast<uint32_t>(diff.cardinality());
+                } else {
+                    const int mi = masked_masses[i];
+                    const int mj = masked_masses[j];
+                    const uint32_t inter = static_cast<uint32_t>(masked_rows[i].and_cardinality(masked_rows[j]));
+                    dist_val = static_cast<uint32_t>(mi + mj - (static_cast<int>(inter) << 1));
+                }
+            } else {
+                if (apply_mask) {
+                    dist_val = maskedHammingDistance(row_indices[i], row_indices[j]);
+                } else {
+                    dist_val = hammingDistance(row_indices[i], row_indices[j]);
+                }
+            }
+            dist_ptr[idx_base + (j - i - 1)] = dist_val;
+        }
+    }
+
     return dist_matrix;
 }
 
@@ -250,6 +291,14 @@ inline uint32_t RoaringMatrix::hammingDistance( size_t i, size_t j ) const {
     const int mj = (*row_masses_)[j];
     const uint32_t inter = roaring_bitmap_[i].and_cardinality(roaring_bitmap_[j]);
     return static_cast<uint32_t>(mi + mj - (inter << 1));
+}
+
+inline uint32_t RoaringMatrix::maskedHammingDistance( size_t i, size_t j ) const {
+    roaring::Roaring diff = roaring_bitmap_[i] ^ roaring_bitmap_[j];
+    roaring::Roaring mask_union = missing_masks_[i];
+    mask_union |= missing_masks_[j];
+    diff -= mask_union;
+    return static_cast<uint32_t>(diff.cardinality());
 }
 
 
@@ -521,40 +570,44 @@ py::array_t<double> RoaringMatrix::cosineDistance_subset( const std::vector<size
         return py::array_t<double>(static_cast<py::ssize_t>(0));
     }
 
-    const size_t submn_cols_ = col_indices.size();
     const size_t total_pairs = submn_rows_ * (submn_rows_ - 1) / 2;
     py::array_t<double> dist_condensed(static_cast<py::ssize_t>(total_pairs));
     double* dist_ptr = dist_condensed.mutable_data();
 
-    if (submn_cols_ == 0) {
+    if (col_indices.empty()) {
         std::fill(dist_ptr, dist_ptr + total_pairs, 0.0);
         return dist_condensed;
     }
 
-    roaring::Roaring col_mask_bitmap;
-    for (size_t col_idx : col_indices) {
-        if (col_idx >= n_cols_bits_) {
-            throw std::out_of_range("Column index in col_indices is out of bounds.");
-        }
-        col_mask_bitmap.add(static_cast<uint32_t>(col_idx));
-    }
-
-    std::vector<roaring::Roaring> submatrix;
-    submatrix.reserve(submn_rows_);
     for (size_t row_idx : row_indices) {
         if (row_idx >= n_rows_) {
             throw std::out_of_range("Row index in row_indices is out of bounds.");
         }
-        roaring::Roaring masked = roaring_bitmap_[row_idx];
-        masked &= col_mask_bitmap;
-        submatrix.emplace_back(std::move(masked));
     }
 
+    const bool use_mask = !isFullColumnSelection(col_indices);
     std::vector<double> norms(submn_rows_, 0.0);
-    for (size_t i = 0; i < submn_rows_; ++i) {
-        uint64_t mass = submatrix[i].cardinality();
-        norms[i] = mass > 0 ? std::sqrt(static_cast<double>(mass)) : 0.0;
+    std::vector<roaring::Roaring> masked_rows;
+
+    if (use_mask) {
+        roaring::Roaring column_mask = buildColumnMask(col_indices);
+        if (column_mask.isEmpty()) {
+            std::fill(dist_ptr, dist_ptr + total_pairs, 0.0);
+            return dist_condensed;
+        }
+        masked_rows.resize(submn_rows_);
+        for (size_t i = 0; i < submn_rows_; ++i) {
+            masked_rows[i] = roaring_bitmap_.at(row_indices[i]) & column_mask;
+            const uint64_t mass = masked_rows[i].cardinality();
+            norms[i] = mass > 0 ? std::sqrt(static_cast<double>(mass)) : 0.0;
+        }
+    } else {
+        for (size_t i = 0; i < submn_rows_; ++i) {
+            const int mass = (*row_masses_)[row_indices[i]];
+            norms[i] = mass > 0 ? std::sqrt(static_cast<double>(mass)) : 0.0;
+        }
     }
+
 
     {
         py::gil_scoped_release release;
@@ -562,7 +615,6 @@ py::array_t<double> RoaringMatrix::cosineDistance_subset( const std::vector<size
         for (size_t i = 0; i < submn_rows_; ++i) {
             const double norm_i = norms[i];
             const size_t idx_base = (i * (2 * submn_rows_ - i - 1)) / 2;
-            const auto& bitmap_i = submatrix[i];
 
             for (size_t j = i + 1; j < submn_rows_; ++j) {
                 const double norm_j = norms[j];
@@ -572,7 +624,12 @@ py::array_t<double> RoaringMatrix::cosineDistance_subset( const std::vector<size
                 if (denom == 0.0) {
                     distance = (norm_i == 0.0 && norm_j == 0.0) ? 0.0 : 1.0;
                 } else {
-                    const uint64_t dot = bitmap_i.and_cardinality(submatrix[j]);
+                    uint64_t dot;
+                    if (use_mask) {
+                        dot = masked_rows[i].and_cardinality(masked_rows[j]);
+                    } else {
+                        dot = roaring_bitmap_[row_indices[i]].and_cardinality(roaring_bitmap_[row_indices[j]]);
+                    }
                     double cosine = static_cast<double>(dot) / denom;
                     if (cosine > 1.0) cosine = 1.0;
                     else if (cosine < -1.0) cosine = -1.0;
@@ -624,6 +681,63 @@ py::array_t<int> RoaringMatrix::innerProduct( int threads ) const {
         }   // end of parallel region
     }   // GIL reestablished
     return inner_product_matrix;
+}
+
+
+bool RoaringMatrix::isFullColumnSelection( const std::vector<size_t>& col_indices ) const {
+    if (col_indices.size() != n_cols_bits_) {
+        return false;
+    }
+    for (size_t idx = 0; idx < col_indices.size(); ++idx) {
+        if (col_indices[idx] != idx) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+roaring::Roaring RoaringMatrix::buildColumnMask( const std::vector<size_t>& col_indices ) const {
+    roaring::Roaring mask;
+    for (size_t col_idx : col_indices) {
+        if (col_idx >= n_cols_bits_) {
+            throw std::out_of_range("Column index in col_indices is out of bounds.");
+        }
+        mask.add(static_cast<uint32_t>(col_idx));
+    }
+    return mask;
+}
+
+
+std::vector<uint8_t> RoaringMatrix::buildLocusMask( const std::vector<size_t>& col_indices ) const {
+    const uint32_t invalid_locus = std::numeric_limits<uint32_t>::max();
+    std::vector<uint32_t> loci;
+    loci.reserve(col_indices.size());
+    uint32_t max_locus = 0;
+    bool has_locus = false;
+
+    for (size_t col_idx : col_indices) {
+        if (col_idx >= n_cols_bits_) {
+            throw std::out_of_range("Column index in col_indices is out of bounds.");
+        }
+        const uint32_t locus = allele_to_locus_.empty() ? invalid_locus : allele_to_locus_[col_idx];
+        if (locus == invalid_locus) continue;
+        loci.push_back(locus);
+        if (!has_locus || locus > max_locus) {
+            max_locus = locus;
+            has_locus = true;
+        }
+    }
+
+    if (!has_locus) {
+        return {};
+    }
+
+    std::vector<uint8_t> mask(static_cast<std::size_t>(max_locus) + 1, 0u);
+    for (uint32_t locus : loci) {
+        mask[locus] = 1u;
+    }
+    return mask;
 }
 
 /****************************************************************************************************
@@ -1507,32 +1621,43 @@ void RoaringMatrix::prepareSnvView( py::array_t<uint32_t> allele_to_locus,
     allele_to_base_.assign(base_ptr, base_ptr + base_buf.size);
 
     snv_vectors_.clear();
+    snv_entries_.clear();
     snv_lookup_loaded_ = true;
     snv_vectors_ready_ = false;
+    snv_entries_ready_ = false;
 
     ardal::utils::log_info("RoaringMatrix SNV lookup loaded; vectors will be materialised on demand.");
 }
 
 
 void RoaringMatrix::ensure_snv_vectors() const {
-    if (snv_vectors_ready_) return;
+    if (snv_vectors_ready_ && (!has_missing_mask_ || snv_entries_ready_)) return;
     if (!snv_lookup_loaded_) {
         throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
     }
 
     snv_vectors_.assign(n_rows_, {});
+    if (has_missing_mask_) {
+        snv_entries_.assign(n_rows_, {});
+        snv_entries_ready_ = false;
+    }
     const uint32_t invalid_locus = std::numeric_limits<uint32_t>::max();
 
     for (std::size_t row = 0; row < n_rows_; ++row) {
         const auto& bitmap = roaring_bitmap_[row];
         if (bitmap.isEmpty()) continue;
 
-        std::vector<std::pair<uint32_t, uint8_t>> collected;
+        const roaring::Roaring* self_missing = (has_missing_mask_ && row < missing_masks_.size() && !missing_masks_[row].isEmpty())
+                                               ? &missing_masks_[row]
+                                               : nullptr;
+
+        std::vector<std::tuple<uint32_t, uint8_t, uint32_t>> collected;
         collected.reserve(bitmap.cardinality());
 
         for (auto it = bitmap.begin(); it != bitmap.end(); ++it) {
             const uint32_t col = *it;
             if (col >= n_cols_bits_) continue;
+            if (self_missing && self_missing->contains(col)) continue;
 
             const uint32_t locus_id = allele_to_locus_[col];
             if (locus_id == invalid_locus) continue;
@@ -1540,25 +1665,30 @@ void RoaringMatrix::ensure_snv_vectors() const {
             const uint8_t base_code = allele_to_base_[col];
             if (base_code == 0) continue;
 
-            collected.emplace_back(locus_id, base_code);
+            collected.emplace_back(locus_id, base_code, col);
         }
 
         if (collected.empty()) continue;
 
         std::sort(collected.begin(), collected.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
 
         std::vector<uint64_t> encoded;
         encoded.reserve(collected.size());
+
+        if (has_missing_mask_) {
+            snv_entries_[row].reserve(collected.size());
+        }
 
         std::size_t idx = 0;
         while (idx < collected.size()) {
             std::size_t j = idx + 1;
             bool conflict = false;
-            const uint32_t locus_id = collected[idx].first;
-            const uint8_t base_code = collected[idx].second;
-            while (j < collected.size() && collected[j].first == locus_id) {
-                if (collected[j].second != base_code) {
+            const uint32_t locus_id = std::get<0>(collected[idx]);
+            const uint8_t base_code = std::get<1>(collected[idx]);
+            const uint32_t col_id = std::get<2>(collected[idx]);
+            while (j < collected.size() && std::get<0>(collected[j]) == locus_id) {
+                if (std::get<1>(collected[j]) != base_code) {
                     conflict = true;
                 }
                 ++j;
@@ -1567,6 +1697,9 @@ void RoaringMatrix::ensure_snv_vectors() const {
             if (!conflict) {
                 encoded.push_back((static_cast<uint64_t>(locus_id) << 3) |
                                   static_cast<uint64_t>(base_code & 0x7u));
+                if (has_missing_mask_) {
+                    snv_entries_[row].push_back(SnvEntry{col_id, locus_id, base_code});
+                }
             }
 
             idx = j;
@@ -1576,13 +1709,206 @@ void RoaringMatrix::ensure_snv_vectors() const {
     }
 
     snv_vectors_ready_ = true;
+    if (has_missing_mask_) {
+        snv_entries_ready_ = true;
+    }
+}
+
+
+/****************************************************************************************************
+ * ardal::RoaringMatrix::snvDistanceRaw
+ *
+ * Compute the SNV Hamming distance between two encoded vectors, optionally filtering by locus mask.
+ *
+ * INPUT:
+ *  lhs (const std::vector<uint64_t>&) : Encoded SNV vector for the left row (locus << 3 | base).
+ *  rhs (const std::vector<uint64_t>&) : Encoded SNV vector for the right row.
+ *  locus_mask (const std::vector<uint8_t>*): Optional locus allow mask; nullptr to disable.
+ *
+ * OUTPUT:
+ *  uint32_t : The SNV Hamming distance between lhs and rhs.
+ ****************************************************************************************************/
+uint32_t RoaringMatrix::snvDistanceRaw( const std::vector<uint64_t>& lhs,
+                                        const std::vector<uint64_t>& rhs,
+                                        const std::vector<uint8_t>* locus_mask ) const {
+    const bool use_mask = (locus_mask && !locus_mask->empty());
+    if (!use_mask) {
+        std::size_t p = 0, q = 0;
+        uint32_t dist = 0;
+        while (p < lhs.size() && q < rhs.size()) {
+            const uint64_t li = lhs[p];
+            const uint64_t ri = rhs[q];
+            const uint32_t locus_l = static_cast<uint32_t>(li >> 3);
+            const uint32_t locus_r = static_cast<uint32_t>(ri >> 3);
+            if (locus_l == locus_r) {
+                const uint32_t base_l = static_cast<uint32_t>(li & 0x7u);
+                const uint32_t base_r = static_cast<uint32_t>(ri & 0x7u);
+                if (base_l != base_r) ++dist;
+                ++p; ++q;
+            } else if (locus_l < locus_r) {
+                ++dist; ++p;
+            } else {
+                ++dist; ++q;
+            }
+        }
+        dist += static_cast<uint32_t>((lhs.size() - p) + (rhs.size() - q));
+        return dist;
+    }
+
+    constexpr uint32_t INVALID = std::numeric_limits<uint32_t>::max();
+    auto advance = [&](const std::vector<uint64_t>& vec, std::size_t& pos) -> uint32_t {
+        while (pos < vec.size()) {
+            const uint32_t locus = static_cast<uint32_t>(vec[pos] >> 3);
+            if (locus < locus_mask->size() && (*locus_mask)[locus]) {
+                return locus;
+            }
+            ++pos;
+        }
+        return INVALID;
+    };
+    auto remaining = [&](const std::vector<uint64_t>& vec, std::size_t pos) -> uint32_t {
+        uint32_t count = 0;
+        while (pos < vec.size()) {
+            const uint32_t locus = static_cast<uint32_t>(vec[pos] >> 3);
+            if (locus < locus_mask->size() && (*locus_mask)[locus]) {
+                ++count;
+            }
+            ++pos;
+        }
+        return count;
+    };
+
+    std::size_t p = 0, q = 0;
+    uint32_t dist = 0;
+    while (true) {
+        const uint32_t locus_l = advance(lhs, p);
+        const uint32_t locus_r = advance(rhs, q);
+        const bool lhs_done = (locus_l == INVALID);
+        const bool rhs_done = (locus_r == INVALID);
+        if (lhs_done || rhs_done) {
+            if (!lhs_done) dist += remaining(lhs, p);
+            if (!rhs_done) dist += remaining(rhs, q);
+            break;
+        }
+
+        if (locus_l == locus_r) {
+            const uint32_t base_l = static_cast<uint32_t>(lhs[p] & 0x7u);
+            const uint32_t base_r = static_cast<uint32_t>(rhs[q] & 0x7u);
+            if (base_l != base_r) ++dist;
+            ++p; ++q;
+        } else if (locus_l < locus_r) {
+            ++dist; ++p;
+        } else {
+            ++dist; ++q;
+        }
+    }
+    return dist;
+}
+
+
+/****************************************************************************************************
+ * ardal::RoaringMatrix::snvDistanceMaskedEntries
+ *
+ * Compute SNV distance between two per-row entry lists, applying per-row missing masks and an
+ * optional locus mask.
+ *
+ * INPUT:
+ *  lhs (const std::vector<SnvEntry>&) : SNV entries for the left row (col, locus, base).
+ *  rhs (const std::vector<SnvEntry>&) : SNV entries for the right row.
+ *  mask_l (const roaring::Roaring*)   : Missing mask for the left row (columns to skip).
+ *  mask_r (const roaring::Roaring*)   : Missing mask for the right row.
+ *  locus_mask (const std::vector<uint8_t>*): Optional locus allow mask; nullptr to disable.
+ *
+ * OUTPUT:
+ *  uint32_t : The SNV Hamming distance with masks applied.
+ ****************************************************************************************************/
+uint32_t RoaringMatrix::snvDistanceMaskedEntries( const std::vector<SnvEntry>& lhs,
+                                                  const std::vector<SnvEntry>& rhs,
+                                                  const roaring::Roaring* mask_l,
+                                                  const roaring::Roaring* mask_r,
+                                                  const std::vector<uint8_t>* locus_mask ) const {
+    const bool use_locus_mask = (locus_mask && !locus_mask->empty());
+    auto advance_valid = [&](const std::vector<SnvEntry>& vec,
+                             std::size_t& idx,
+                             const roaring::Roaring* self_mask,
+                             const roaring::Roaring* other_mask) -> bool {
+        while (idx < vec.size()) {
+            const auto& e = vec[idx];
+            if (use_locus_mask) {
+                if (e.locus >= locus_mask->size() || (*locus_mask)[e.locus] == 0) {
+                    ++idx;
+                    continue;
+                }
+            }
+            if ((self_mask && self_mask->contains(e.col)) ||
+                (other_mask && other_mask->contains(e.col))) {
+                ++idx;
+                continue;
+            }
+            return true;
+        }
+        return false;
+    };
+
+    std::size_t p = 0, q = 0;
+    uint32_t dist = 0;
+    bool has_l = advance_valid(lhs, p, mask_l, mask_r);
+    bool has_r = advance_valid(rhs, q, mask_r, mask_l);
+
+    while (has_l || has_r) {
+        if (!has_l) {
+            ++dist;
+            has_r = advance_valid(rhs, q, mask_r, mask_l);
+            continue;
+        }
+        if (!has_r) {
+            ++dist;
+            has_l = advance_valid(lhs, p, mask_l, mask_r);
+            continue;
+        }
+
+        const auto& le = lhs[p];
+        const auto& re = rhs[q];
+        if (le.locus == re.locus) {
+            if (le.base != re.base) ++dist;
+            has_l = advance_valid(lhs, ++p, mask_l, mask_r);
+            has_r = advance_valid(rhs, ++q, mask_r, mask_l);
+        } else if (le.locus < re.locus) {
+            ++dist;
+            has_l = advance_valid(lhs, ++p, mask_l, mask_r);
+        } else {
+            ++dist;
+            has_r = advance_valid(rhs, ++q, mask_r, mask_l);
+        }
+    }
+    return dist;
 }
 
 
 uint32_t RoaringMatrix::snvDistance( size_t i, size_t j ) const {
     const auto& lhs = snv_vectors_[i];
     const auto& rhs = snv_vectors_[j];
-    return compute_snv_distance(lhs, rhs);
+    return snvDistanceRaw(lhs, rhs, nullptr);
+}
+
+
+/****************************************************************************************************
+ * ardal::RoaringMatrix::snvDistanceMasked
+ *
+ * Compute SNV distance for two rows, honoring missing masks and an optional locus mask.
+ *
+ * INPUT:
+ *  i (size_t)                         : Row index for the left operand.
+ *  j (size_t)                         : Row index for the right operand.
+ *  locus_mask (const std::vector<uint8_t>*): Optional locus allow mask; nullptr to disable.
+ *
+ * OUTPUT:
+ *  uint32_t : The SNV Hamming distance with masks applied.
+ ****************************************************************************************************/
+uint32_t RoaringMatrix::snvDistanceMasked( size_t i,
+                                           size_t j,
+                                           const std::vector<uint8_t>* locus_mask ) const {
+    return snvDistanceRaw(snv_vectors_[i], snv_vectors_[j], (locus_mask && !locus_mask->empty()) ? locus_mask : nullptr);
 }
 
 
@@ -1603,7 +1929,8 @@ uint32_t RoaringMatrix::snvDistance( size_t i, size_t j ) const {
  ****************************************************************************************************/
 py::array_t<int64_t> RoaringMatrix::snvNeighbourhood( size_t row_idx,
                                                       uint32_t epsilon,
-                                                      int threads ) const {
+                                                      int threads,
+                                                      bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -1615,6 +1942,7 @@ py::array_t<int64_t> RoaringMatrix::snvNeighbourhood( size_t row_idx,
     }
 
     ensure_snv_vectors();
+    (void)mask_missing;
     ardal::utils::log_info("Running RoaringMatrix::snvNeighbourhood.");
 
     const int T = std::max(1, threads);
@@ -1685,7 +2013,8 @@ py::array_t<int64_t> RoaringMatrix::snvNeighbourhood( size_t row_idx,
  ****************************************************************************************************/
 py::list RoaringMatrix::knnSnv( size_t row_idx,
                                 int k,
-                                int threads ) const {
+                                int threads,
+                                bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -1700,6 +2029,7 @@ py::list RoaringMatrix::knnSnv( size_t row_idx,
     }
 
     ensure_snv_vectors();
+    (void)mask_missing;
     ardal::utils::log_info("Running RoaringMatrix::knnSnv.");
 
     const std::size_t n = n_rows_;
@@ -1807,7 +2137,8 @@ py::list RoaringMatrix::knnSnv( size_t row_idx,
  * OUTPUT:
  *  py::array_t<uint32_t> : Condensed lower-triangular distance matrix.
  ****************************************************************************************************/
-py::array_t<uint32_t> RoaringMatrix::snvHamming( int threads ) const {
+py::array_t<uint32_t> RoaringMatrix::snvHamming( int threads,
+                                                 bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -1824,6 +2155,7 @@ py::array_t<uint32_t> RoaringMatrix::snvHamming( int threads ) const {
     py::array_t<uint32_t> dist_condensed(static_cast<py::ssize_t>(total_pairs));
     auto* dist_ptr = dist_condensed.mutable_data();
 
+    (void)mask_missing;
     ardal::utils::log_info("Running RoaringMatrix::snvHamming.");
     {
         py::gil_scoped_release release;
@@ -1857,7 +2189,8 @@ py::array_t<uint32_t> RoaringMatrix::snvHamming( int threads ) const {
  ****************************************************************************************************/
 py::array_t<uint32_t> RoaringMatrix::snvHamming_subset( const std::vector<size_t>& row_indices,
                                                        const std::vector<size_t>& col_indices,
-                                                       int threads ) const {
+                                                       int threads,
+                                                       bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -1873,49 +2206,33 @@ py::array_t<uint32_t> RoaringMatrix::snvHamming_subset( const std::vector<size_t
         return py::array_t<uint32_t>(static_cast<py::ssize_t>(0));
     }
 
-    const uint32_t invalid_locus = std::numeric_limits<uint32_t>::max();
-    std::unordered_set<uint32_t> allowed_loci;
-    allowed_loci.reserve(col_indices.size());
-    for (size_t col_idx : col_indices) {
-        if (col_idx >= n_cols_bits_) {
-            throw std::out_of_range("Column index in col_indices is out of bounds.");
-        }
-        const uint32_t locus = allele_to_locus_[col_idx];
-        if (locus != invalid_locus) {
-            allowed_loci.insert(locus);
-        }
-    }
-
-    if (allowed_loci.empty()) {
-        const size_t total_pairs = sub_rows * (sub_rows - 1) / 2;
-        py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
-        auto* zero_ptr = zeros.mutable_data();
-        std::fill(zero_ptr, zero_ptr + total_pairs, static_cast<uint32_t>(0));
-        return zeros;
-    }
-
     for (size_t row_idx : row_indices) {
         if (row_idx >= n_rows_) {
             throw std::out_of_range("Row index in row_indices is out of bounds.");
         }
     }
 
-    std::vector<std::vector<uint64_t>> subset_vectors;
-    subset_vectors.reserve(row_indices.size());
-    for (size_t row_idx : row_indices) {
-        const auto& src = snv_vectors_[row_idx];
-        std::vector<uint64_t> filtered;
-        filtered.reserve(src.size());
-        for (uint64_t entry : src) {
-            const uint32_t locus = static_cast<uint32_t>(entry >> 3);
-            if (allowed_loci.count(locus) != 0) {
-                filtered.push_back(entry);
-            }
-        }
-        subset_vectors.push_back(std::move(filtered));
+    const size_t total_pairs = sub_rows * (sub_rows - 1) / 2;
+    if (col_indices.empty()) {
+        py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
+        auto* zero_ptr = zeros.mutable_data();
+        std::fill(zero_ptr, zero_ptr + total_pairs, static_cast<uint32_t>(0));
+        return zeros;
     }
 
-    const size_t total_pairs = sub_rows * (sub_rows - 1) / 2;
+    const bool use_mask = !isFullColumnSelection(col_indices);
+    std::vector<uint8_t> locus_mask;
+    if (use_mask) {
+        locus_mask = buildLocusMask(col_indices);
+        if (locus_mask.empty()) {
+            py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
+            auto* zero_ptr = zeros.mutable_data();
+            std::fill(zero_ptr, zero_ptr + total_pairs, static_cast<uint32_t>(0));
+            return zeros;
+        }
+    }
+
+    (void)mask_missing;
     py::array_t<uint32_t> dist_matrix(static_cast<py::ssize_t>(total_pairs));
     auto* dist_ptr = dist_matrix.mutable_data();
 
@@ -1924,13 +2241,16 @@ py::array_t<uint32_t> RoaringMatrix::snvHamming_subset( const std::vector<size_t
 
         #pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
         for (size_t i = 0; i < sub_rows; ++i) {
-            const auto& lhs = subset_vectors[i];
-            const size_t idx_base = (i * (2 * sub_rows - i - 1)) / 2;
-            for (size_t j = i + 1; j < sub_rows; ++j) {
-                const auto& rhs = subset_vectors[j];
-                dist_ptr[idx_base + (j - i - 1)] = compute_snv_distance(lhs, rhs);
+                const size_t lhs_idx = row_indices[i];
+                const size_t idx_base = (i * (2 * sub_rows - i - 1)) / 2;
+                for (size_t j = i + 1; j < sub_rows; ++j) {
+                    const size_t rhs_idx = row_indices[j];
+                    uint32_t dist_val = use_mask
+                        ? snvDistanceRaw(snv_vectors_[lhs_idx], snv_vectors_[rhs_idx], &locus_mask)
+                        : snvDistance(lhs_idx, rhs_idx);
+                    dist_ptr[idx_base + (j - i - 1)] = dist_val;
+                }
             }
-        }
     }
 
     return dist_matrix;

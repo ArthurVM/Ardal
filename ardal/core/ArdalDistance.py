@@ -20,7 +20,8 @@ class ArdalDistance:
     def __init__( self,
                   headerUtils,
                   hybrid_matrix,
-                  roaring_enabled : bool ):
+                  roaring_enabled : bool 
+                  ):
 
         self._headerUtils = headerUtils
         self._matrix = hybrid_matrix
@@ -36,20 +37,26 @@ class ArdalDistance:
     @check_guids_list
     @check_alleles_list
     def pairwise( self,
-                  guids: Union[list, None] = None,
-                  alleles: Union[list, None] = None,
-                  intervals: Union[list, None] = None,
-                  intervals_bed: Union[str, None] = None,
-                  allele_coords_bed: Union[str, None] = None,
-                  metric: str = "hamming",
-                  use_simd: bool = True,
-                  threads: int = 1,
-                  backend: str = "auto",
-                  allele_id_format: Union[str, None] = None,
+                  ## subsetters
+                  guids : Union[list, None] = None,
+                  alleles : Union[list, None] = None,
                   *,
-                  return_square: bool = False,
-                  as_dataframe: bool = False,
-                  normalize_by_sites: bool = False,
+                  ## distance computation parameters
+                  normalise_by_sites : bool = False,
+                  metric : str = "hamming",
+                  mask_missing : bool = False,
+                  ## interval parameters
+                  intervals : Union[list, None] = None,
+                  intervals_bed : Union[str, None] = None,
+                  allele_coords_bed : Union[str, None] = None,
+                  allele_id_format : Union[str, None] = None,
+                  ## backend parameters
+                  use_simd : bool = True,
+                  threads : int = 1,
+                  backend : str = "auto",
+                  ## return parameters
+                  return_square : bool = False,
+                  as_dataframe : bool = False,
                   ) -> Union[np.ndarray, pd.DataFrame]:
         """
         Compute pairwise distances.
@@ -61,7 +68,7 @@ class ArdalDistance:
                 * NumPy (n x n) array if as_dataframe=False
                 * pandas.DataFrame if as_dataframe=True
 
-        When `normalize_by_sites` is True (supported for Hamming and SNV metrics only),
+        When `normalise_by_sites` is True (supported for Hamming and SNV metrics only),
         distances are divided by the number of genomic sites represented by the alleles
         included in the computation.
 
@@ -86,9 +93,12 @@ class ArdalDistance:
 
         metric_lower = metric.lower()
         normalize_supported = {"hamming", "snv"}
-        normalize_sites = bool(normalize_by_sites and metric_lower in normalize_supported)
-        if normalize_by_sites and not normalize_sites:
-            log.warning("normalize_by_sites is only supported for 'hamming' and 'snv' metrics; flag ignored.")
+        normalize_sites = bool(normalise_by_sites and metric_lower in normalize_supported)
+        if normalise_by_sites and not normalize_sites:
+            log.warning("normalise_by_sites is only supported for 'hamming' and 'snv' metrics; flag ignored.")
+        mask_supported = {"hamming", "inner_product", "innerproduct", "cosine", "snv"}
+        if mask_missing and metric_lower not in mask_supported:
+            raise ParameterError("mask_missing is currently only supported for the 'hamming', 'inner_product'/'innerproduct', and 'cosine' metrics.")
         
         ## raise a warning if the user requests a lower triangle dataframe
         if not return_square and as_dataframe:
@@ -100,6 +110,7 @@ class ArdalDistance:
             "use_simd": use_simd,
             "threads": threads,
             "backend": backend,
+            "mask_missing": bool(mask_missing),
         }
 
         if metric_lower == "snv":
@@ -203,7 +214,8 @@ class ArdalDistance:
 
 
     @staticmethod
-    def _metric_dtype(metric: str):
+    def _metric_dtype( metric: str 
+                       ) -> Union[np.float32, np.uint32, np.float64, np.uint32]:
         m = metric.lower()
         if m == "jaccard":
             return np.float32
@@ -217,7 +229,9 @@ class ArdalDistance:
 
 
     @staticmethod
-    def _expand_condensed(condensed: np.ndarray, n: int, dtype) -> np.ndarray:
+    def _expand_condensed( condensed: np.ndarray,
+                           n: int, dtype
+                           ) -> np.ndarray:
         """
         Build nxn square array from condensed vector.
         """
@@ -234,6 +248,7 @@ class ArdalDistance:
                           use_simd: bool = True,
                           threads: int = 1,
                           backend: str = "auto",
+                          mask_missing: bool = False,
                           ) -> np.ndarray:
         """ Pairwise distance computation for a matrix.
 
@@ -255,13 +270,22 @@ class ArdalDistance:
         if metric == "jaccard":
             dist_tri = self._matrix.jaccard(use_simd=use_simd, threads=threads, backend=backend)
         elif metric == "hamming":
-            dist_tri = self._matrix.hamming(use_simd=use_simd, threads=threads, backend=backend)
+            dist_tri = self._matrix.hamming(use_simd=use_simd,
+                                            threads=threads,
+                                            backend=backend,
+                                            mask_missing=mask_missing)
         elif metric == "inner_product":
-            dist_tri = self._matrix.innerProduct(use_simd=use_simd, threads=threads, backend=backend)
+            dist_tri = self._matrix.innerProduct(use_simd=use_simd,
+                                                 threads=threads,
+                                                 backend=backend,
+                                                 mask_missing=mask_missing)
         elif metric == "cosine":
-            dist_tri = self._matrix.cosineDistance(use_simd=use_simd, threads=threads, backend=backend)
+            dist_tri = self._matrix.cosineDistance(use_simd=use_simd,
+                                                   threads=threads,
+                                                   backend=backend,
+                                                   mask_missing=mask_missing)
         elif metric == "snv":
-            dist_tri = self._matrix.snvHamming(threads=threads)
+            dist_tri = self._matrix.snvHamming(threads=threads, mask_missing=mask_missing)
         else:
             raise ParameterError(f"Unknown metric: {metric}")
 
@@ -276,6 +300,7 @@ class ArdalDistance:
                          use_simd: bool = True,
                          threads: int = 1,
                          backend: str = "auto",
+                         mask_missing: bool = False,
                          ) -> np.ndarray:
         """ Pairwise distance computation for a local (subsetted) matrix.
 
@@ -307,6 +332,7 @@ class ArdalDistance:
                 row_indices=row_indices,
                 col_indices=col_indices,
                 threads=threads,
+                mask_missing=mask_missing,
             )
         elif metric == "jaccard":
             dist_tri = self._matrix.jaccard_subset(
@@ -314,7 +340,12 @@ class ArdalDistance:
             )
         elif metric == "hamming":
             dist_tri = self._matrix.hamming_subset(
-                row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
+                row_indices=row_indices,
+                col_indices=col_indices,
+                use_simd=use_simd,
+                threads=threads,
+                backend=backend,
+                mask_missing=mask_missing,
             )
         elif metric == "inner_product":
             dist_tri = self._matrix.innerProduct_subset(
@@ -322,7 +353,12 @@ class ArdalDistance:
             )
         elif metric == "cosine":
             dist_tri = self._matrix.cosineDistance_subset(
-                row_indices=row_indices, col_indices=col_indices, use_simd=use_simd, threads=threads, backend=backend
+                row_indices=row_indices,
+                col_indices=col_indices,
+                use_simd=use_simd,
+                threads=threads,
+                backend=backend,
+                mask_missing=mask_missing,
             )
         else:
             raise ParameterError(f"Unknown metric: {metric}")
@@ -332,7 +368,8 @@ class ArdalDistance:
 
 
     def _ensure_snv_view( self,
-                          allele_id_format: Union[str, None] ) -> None:
+                          allele_id_format: Union[str, None]
+                          ) -> None:
         header = self._headerUtils
         explicit_format = allele_id_format is not None
 
@@ -406,13 +443,19 @@ class ArdalDistance:
     @check_use_simd
     @check_allele_id_format
     def neighbourhood( self,
+                       ## key parameters
                        guid : str,
                        n : int,
+                       *,
+                       ## snv view helpers
+                       allele_id_format: Union[str, None] = None,
+                       ## distance computation parameters
+                       metric : str = "hamming",
+                       ## backend parameters
                        use_simd : bool = True,
                        threads : int = 1,
                        backend : str = "auto",
-                       metric : str = "hamming",
-                       allele_id_format: Union[str, None] = None ) -> dict:
+                       ) -> Dict:
         """ get the allele neighbourhood of a GUID using specified metric
         """
         validate_type(guid, str, "guid")
@@ -460,13 +503,19 @@ class ArdalDistance:
     @check_use_simd
     @check_allele_id_format
     def knn( self,
+             ## key parameters
              guid : str,
              k : int,
+             *,
+             ## snv view helpers
+             allele_id_format: Union[str, None] = None,
+             ## distance computation parameters
+             metric : str = "hamming",
+             ## backend parameters
              use_simd : bool = True,
              threads : int = 1,
              backend : str = "auto",
-             metric : str = "hamming",
-             allele_id_format: Union[str, None] = None ) -> Dict:
+             ) -> Dict:
         """knn
         Find the k nearest-neighbours
 
@@ -498,7 +547,7 @@ class ArdalDistance:
 
         guid_coord = self._headerUtils.encode_guid(guid)
 
-        def _legacy_knn(include_metric: bool):  # pragma: no cover
+        def _legacy_knn(include_metric: bool):  ## pragma: no cover
             try:
                 if include_metric:
                     return self._matrix.knn(row_idx=guid_coord,
@@ -559,9 +608,14 @@ class ArdalDistance:
                                                   backend=backend)
             else:
                 ncoords = _legacy_knn(include_metric=True)
-        else:  # should not reach due to validation
+        else:  ## should not reach due to validation
             raise ParameterError(f"metric '{metric}' not supported.")
 
-        neighbours = {self._headerUtils.decode_guid(int(coord)) : int(dist) for coord, dist in ncoords}
+        float_metrics = {"cosine", "jaccard"}
+        cast_fn = float if metric_lower in float_metrics else int
+        neighbours = {
+            self._headerUtils.decode_guid(int(coord)): cast_fn(dist)
+            for coord, dist in ncoords
+        }
 
         return neighbours

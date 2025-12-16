@@ -267,6 +267,27 @@ def test_knn_metric_selection(test_data_mem):
         assert len(neighbours) == 3
 
 
+def test_knn_metric_value_types(test_data_mem):
+    ardal = Ardal(data_source=test_data_mem, quiet_init=True)
+    if not hasattr(ardal._hybrid_matrix, "knn_cosine"):
+        pytest.skip("cosine knn backend not available in this build.")
+
+    cosine_neighbours = ardal.distance.knn("GUID1", 3, metric="cosine", backend="bit")
+    assert cosine_neighbours
+    assert all(isinstance(val, float) for val in cosine_neighbours.values())
+
+    if hasattr(ardal._hybrid_matrix, "knnSnv"):
+        snv_neighbours = ardal.distance.knn(
+            "GUID1",
+            3,
+            metric="snv",
+            backend="bit",
+            allele_id_format="{chr}.{start}.{ref}.{alt}",
+        )
+        assert snv_neighbours
+        assert all(isinstance(val, int) for val in snv_neighbours.values())
+
+
 def test_neighbourhood_metric_selection(test_data_mem):
     ardal = Ardal(data_source=test_data_mem, quiet_init=True)
     ham = ardal.distance.neighbourhood("GUID1", 3, metric="hamming", backend="bit")

@@ -80,18 +80,18 @@ class ArdalIO:
         
         ALLOWED_FORMATS = ["npy", "npz", "bin"]
 
-        if not os.path.exists(out_directory):
-            raise ParameterError(f"Path '{out_directory}' does not exist.")
-
-        json_out_path = os.path.join(out_directory, output_prefix + ".json")
-        
         if format not in ALLOWED_FORMATS:
             raise ParameterError(f"Invalid matrix output format : {format}. Must be one of {ALLOWED_FORMATS}.")
         
+        if not os.path.exists(out_directory):
+            raise ParameterError(f"Path '{out_directory}' does not exist.")
+        
+        ## generate file paths
         matrix_out_path = os.path.join(out_directory, output_prefix + "." + format)
-
-        if os.path.exists(json_out_path):
-            raise MatrixWriteError(f"File '{json_out_path}' already exists.")
+        headers_out_path = os.path.join(matrix_out_path + ".meta")
+        
+        if os.path.exists(headers_out_path):
+            raise MatrixWriteError(f"File '{headers_out_path}' already exists.")
         if os.path.exists(matrix_out_path):
             raise MatrixWriteError(f"File '{matrix_out_path}' already exists.")
 
@@ -99,21 +99,37 @@ class ArdalIO:
         if format == "npy":
             log.info("Writing dense matrix as .npy")
             np.save(matrix_out_path, matrix_to_save)
-            headers_meta = self._headerUtils.headers
+            meta = make_meta(matrix_to_save,
+                             self._headerUtils.headers,
+                             generated_by="ardal::io::write",
+                             format_name="ardal.dense.v1",
+                             matrix_file=matrix_out_path)
+            headers_meta = {"meta": meta, "headers": self._headerUtils.headers}
         elif format == "npz":
             log.info("Writing dense matrix as .npz")
             np.savez_compressed(matrix_out_path, matrix=matrix_to_save)
-            headers_meta = self._headerUtils.headers
+            meta = make_meta(matrix_to_save,
+                             self._headerUtils.headers,
+                             generated_by="ardal::io::write",
+                             format_name="ardal.dense.v1",
+                             matrix_file=matrix_out_path)
+            headers_meta = {"meta": meta, "headers": self._headerUtils.headers}
         elif format == "bin":
             log.info("Writing packed matrix as .bin")
             headers_meta = self._write_packed(matrix_out_path)
+        
+        ## capture missing sites data
+        headers_meta["missing_sites"] = {"site_keys" : self._headerUtils._missing_site_keys, "guid_missing" : self._headerUtils._guid_missing_sites}
+        ## propagate column masks for GUIDs
+        if hasattr(self._headerUtils, "_missing_masks") and self._headerUtils._missing_masks:
+            headers_meta["column_masks"] = self._headerUtils._missing_masks
             
         log.info(f"Wrote allele matrix to disk : {matrix_out_path}")
 
-        with open(json_out_path, 'w') as fout:
+        with open(headers_out_path, 'w') as fout:
             json.dump(headers_meta, fout, indent=4)
             
-        log.info(f"Wrote headers to disk : {json_out_path}")
+        log.info(f"Wrote headers to disk : {headers_out_path}")
         
         
     def _write_packed( self,
@@ -128,43 +144,20 @@ class ArdalIO:
         bin_path = pathlib.Path(matrix_out_path)
         arr.tofile(bin_path)  ## raw little-endian uint64 words
 
-        meta = self._mk_bitpack_meta_from_dense(arr, self._headerUtils.headers, matrix_out_path)
+        meta = make_meta(arr,
+                         self._headerUtils.headers,
+                         generated_by="ardal::io::write",
+                         format_name="ardal.bitpack.v1",
+                         matrix_file=matrix_out_path)
         headers_meta = { "meta" : meta, "headers" : self._headerUtils.headers }
         
         return headers_meta
         
-        
-    def _mk_bitpack_meta_from_dense( self,
-                                     words : np.ndarray,
-                                     headers : dict,
-                                     data_file : Union[str, None] = None) -> dict:
-        """ Compute metadata for writing a bitpacked binary matrix.
-
-        Args:
-            words (np.ndarray): _description_
-            headers (dict): _description_
-
-        Returns:
-            dict: _description_
-        """
-        n_rows, words_per_row = words.shape
-        n_cols = len(headers["alleles"])
-        return {
-            "format": "ardal.bitpack.v1",
-            "dtype": "<u8",
-            "endianness": "little",
-            "row_major": True,
-            "n_rows": n_rows,
-            "n_cols": n_cols,
-            "words_per_row": words_per_row,
-            "bits_per_word": 64,
-            "row_stride_bytes": words_per_row * 8,
-            "data_file": data_file,
-            "data_nbytes": int(words.nbytes),
-            "data_sha256": None,
-            "generated_by" : "Ardal v" + version("ardal"),
-    }
-
+    
+    @staticmethod
+    def _generated_by_string() -> str:
+        return "ardal::io::write"
+    
 
     def make_fastas( self,
                      guids : list = [],

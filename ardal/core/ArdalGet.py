@@ -10,6 +10,7 @@ from ..utils.misc import require_package
 from ..utils.decorators import check_thread_count, check_alleles_list, check_guids_list
 from ..utils.exceptions import ParameterError, RoaringError
 from ..utils.logger import get_logger
+from ..utils.make_meta import make_meta
 
 log = get_logger()
 
@@ -84,23 +85,49 @@ class ArdalGet:
             shifted = np.right_shift(selected_words, bit_offsets[np.newaxis, :])
             sub_matrix = (shifted & np.uint64(1)).astype(np.uint8, copy=False)
 
-        ## create new headers and matrix for the new Ardal object
-        sub_headers = {"guids": guids, "alleles": alleles}
+        # base headers/meta container
+        headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
 
+        # propagate missing masks for subset
+        if self._headerUtils.has_missing_mask():
+            per_guid_masks = {}
+            if rows_only_flag:
+                for guid in guids:
+                    per_guid_masks[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
+            else:
+                ## remap column indices to the subset
+                idx_map = {orig: new for new, orig in enumerate(allele_indices)}
+                for guid in guids:
+                    cols = self._headerUtils.get_guid_missing_mask(guid)
+                    remapped = []
+                    for c in cols:
+                        if c in idx_map:
+                            remapped.append(idx_map[c])
+                    per_guid_masks[guid] = remapped
+            headers_meta["column_masks"] = per_guid_masks
+        
         if rows_only_flag and data_only:
             ## materialise dense form for users that requested data only
             dense_full = self._matrix.getBitMatrix()
             sub_matrix = dense_full[guid_indices, :].astype(np.uint8, copy=False)
 
+        # construct metadata for child instance
+        headers_meta["meta"] = make_meta(sub_matrix,
+                                         headers_meta["headers"],
+                                         generated_by="ardal::subset",
+                                         format_name="ardal.bitpack.v1" if (sub_matrix.dtype == np.uint64 and sub_matrix.ndim == 2 and sub_matrix.shape[1] == ((len(alleles) + 63) // 64)) else "ardal.dense.v1",
+                                         matrix_file=None)
+
         if not data_only:
             ## return an ardal object initialised with the subset data
-            return Ardal(data_source=[sub_matrix, sub_headers],
+            return Ardal(data_source=[sub_matrix, headers_meta],
+                         allele_id_format=self._headerUtils._allele_id_format,
                          allele_positions=self._headerUtils.get_allele_positions(),
                          verbosity=child_verbosity,
                          quiet_init=child_quiet_init)
         else:
             ## return the new subset matrix/JSON pair
-            return [sub_matrix, sub_headers]
+            return [sub_matrix, headers_meta]
         
     
     def matrix_stats( self,
@@ -124,6 +151,7 @@ class ArdalGet:
             total_size_bytes = bit_matrix_size_bytes
         bit_matrix_size = naturalsize(bit_matrix_size_bytes, binary=True)
         total_size = naturalsize(total_size_bytes, binary=True)
+        allele_id_format = self._headerUtils._allele_id_format
         
         if self._headerUtils.allele_positions:
             sequences = len(self._headerUtils.allele_positions.keys())
@@ -135,6 +163,7 @@ class ArdalGet:
         stats = {
             "Number of GUIDs"     : n_guids,
             "Number of Alleles"   : n_alleles,
+            "Allele id format"    : allele_id_format,
             "Number of Sequences" : sequences,
             "Number of Sites"     : sites,
             "Matrix Density"      : density,
@@ -153,7 +182,6 @@ class ArdalGet:
             print("-----------------------------\n")
         
         return stats
-    
     
 
     def density( self ) -> float:
@@ -225,3 +253,12 @@ class ArdalGet:
         """ Return the col masses.
         """
         return self._matrix.getColumnMasses()
+    
+    
+    # def missing_sites( self ) -> dict:
+    #     """ Returns a dictionary of missing sites.
+    #     """
+    #     missing_sites = defaultdict(list)
+    #     for guid, site_idxs in self._headerUtils._guid_missing_sites.items():
+    #         missing_sites[guid] = [self._headerUtils._missing_site_keys.get(str(idx)) for idx in site_idxs]
+    #     return missing_sites

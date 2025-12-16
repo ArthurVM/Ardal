@@ -15,25 +15,28 @@ namespace py = pybind11;
 PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
     m.def("set_backend_verbosity", &ardal::utils::set_log_level_from_str, "Set backend verbosity");
     py::class_<ardal::HybridMatrix>(m, "HybridMatrix")
-        .def(py::init<py::array, bool, size_t, bool, double>(), 
+        .def(py::init<py::array, bool, size_t, bool, double, py::object>(), 
              py::arg("matrix"),
              py::arg("is_bitpacked"),
              py::arg("n_cols_bits"),
              py::arg("use_roaring_if_sparse") = true,
-             py::arg("density_threshold") = 0.02)
+             py::arg("density_threshold") = 0.02,
+             py::arg("missing_mask") = py::none())
 
         // BitMatrix and RoaringMatrix
         .def("hamming", &ardal::HybridMatrix::hamming,
             py::arg("use_simd") = true,
             py::arg("threads") = 1,
-            py::arg("backend") = "auto")
+            py::arg("backend") = "auto",
+            py::arg("mask_missing") = false)
 
         .def("hamming_subset", &ardal::HybridMatrix::hamming_subset,
             py::arg("row_indices"),
             py::arg("col_indices"),
             py::arg("use_simd") = true,
             py::arg("threads") = 1,
-            py::arg("backend") = "auto")
+            py::arg("backend") = "auto",
+            py::arg("mask_missing") = false)
 
         .def("jaccard", &ardal::HybridMatrix::jaccard,
             py::arg("use_simd") = true,
@@ -43,19 +46,22 @@ PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
         .def("innerProduct", &ardal::HybridMatrix::innerProduct,
             py::arg("use_simd") = true,
             py::arg("threads") = 1,
-            py::arg("backend") = "auto")
+            py::arg("backend") = "auto",
+            py::arg("mask_missing") = false)
 
         .def("cosineDistance", &ardal::HybridMatrix::cosineDistance,
             py::arg("use_simd") = true,
             py::arg("threads") = 1,
-            py::arg("backend") = "auto")
+            py::arg("backend") = "auto",
+            py::arg("mask_missing") = false)
 
         .def("cosineDistance_subset", &ardal::HybridMatrix::cosineDistance_subset,
             py::arg("row_indices"),
             py::arg("col_indices"),
             py::arg("use_simd") = true,
             py::arg("threads") = 1,
-            py::arg("backend") = "auto")
+            py::arg("backend") = "auto",
+            py::arg("mask_missing") = false)
 
         .def("neighbourhood", &ardal::HybridMatrix::neighbourhood,
             py::arg("row_idx"),
@@ -168,20 +174,24 @@ PYBIND11_MODULE(ardal, m) {  // ardal module and function bindings
             py::arg("allele_to_base"))
 
         .def("snvHamming", &ardal::HybridMatrix::snvHamming,
-            py::arg("threads") = 1)
+            py::arg("threads") = 1,
+            py::arg("mask_missing") = false)
 
         .def("snvHamming_subset", &ardal::HybridMatrix::snvHamming_subset,
             py::arg("row_indices"),
             py::arg("col_indices"),
-            py::arg("threads") = 1)
+            py::arg("threads") = 1,
+            py::arg("mask_missing") = false)
 
         .def("snvNeighbourhood", &ardal::HybridMatrix::snvNeighbourhood,
             py::arg("row_idx"),
             py::arg("epsilon"),
-            py::arg("threads") = 1)
+            py::arg("threads") = 1,
+            py::arg("mask_missing") = false)
 
         .def("knnSnv", &ardal::HybridMatrix::knnSnv,
             py::arg("row_idx"),
             py::arg("k"),
-            py::arg("threads") = 1);
+            py::arg("threads") = 1,
+            py::arg("mask_missing") = false);
 }

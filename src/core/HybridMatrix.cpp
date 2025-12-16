@@ -38,7 +38,8 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
                             bool is_bitpacked,
                             size_t n_cols_bits,
                             bool use_roaring_if_sparse,
-                            double density_threshold )
+                            double density_threshold,
+                            py::object missing_mask )
   : n_cols_bits_(n_cols_bits)
 {
     const bool packed = is_bitpacked;
@@ -75,6 +76,43 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
     auto rows_sp = std::make_shared<std::vector<int>>(std::move(row_masses));
     auto cols_sp = std::make_shared<std::vector<int>>(std::move(col_masses));
 
+    if (!missing_mask.is_none()) {
+        try {
+            py::sequence rows_seq = py::cast<py::sequence>(missing_mask);
+            if (py::len(rows_seq) != static_cast<py::ssize_t>(n_rows_)) {
+                throw std::runtime_error("missing_mask rows length mismatch");
+            }
+            mask_columns_.resize(n_rows_);
+            bool any = false;
+            for (size_t i = 0; i < n_rows_; ++i) {
+                py::object row_obj = rows_seq[i];
+                if (row_obj.is_none()) {
+                    continue;
+                }
+                py::sequence cols_seq = py::cast<py::sequence>(row_obj);
+                auto& out = mask_columns_[i];
+                out.reserve(static_cast<size_t>(py::len(cols_seq)));
+                for (py::handle item : cols_seq) {
+                    int col = py::cast<int>(item);
+                    if (col < 0 || static_cast<size_t>(col) >= n_cols_bits_) {
+                        continue;
+                    }
+                    out.push_back(static_cast<uint32_t>(col));
+                }
+                if (!out.empty()) {
+                    std::sort(out.begin(), out.end());
+                    out.erase(std::unique(out.begin(), out.end()), out.end());
+                    any = true;
+                }
+            }
+            has_missing_mask_ = any;
+        } catch (const std::exception& exc) {
+            throw std::runtime_error(std::string("HybridMatrix: invalid missing_mask payload: ") + exc.what());
+        }
+    }
+
+    const std::vector<std::vector<uint32_t>>* mask_ptr = has_missing_mask_ ? &mask_columns_ : nullptr;
+
     // ----------- INIT BACKENDS -----------
     // handle roaring backend
     if (use_roaring_if_sparse && density_ < density_threshold) {
@@ -82,7 +120,8 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
         ardal::utils::log_info("Initialising RoaringMatrix backend");
         roaring_backend = std::make_unique<RoaringMatrix>( flat_,
                                                            rows_sp,
-                                                           cols_sp );
+                                                           cols_sp,
+                                                           mask_ptr );
     } else {
         roaring_enabled = false;
         std::stringstream ss;
@@ -93,7 +132,8 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
     // handle bit backend
     bit_backend = std::make_unique<BitMatrix>( flat_,
                                                rows_sp,
-                                               cols_sp );
+                                               cols_sp,
+                                               mask_ptr );
     
     // run SIMD diagnostics
     simd_dispatchers::simd_diag();
@@ -121,19 +161,21 @@ double HybridMatrix::getDensity( void ) const {
 
 py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd,
                                              int threads,
-                                             const std::string& backend ) const {
+                                             const std::string& backend,
+                                             bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
     if (chosen_backend == BackendType::AUTO) {
         chosen_backend = selectBackend(n_cols_bits_, density_);
     }
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
         ardal::utils::log_info("Computing Hamming distance matrix with RoaringMatrix backend.");
-        return roaring_backend->hamming(threads);
+        return roaring_backend->hamming(threads, apply_mask);
     } else {
         ardal::utils::log_info("Computing Hamming distance matrix with BitMatrix backend.");
-        return bit_backend->hamming(false, use_simd, threads);
+        return bit_backend->hamming(false, use_simd, threads, apply_mask);
     }
 }
 
@@ -142,19 +184,21 @@ py::array_t<uint32_t> HybridMatrix::hamming_subset( const std::vector<size_t> ro
                                                     const std::vector<size_t> col_indices,
                                                     bool use_simd,
                                                     int threads,
-                                                    const std::string& backend ) const {
+                                                    const std::string& backend,
+                                                    bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
     if (chosen_backend == BackendType::AUTO) {
         // note: this assumes local density isnt significantly different from global
         // not a terrible assumption but may not always be the case
         chosen_backend = selectBackend(row_indices.size(), density_);
     }
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
-        return roaring_backend->hamming_subset(row_indices, col_indices, threads);
+        return roaring_backend->hamming_subset(row_indices, col_indices, threads, apply_mask);
     } else {
-        return bit_backend->hamming_subset(row_indices, col_indices, use_simd, threads);
+        return bit_backend->hamming_subset(row_indices, col_indices, use_simd, threads, apply_mask);
     }
 }
 
@@ -179,33 +223,49 @@ py::array_t<double> HybridMatrix::jaccard( bool use_simd,
 
 py::array_t<int> HybridMatrix::innerProduct( bool use_simd,
                                              int threads,
-                                             const std::string& backend ) const {
+                                             const std::string& backend,
+                                             bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::AUTO) {
         chosen_backend = selectBackend(n_cols_bits_, density_);
+        if (apply_mask) {
+            chosen_backend = BackendType::BIT;
+        }
+    }
+    if (apply_mask && chosen_backend == BackendType::ROARING) {
+        throw std::runtime_error("mask_missing is not supported for Roaring innerProduct backend.");
     }
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->innerProduct(threads);
     } else {
-        return bit_backend->innerProduct(false, use_simd, threads);
+        return bit_backend->innerProduct(false, use_simd, threads, mask_missing);
     }
 }
 
 py::array_t<double> HybridMatrix::cosineDistance( bool use_simd,
                                                   int threads,
-                                                  const std::string& backend ) const {
+                                                  const std::string& backend,
+                                                  bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::AUTO) {
         chosen_backend = selectBackend(n_cols_bits_, density_);
+        if (apply_mask) {
+            chosen_backend = BackendType::BIT;
+        }
+    }
+    if (apply_mask && chosen_backend == BackendType::ROARING) {
+        throw std::runtime_error("mask_missing is not supported for Roaring cosine backend.");
     }
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->cosineDistance(threads);
     }
-    return bit_backend->cosineDistanceAll(use_simd, threads);
+    return bit_backend->cosineDistanceAll(use_simd, threads, mask_missing);
 }
 
 
@@ -213,17 +273,25 @@ py::array_t<double> HybridMatrix::cosineDistance_subset( const std::vector<size_
                                                          const std::vector<size_t> col_indices,
                                                          bool use_simd,
                                                          int threads,
-                                                         const std::string& backend ) const {
+                                                         const std::string& backend,
+                                                         bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::AUTO) {
         chosen_backend = selectBackend(col_indices.size(), density_);
+        if (apply_mask) {
+            chosen_backend = BackendType::BIT;
+        }
+    }
+    if (apply_mask && chosen_backend == BackendType::ROARING) {
+        throw std::runtime_error("mask_missing is not supported for Roaring cosine subset backend.");
     }
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
         return roaring_backend->cosineDistance_subset(row_indices, col_indices, threads);
     }
-    return bit_backend->cosineDistance_subset(row_indices, col_indices, use_simd, threads);
+    return bit_backend->cosineDistance_subset(row_indices, col_indices, use_simd, threads, mask_missing);
 }
 
 
@@ -248,14 +316,21 @@ py::array_t<int64_t> HybridMatrix::neighbourhood( size_t row,
 
 py::array_t<int64_t> HybridMatrix::snvNeighbourhood( size_t row,
                                                      uint32_t epsilon,
-                                                     int threads ) const {
+                                                     int threads,
+                                                     bool mask_missing ) const {
+    if (mask_missing) {
+        if (!snv_fallback_backend_) {
+            throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+        }
+        return snv_fallback_backend_->snvNeighbourhood(row, epsilon, threads, true);
+    }
     if (roaring_enabled && roaring_backend) {
-        return roaring_backend->snvNeighbourhood(row, epsilon, threads);
+        return roaring_backend->snvNeighbourhood(row, epsilon, threads, false);
     }
     if (!snv_fallback_backend_) {
         throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
     }
-    return snv_fallback_backend_->snvNeighbourhood(row, epsilon, threads);
+    return snv_fallback_backend_->snvNeighbourhood(row, epsilon, threads, false);
 }
 
 
@@ -336,14 +411,21 @@ py::list HybridMatrix::knn_jaccard( size_t row,
 
 py::list HybridMatrix::knnSnv( size_t row,
                                uint32_t k,
-                               int threads ) const {
+                               int threads,
+                               bool mask_missing ) const {
+    if (mask_missing) {
+        if (!snv_fallback_backend_) {
+            throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+        }
+        return snv_fallback_backend_->knnSnv(row, k, threads, true);
+    }
     if (roaring_enabled && roaring_backend) {
-        return roaring_backend->knnSnv(row, static_cast<int>(k), threads);
+        return roaring_backend->knnSnv(row, static_cast<int>(k), threads, false);
     }
     if (!snv_fallback_backend_) {
         throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
     }
-    return snv_fallback_backend_->knnSnv(row, k, threads);
+    return snv_fallback_backend_->knnSnv(row, k, threads, false);
 }
 
 
@@ -454,38 +536,53 @@ py::array_t<double> HybridMatrix::informationGain( const std::vector<size_t>& in
 
 void HybridMatrix::prepareSnvView( py::array_t<uint32_t> allele_to_locus,
                                    py::array_t<uint8_t> allele_to_base ) {
+    py::array_t<uint32_t> locus_for_roaring = allele_to_locus;
+    py::array_t<uint8_t> base_for_roaring = allele_to_base;
     if (roaring_enabled) {
-        roaring_backend->prepareSnvView(std::move(allele_to_locus), std::move(allele_to_base));
-    } else {
-        if (!snv_fallback_backend_) {
-            snv_fallback_backend_ = std::make_unique<SnvFallbackBackend>(flat_, n_cols_bits_);
-        }
-        snv_fallback_backend_->prepare(std::move(allele_to_locus), std::move(allele_to_base));
+        roaring_backend->prepareSnvView(std::move(locus_for_roaring), std::move(base_for_roaring));
     }
+    if (!snv_fallback_backend_) {
+        snv_fallback_backend_ = std::make_unique<SnvFallbackBackend>(flat_, n_cols_bits_, has_missing_mask_ ? &mask_columns_ : nullptr);
+    }
+    snv_fallback_backend_->prepare(std::move(allele_to_locus), std::move(allele_to_base));
 }
 
 
-py::array_t<uint32_t> HybridMatrix::snvHamming( int threads ) const {
+py::array_t<uint32_t> HybridMatrix::snvHamming( int threads,
+                                                bool mask_missing ) const {
+    if (mask_missing) {
+        if (!snv_fallback_backend_) {
+            throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+        }
+        return snv_fallback_backend_->snvHamming(threads, true);
+    }
     if (roaring_enabled) {
-        return roaring_backend->snvHamming(threads);
+        return roaring_backend->snvHamming(threads, false);
     }
     if (!snv_fallback_backend_) {
         throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
     }
-    return snv_fallback_backend_->snvHamming(threads);
+    return snv_fallback_backend_->snvHamming(threads, false);
 }
 
 
 py::array_t<uint32_t> HybridMatrix::snvHamming_subset( const std::vector<size_t>& row_indices,
                                                       const std::vector<size_t>& col_indices,
-                                                      int threads ) const {
+                                                      int threads,
+                                                      bool mask_missing ) const {
+    if (mask_missing) {
+        if (!snv_fallback_backend_) {
+            throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
+        }
+        return snv_fallback_backend_->snvHamming_subset(row_indices, col_indices, threads, true);
+    }
     if (roaring_enabled) {
-        return roaring_backend->snvHamming_subset(row_indices, col_indices, threads);
+        return roaring_backend->snvHamming_subset(row_indices, col_indices, threads, false);
     }
     if (!snv_fallback_backend_) {
         throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
     }
-    return snv_fallback_backend_->snvHamming_subset(row_indices, col_indices, threads);
+    return snv_fallback_backend_->snvHamming_subset(row_indices, col_indices, threads, false);
 }
 
 

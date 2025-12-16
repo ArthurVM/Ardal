@@ -7,6 +7,7 @@ Copyright 2025 Arthur V. Morris
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -53,14 +54,79 @@ inline uint32_t compute_snv_distance( const std::vector<uint64_t>& lhs,
     return dist;
 }
 
+
+inline uint32_t compute_snv_distance_filtered( const std::vector<uint64_t>& lhs,
+                                               const std::vector<uint64_t>& rhs,
+                                               const std::vector<uint8_t>& locus_mask ) {
+    constexpr uint32_t INVALID = std::numeric_limits<uint32_t>::max();
+    auto advance = [&](const std::vector<uint64_t>& vec, std::size_t& pos) -> uint32_t {
+        while (pos < vec.size()) {
+            const uint32_t locus = static_cast<uint32_t>(vec[pos] >> 3);
+            if (locus < locus_mask.size() && locus_mask[locus]) {
+                return locus;
+            }
+            ++pos;
+        }
+        return INVALID;
+    };
+
+    auto remaining = [&](const std::vector<uint64_t>& vec, std::size_t pos) -> uint32_t {
+        uint32_t count = 0;
+        while (pos < vec.size()) {
+            const uint32_t locus = static_cast<uint32_t>(vec[pos] >> 3);
+            if (locus < locus_mask.size() && locus_mask[locus]) {
+                ++count;
+            }
+            ++pos;
+        }
+        return count;
+    };
+
+    std::size_t p = 0;
+    std::size_t q = 0;
+    uint32_t dist = 0;
+
+    while (true) {
+        const uint32_t locus_l = advance(lhs, p);
+        const uint32_t locus_r = advance(rhs, q);
+        const bool lhs_done = (locus_l == INVALID);
+        const bool rhs_done = (locus_r == INVALID);
+
+        if (lhs_done || rhs_done) {
+            if (!lhs_done) dist += remaining(lhs, p);
+            if (!rhs_done) dist += remaining(rhs, q);
+            break;
+        }
+
+        if (locus_l == locus_r) {
+            const uint32_t base_l = static_cast<uint32_t>(lhs[p] & 0x7u);
+            const uint32_t base_r = static_cast<uint32_t>(rhs[q] & 0x7u);
+            if (base_l != base_r) ++dist;
+            ++p;
+            ++q;
+        } else if (locus_l < locus_r) {
+            ++dist;
+            ++p;
+        } else {
+            ++dist;
+            ++q;
+        }
+    }
+
+    return dist;
+}
+
 } // namespace
 
 SnvFallbackBackend::SnvFallbackBackend( const ardal::detail::FlatMatrix& flat,
-                                        std::size_t n_cols_bits )
+                                        std::size_t n_cols_bits,
+                                        const std::vector<std::vector<uint32_t>>* missing_mask )
   : flat_(flat),
     n_rows_(flat.n_rows),
     n_cols_bits_(n_cols_bits),
-    words_per_row_(flat.wpr) {}
+    words_per_row_(flat.wpr),
+    missing_mask_(missing_mask),
+    has_missing_mask_(missing_mask && !missing_mask->empty()) {}
 
 
 void SnvFallbackBackend::prepare( py::array_t<uint32_t> allele_to_locus,
@@ -83,6 +149,8 @@ void SnvFallbackBackend::prepare( py::array_t<uint32_t> allele_to_locus,
 
     snv_vectors_.clear();
     vectors_ready_ = false;
+    snv_entries_.clear();
+    entries_ready_ = false;
     lookup_loaded_ = true;
 }
 
@@ -98,7 +166,7 @@ void SnvFallbackBackend::prepare( py::array_t<uint32_t> allele_to_locus,
  * OUTPUT:
  *  py::array_t<uint32_t> : Condensed lower-triangular distance matrix.
  ****************************************************************************************************/
-py::array_t<uint32_t> SnvFallbackBackend::snvHamming( int threads ) const {
+py::array_t<uint32_t> SnvFallbackBackend::snvHamming( int threads, bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -122,7 +190,9 @@ py::array_t<uint32_t> SnvFallbackBackend::snvHamming( int threads ) const {
         for (std::size_t i = 0; i < n_rows_; ++i) {
             const std::size_t idx_base = (i * (2 * n_rows_ - i - 1)) / 2;
             for (std::size_t j = i + 1; j < n_rows_; ++j) {
-                dist_ptr[idx_base + (j - i - 1)] = snvDistance(i, j);
+                dist_ptr[idx_base + (j - i - 1)] = (mask_missing && has_missing_mask_)
+                    ? snvDistanceMasked(i, j, nullptr)
+                    : snvDistance(i, j);
             }
         }
     }
@@ -148,7 +218,8 @@ py::array_t<uint32_t> SnvFallbackBackend::snvHamming( int threads ) const {
  ****************************************************************************************************/
 py::array_t<uint32_t> SnvFallbackBackend::snvHamming_subset( const std::vector<size_t>& row_indices,
                                                             const std::vector<size_t>& col_indices,
-                                                            int threads ) const {
+                                                            int threads,
+                                                            bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -162,49 +233,32 @@ py::array_t<uint32_t> SnvFallbackBackend::snvHamming_subset( const std::vector<s
         return py::array_t<uint32_t>(static_cast<py::ssize_t>(0));
     }
 
-    const uint32_t invalid_locus = std::numeric_limits<uint32_t>::max();
-    std::unordered_set<uint32_t> allowed_loci;
-    allowed_loci.reserve(col_indices.size());
-    for (size_t col_idx : col_indices) {
-        if (col_idx >= n_cols_bits_) {
-            throw std::out_of_range("Column index in col_indices is out of bounds.");
-        }
-        const uint32_t locus = allele_to_locus_[col_idx];
-        if (locus != invalid_locus) {
-            allowed_loci.insert(locus);
-        }
-    }
-
-    if (allowed_loci.empty()) {
-        const size_t total_pairs = sub_rows * (sub_rows - 1) / 2;
-        py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
-        auto* zero_ptr = zeros.mutable_data();
-        std::fill(zero_ptr, zero_ptr + total_pairs, static_cast<uint32_t>(0));
-        return zeros;
-    }
-
     for (size_t row_idx : row_indices) {
         if (row_idx >= n_rows_) {
             throw std::out_of_range("Row index in row_indices is out of bounds.");
         }
     }
 
-    std::vector<std::vector<uint64_t>> subset_vectors;
-    subset_vectors.reserve(row_indices.size());
-    for (size_t row_idx : row_indices) {
-        const auto& src = snv_vectors_[row_idx];
-        std::vector<uint64_t> filtered;
-        filtered.reserve(src.size());
-        for (uint64_t entry : src) {
-            const uint32_t locus = static_cast<uint32_t>(entry >> 3);
-            if (allowed_loci.count(locus) != 0) {
-                filtered.push_back(entry);
-            }
-        }
-        subset_vectors.push_back(std::move(filtered));
+    const size_t total_pairs = sub_rows * (sub_rows - 1) / 2;
+    if (col_indices.empty()) {
+        py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
+        auto* zero_ptr = zeros.mutable_data();
+        std::fill(zero_ptr, zero_ptr + total_pairs, static_cast<uint32_t>(0));
+        return zeros;
     }
 
-    const size_t total_pairs = sub_rows * (sub_rows - 1) / 2;
+    const bool use_mask = !isFullColumnSelection(col_indices);
+    std::vector<uint8_t> locus_mask;
+    if (use_mask) {
+        locus_mask = buildLocusMask(col_indices);
+        if (locus_mask.empty()) {
+            py::array_t<uint32_t> zeros(static_cast<py::ssize_t>(total_pairs));
+            auto* zero_ptr = zeros.mutable_data();
+            std::fill(zero_ptr, zero_ptr + total_pairs, static_cast<uint32_t>(0));
+            return zeros;
+        }
+    }
+
     py::array_t<uint32_t> dist_matrix(static_cast<py::ssize_t>(total_pairs));
     auto* dist_ptr = dist_matrix.mutable_data();
 
@@ -213,11 +267,19 @@ py::array_t<uint32_t> SnvFallbackBackend::snvHamming_subset( const std::vector<s
 
         #pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
         for (size_t i = 0; i < sub_rows; ++i) {
-            const auto& lhs = subset_vectors[i];
+            const size_t lhs_idx = row_indices[i];
             const size_t idx_base = (i * (2 * sub_rows - i - 1)) / 2;
             for (size_t j = i + 1; j < sub_rows; ++j) {
-                const auto& rhs = subset_vectors[j];
-                dist_ptr[idx_base + (j - i - 1)] = compute_snv_distance(lhs, rhs);
+                const size_t rhs_idx = row_indices[j];
+                uint32_t dist_val;
+                if (mask_missing && has_missing_mask_) {
+                    dist_val = snvDistanceMasked(lhs_idx, rhs_idx, use_mask ? &locus_mask : nullptr);
+                } else if (use_mask) {
+                    dist_val = compute_snv_distance_filtered(snv_vectors_[lhs_idx], snv_vectors_[rhs_idx], locus_mask);
+                } else {
+                    dist_val = snvDistance(lhs_idx, rhs_idx);
+                }
+                dist_ptr[idx_base + (j - i - 1)] = dist_val;
             }
         }
     }
@@ -243,7 +305,8 @@ py::array_t<uint32_t> SnvFallbackBackend::snvHamming_subset( const std::vector<s
  ****************************************************************************************************/
 py::array_t<int64_t> SnvFallbackBackend::snvNeighbourhood( std::size_t row_idx,
                                                            uint32_t epsilon,
-                                                           int threads ) const {
+                                                           int threads,
+                                                           bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -279,7 +342,9 @@ py::array_t<int64_t> SnvFallbackBackend::snvNeighbourhood( std::size_t row_idx,
 #endif
             for (std::size_t i = 0; i < n_rows_; ++i) {
                 if (i == row_idx) continue;
-                const uint32_t dist = snvDistance(row_idx, i);
+                const uint32_t dist = (mask_missing && has_missing_mask_)
+                    ? snvDistanceMasked(row_idx, i, nullptr)
+                    : snvDistance(row_idx, i);
                 if (dist <= epsilon) {
                     local.emplace_back(i, dist);
                 }
@@ -325,7 +390,8 @@ py::array_t<int64_t> SnvFallbackBackend::snvNeighbourhood( std::size_t row_idx,
  ****************************************************************************************************/
 py::list SnvFallbackBackend::knnSnv( std::size_t row_idx,
                                      uint32_t k,
-                                     int threads ) const {
+                                     int threads,
+                                     bool mask_missing ) const {
     if (threads <= 0) {
         throw std::runtime_error("Thread count must be positive.");
     }
@@ -385,7 +451,9 @@ py::list SnvFallbackBackend::knnSnv( std::size_t row_idx,
             for (uint32_t j = 0; j < n_rows_; ++j) {
                 if (j == row_idx) continue;
 
-                const uint32_t dist = snvDistance(row_idx, j);
+                const uint32_t dist = (mask_missing && has_missing_mask_)
+                    ? snvDistanceMasked(row_idx, j, nullptr)
+                    : snvDistance(row_idx, j);
 
                 if (heap.size() < k_eff) {
                     heap.push(Neighbor{j, dist});
@@ -434,12 +502,15 @@ py::list SnvFallbackBackend::knnSnv( std::size_t row_idx,
 
 
 void SnvFallbackBackend::ensure_vectors() const {
-    if (vectors_ready_) return;
+    if (vectors_ready_ && (!has_missing_mask_ || entries_ready_)) return;
     if (!lookup_loaded_) {
         throw std::runtime_error("SNV lookup not initialised. Call prepareSnvView first.");
     }
 
     snv_vectors_.assign(n_rows_, {});
+    if (has_missing_mask_) {
+        snv_entries_.assign(n_rows_, {});
+    }
 
     const uint64_t* base_ptr = flat_.base;
     const bool has_tail = (n_cols_bits_ & 63u) != 0u;
@@ -447,7 +518,7 @@ void SnvFallbackBackend::ensure_vectors() const {
     const uint32_t invalid_locus = std::numeric_limits<uint32_t>::max();
 
     for (std::size_t row = 0; row < n_rows_; ++row) {
-        std::vector<std::pair<uint32_t, uint8_t>> collected;
+        std::vector<std::tuple<uint32_t, uint8_t, uint32_t>> collected;
 
         for (std::size_t w = 0; w < words_per_row_; ++w) {
             uint64_t word = base_ptr[row * words_per_row_ + w];
@@ -467,26 +538,30 @@ void SnvFallbackBackend::ensure_vectors() const {
                 const uint8_t base_code = allele_to_base_[col];
                 if (base_code == 0) continue;
 
-                collected.emplace_back(locus_id, base_code);
+                collected.emplace_back(locus_id, base_code, static_cast<uint32_t>(col));
             }
         }
 
         if (collected.empty()) continue;
 
         std::sort(collected.begin(), collected.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
 
         std::vector<uint64_t> encoded;
         encoded.reserve(collected.size());
+        if (has_missing_mask_) {
+            snv_entries_[row].reserve(collected.size());
+        }
 
         std::size_t idx = 0;
         while (idx < collected.size()) {
             std::size_t j = idx + 1;
             bool conflict = false;
-            const uint32_t locus_id = collected[idx].first;
-            const uint8_t base_code = collected[idx].second;
-            while (j < collected.size() && collected[j].first == locus_id) {
-                if (collected[j].second != base_code) {
+            const uint32_t locus_id = std::get<0>(collected[idx]);
+            const uint8_t base_code = std::get<1>(collected[idx]);
+            const uint32_t col_id = std::get<2>(collected[idx]);
+            while (j < collected.size() && std::get<0>(collected[j]) == locus_id) {
+                if (std::get<1>(collected[j]) != base_code) {
                     conflict = true;
                 }
                 ++j;
@@ -495,6 +570,9 @@ void SnvFallbackBackend::ensure_vectors() const {
             if (!conflict) {
                 encoded.push_back((static_cast<uint64_t>(locus_id) << 3) |
                                   static_cast<uint64_t>(base_code & 0x7u));
+                if (has_missing_mask_) {
+                    snv_entries_[row].push_back(SnvEntry{col_id, locus_id, base_code});
+                }
             }
 
             idx = j;
@@ -504,6 +582,9 @@ void SnvFallbackBackend::ensure_vectors() const {
     }
 
     vectors_ready_ = true;
+    if (has_missing_mask_) {
+        entries_ready_ = true;
+    }
 }
 
 
@@ -511,6 +592,109 @@ uint32_t SnvFallbackBackend::snvDistance( std::size_t i, std::size_t j ) const {
     const auto& lhs = snv_vectors_[i];
     const auto& rhs = snv_vectors_[j];
     return compute_snv_distance(lhs, rhs);
+}
+
+
+bool SnvFallbackBackend::is_missing( const std::vector<uint32_t>* mask, std::size_t col ) const {
+    if (!mask || mask->empty()) {
+        return false;
+    }
+    return std::binary_search(mask->begin(), mask->end(), static_cast<uint32_t>(col));
+}
+
+
+bool SnvFallbackBackend::locus_allowed( uint32_t locus, const std::vector<uint8_t>* locus_mask ) const {
+    if (!locus_mask || locus_mask->empty()) {
+        return true;
+    }
+    return (locus < locus_mask->size()) && ((*locus_mask)[locus] != 0);
+}
+
+
+void SnvFallbackBackend::collect_encoded_masked( std::size_t row_idx,
+                                                 const std::vector<uint32_t>* other_mask,
+                                                 const std::vector<uint8_t>* locus_mask,
+                                                 std::vector<uint64_t>& out ) const {
+    out.clear();
+    const auto& entries = snv_entries_[row_idx];
+    const std::vector<uint32_t>* self_mask = (has_missing_mask_ && missing_mask_) ? &(*missing_mask_)[row_idx] : nullptr;
+
+    for (const auto& e : entries) {
+        if (is_missing(self_mask, e.col) || is_missing(other_mask, e.col)) {
+            continue;
+        }
+        if (!locus_allowed(e.locus, locus_mask)) {
+            continue;
+        }
+        out.push_back((static_cast<uint64_t>(e.locus) << 3) |
+                      static_cast<uint64_t>(e.base & 0x7u));
+    }
+}
+
+
+uint32_t SnvFallbackBackend::snvDistanceMasked( std::size_t i,
+                                                std::size_t j,
+                                                const std::vector<uint8_t>* locus_mask ) const {
+    if (!has_missing_mask_) {
+        return snvDistance(i, j);
+    }
+    if (!entries_ready_) {
+        ensure_vectors();
+    }
+    const std::vector<uint32_t>* mask_i = (has_missing_mask_ && missing_mask_) ? &(*missing_mask_)[i] : nullptr;
+    const std::vector<uint32_t>* mask_j = (has_missing_mask_ && missing_mask_) ? &(*missing_mask_)[j] : nullptr;
+
+    std::vector<uint64_t> lhs_filtered;
+    std::vector<uint64_t> rhs_filtered;
+    collect_encoded_masked(i, mask_j, locus_mask, lhs_filtered);
+    collect_encoded_masked(j, mask_i, locus_mask, rhs_filtered);
+
+    return compute_snv_distance(lhs_filtered, rhs_filtered);
+}
+
+
+bool SnvFallbackBackend::isFullColumnSelection( const std::vector<size_t>& col_indices ) const {
+    if (col_indices.size() != n_cols_bits_) {
+        return false;
+    }
+    for (size_t idx = 0; idx < col_indices.size(); ++idx) {
+        if (col_indices[idx] != idx) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+std::vector<uint8_t> SnvFallbackBackend::buildLocusMask( const std::vector<size_t>& col_indices ) const {
+    const uint32_t invalid_locus = std::numeric_limits<uint32_t>::max();
+    std::vector<uint32_t> loci;
+    loci.reserve(col_indices.size());
+    uint32_t max_locus = 0;
+    bool has_locus = false;
+
+    for (size_t col_idx : col_indices) {
+        if (col_idx >= n_cols_bits_) {
+            throw std::out_of_range("Column index in col_indices is out of bounds.");
+        }
+        const uint32_t locus = allele_to_locus_[col_idx];
+        if (locus == invalid_locus) continue;
+        loci.push_back(locus);
+        if (!has_locus || locus > max_locus) {
+            max_locus = locus;
+            has_locus = true;
+        }
+    }
+
+    if (!has_locus) {
+        return {};
+    }
+
+    std::vector<uint8_t> mask(static_cast<std::size_t>(max_locus) + 1, 0u);
+    for (uint32_t locus : loci) {
+        mask[locus] = 1u;
+    }
+    return mask;
 }
 
 } // namespace ardal
