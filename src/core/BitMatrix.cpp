@@ -115,6 +115,22 @@ BitMatrix::BitMatrix( ardal::detail::FlatMatrix matrix_,
             }
         }
     }
+
+    if (has_missing_mask_) {
+        row_missing_ones_.assign(n_rows_, 0);
+        for (size_t r = 0; r < n_rows_; ++r) {
+            const auto& mask = row_masks_sparse_[r];
+            if (mask.empty()) {
+                continue;
+            }
+            const uint64_t* row_ptr = base_ + r * wpr_;
+            uint32_t miss = 0;
+            for (const auto& kv : mask) {
+                miss += ardal::popcnt64(row_ptr[kv.first] & kv.second);
+            }
+            row_missing_ones_[r] = miss;
+        }
+    }
     
     std::stringstream ss;
     ss << "BitMatrix initialised: rows=" << n_rows_ << " wpr=" << wpr_;
@@ -404,6 +420,7 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
     // dispatch to backend with/without SIMD
     simd_dispatchers::HammingFn hamming_func = simd_dispatchers::hamming_dispatcher(use_simd);
     const bool apply_mask = mask_missing && has_missing_mask_;
+    const size_t sparse_threshold = std::max<size_t>(1, wpr_ / 4);
     {
         // open mp thread stuff
         py::gil_scoped_release release;   // release GIL
@@ -422,7 +439,15 @@ py::array_t<uint32_t> BitMatrix::hamming( bool fill_cache,
                 uint32_t dist;
                 if (apply_mask) {
                     const SparseMask& mask_j = row_masks_sparse_[j];
-                    dist = maskedHammingPair(row_i, row_j, mask_i, mask_j, nullptr);
+                    if (mask_i.empty() && mask_j.empty()) {
+                        dist = hamming_func(row_i, row_j, wpr_, n_cols_bits_);
+                    } else if (mask_i.size() + mask_j.size() <= sparse_threshold) {
+                        uint32_t full = hamming_func(row_i, row_j, wpr_, n_cols_bits_);
+                        uint32_t penalty = maskedHammingPenaltySparse(row_i, row_j, mask_i, mask_j, nullptr);
+                        dist = full - penalty;
+                    } else {
+                        dist = maskedHammingPair(row_i, row_j, mask_i, mask_j, nullptr);
+                    }
                 } else {
                     dist = hamming_func(row_i, row_j, wpr_, n_cols_bits_);
                 }
@@ -494,6 +519,7 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
 
     simd_dispatchers::HammingFn hamming_func = simd_dispatchers::hamming_dispatcher(use_simd);
     const bool apply_mask = mask_missing && has_missing_mask_;
+    const size_t sparse_threshold = std::max<size_t>(1, wpr_ / 4);
     {
         // open mp thread stuff
         py::gil_scoped_release release;   // release GIL for full parallel region
@@ -511,10 +537,24 @@ py::array_t<uint32_t> BitMatrix::hamming_subset( const std::vector<size_t>& row_
                     const uint64_t* row_j = base_ + row_indices[j] * wpr_;
                     uint32_t dist;
                     if (apply_mask) {
-                        const SparseMask& mask_i = row_masks_sparse_[row_indices[i]];
-                        const SparseMask& mask_j = row_masks_sparse_[row_indices[j]];
-                        const std::vector<uint64_t>* subset_mask = use_mask ? &column_mask : nullptr;
-                        dist = maskedHammingPair(row_i, row_j, mask_i, mask_j, subset_mask);
+                        const size_t row_i_idx = row_indices[i];
+                        const size_t row_j_idx = row_indices[j];
+                        const SparseMask& mask_i = row_masks_sparse_[row_i_idx];
+                        const SparseMask& mask_j = row_masks_sparse_[row_j_idx];
+                        if (!use_mask) {
+                            if (mask_i.empty() && mask_j.empty()) {
+                                dist = hamming_func(row_i, row_j, wpr_, n_cols_bits_);
+                            } else if (mask_i.size() + mask_j.size() <= sparse_threshold) {
+                                uint32_t full = hamming_func(row_i, row_j, wpr_, n_cols_bits_);
+                                uint32_t penalty = maskedHammingPenaltySparse(row_i, row_j, mask_i, mask_j, nullptr);
+                                dist = full - penalty;
+                            } else {
+                                dist = maskedHammingPair(row_i, row_j, mask_i, mask_j, nullptr);
+                            }
+                        } else {
+                            const std::vector<uint64_t>* subset_mask = &column_mask;
+                            dist = maskedHammingPair(row_i, row_j, mask_i, mask_j, subset_mask);
+                        }
                     } else {
                         dist = use_mask
                             ? maskedHamming(row_i, row_j, column_mask)
@@ -569,6 +609,7 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
     // dispatch to backend with/without SIMD
     simd_dispatchers::InnerProductFn inner_product_func = simd_dispatchers::inner_product_dispatcher(use_simd);
     const bool apply_mask = mask_missing && has_missing_mask_;
+    const size_t sparse_threshold = std::max<size_t>(1, wpr_ / 4);
     {
         // open mp threading
         py::gil_scoped_release release;   // release GIL for full parallel region
@@ -588,7 +629,15 @@ py::array_t<int> BitMatrix::innerProduct( bool fill_cache,
                 if (apply_mask) {
                     const SparseMask& mask_i = row_masks_sparse_[i];
                     const SparseMask& mask_j = row_masks_sparse_[j];
-                    inner_product = static_cast<int>(maskedInnerProductPair(row_i, row_j, mask_i, mask_j, nullptr));
+                    if (mask_i.empty() && mask_j.empty()) {
+                        inner_product = static_cast<int>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_));
+                    } else if (mask_i.size() + mask_j.size() <= sparse_threshold) {
+                        uint32_t full = inner_product_func(row_i, row_j, wpr_, n_cols_bits_);
+                        uint32_t penalty = maskedInnerProductPenaltySparse(row_i, row_j, mask_i, mask_j, nullptr);
+                        inner_product = static_cast<int>(full - penalty);
+                    } else {
+                        inner_product = static_cast<int>(maskedInnerProductPair(row_i, row_j, mask_i, mask_j, nullptr));
+                    }
                 } else {
                     inner_product = inner_product_func(row_i, row_j, wpr_, n_cols_bits_);
                 }
@@ -639,11 +688,24 @@ py::array_t<double> BitMatrix::cosineDistanceAll( bool use_simd,
     const auto& row_masses = *row_masses_;
     std::vector<double> norms(n_rows_);
     const bool apply_mask = mask_missing && has_missing_mask_;
+    const size_t sparse_threshold = std::max<size_t>(1, wpr_ / 4);
     for (size_t i = 0; i < n_rows_; ++i) {
         if (apply_mask) {
-            const uint64_t* row_ptr = base_ + i * wpr_;
-            const SparseMask& row_mask = row_masks_sparse_[i];
-            const uint32_t mass = maskedRowMass(row_ptr, row_mask, nullptr);
+            uint32_t mass = 0;
+            if (!row_missing_ones_.empty()) {
+                const int base_mass = row_masses[i];
+                const uint32_t missing = row_missing_ones_[i];
+                mass = base_mass > 0 ? static_cast<uint32_t>(base_mass) : 0;
+                if (missing < mass) {
+                    mass -= missing;
+                } else {
+                    mass = 0;
+                }
+            } else {
+                const uint64_t* row_ptr = base_ + i * wpr_;
+                const SparseMask& row_mask = row_masks_sparse_[i];
+                mass = maskedRowMass(row_ptr, row_mask, nullptr);
+            }
             norms[i] = mass > 0 ? std::sqrt(static_cast<double>(mass)) : 0.0;
         } else {
             norms[i] = row_masses[i] > 0 ? std::sqrt(static_cast<double>(row_masses[i])) : 0.0;
@@ -664,6 +726,7 @@ py::array_t<double> BitMatrix::cosineDistanceAll( bool use_simd,
             const uint64_t* __restrict row_i = base_ + i * wpr_;
             const double norm_i = norms[i];
             const std::size_t idx_base = (i * (2 * n_rows_ - i - 1)) / 2;
+            const SparseMask& mask_i = row_masks_sparse_[i];
 
             for (std::size_t j = i + 1; j < n_rows_; ++j) {
                 const uint64_t* __restrict row_j = base_ + j * wpr_;
@@ -674,9 +737,21 @@ py::array_t<double> BitMatrix::cosineDistanceAll( bool use_simd,
                 if (denom == 0.0) {
                     distance = (norm_i == 0.0 && norm_j == 0.0) ? 0.0 : 1.0;
                 } else {
-                    const uint32_t dot = apply_mask
-                        ? maskedInnerProductPair(row_i, row_j, row_masks_sparse_[i], row_masks_sparse_[j], nullptr)
-                        : static_cast<uint32_t>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_));
+                    uint32_t dot;
+                    if (apply_mask) {
+                        const SparseMask& mask_j = row_masks_sparse_[j];
+                        if (mask_i.empty() && mask_j.empty()) {
+                            dot = static_cast<uint32_t>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_));
+                        } else if (mask_i.size() + mask_j.size() <= sparse_threshold) {
+                            uint32_t full = inner_product_func(row_i, row_j, wpr_, n_cols_bits_);
+                            uint32_t penalty = maskedInnerProductPenaltySparse(row_i, row_j, mask_i, mask_j, nullptr);
+                            dot = full - penalty;
+                        } else {
+                            dot = maskedInnerProductPair(row_i, row_j, mask_i, mask_j, nullptr);
+                        }
+                    } else {
+                        dot = static_cast<uint32_t>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_));
+                    }
                     double cosine = static_cast<double>(dot) / denom;
                     if (cosine > 1.0) cosine = 1.0;
                     else if (cosine < -1.0) cosine = -1.0;
@@ -733,14 +808,26 @@ py::array_t<double> BitMatrix::cosineDistance_subset( const std::vector<size_t>&
     }
 
     const bool apply_mask = mask_missing && has_missing_mask_;
+    const size_t sparse_threshold = std::max<size_t>(1, wpr_ / 4);
     std::vector<double> norms(submn_rows_, 0.0);
     for (size_t i = 0; i < submn_rows_; ++i) {
         const uint64_t* row_ptr = base_ + row_indices[i] * wpr_;
         uint32_t mass;
         if (apply_mask) {
             const SparseMask& row_mask = row_masks_sparse_[row_indices[i]];
-            const std::vector<uint64_t>* subset_mask = use_mask ? &column_mask : nullptr;
-            mass = maskedRowMass(row_ptr, row_mask, subset_mask);
+            if (!use_mask && !row_missing_ones_.empty()) {
+                const int base_mass = (*row_masses_)[row_indices[i]];
+                const uint32_t missing = row_missing_ones_[row_indices[i]];
+                mass = base_mass > 0 ? static_cast<uint32_t>(base_mass) : 0;
+                if (missing < mass) {
+                    mass -= missing;
+                } else {
+                    mass = 0;
+                }
+            } else {
+                const std::vector<uint64_t>* subset_mask = use_mask ? &column_mask : nullptr;
+                mass = maskedRowMass(row_ptr, row_mask, subset_mask);
+            }
         } else if (use_mask) {
             mass = maskedRowMass(row_ptr, column_mask);
         } else {
@@ -758,6 +845,7 @@ py::array_t<double> BitMatrix::cosineDistance_subset( const std::vector<size_t>&
             const uint64_t* __restrict row_i = base_ + row_indices[i] * wpr_;
             const double norm_i = norms[i];
             const size_t idx_base = (i * (2 * submn_rows_ - i - 1)) / 2;
+            const SparseMask& mask_i = row_masks_sparse_[row_indices[i]];
 
             for (size_t j = i + 1; j < submn_rows_; ++j) {
                 const uint64_t* __restrict row_j = base_ + row_indices[j] * wpr_;
@@ -768,14 +856,27 @@ py::array_t<double> BitMatrix::cosineDistance_subset( const std::vector<size_t>&
                 if (denom == 0.0) {
                     distance = (norm_i == 0.0 && norm_j == 0.0) ? 0.0 : 1.0;
                 } else {
-                    const uint32_t dot = apply_mask
-                        ? maskedInnerProductPair(row_i, row_j,
-                                                 row_masks_sparse_[row_indices[i]],
-                                                 row_masks_sparse_[row_indices[j]],
-                                                 use_mask ? &column_mask : nullptr)
-                        : (use_mask
+                    uint32_t dot;
+                    if (apply_mask) {
+                        const SparseMask& mask_j = row_masks_sparse_[row_indices[j]];
+                        if (!use_mask) {
+                            if (mask_i.empty() && mask_j.empty()) {
+                                dot = static_cast<uint32_t>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_));
+                            } else if (mask_i.size() + mask_j.size() <= sparse_threshold) {
+                                uint32_t full = inner_product_func(row_i, row_j, wpr_, n_cols_bits_);
+                                uint32_t penalty = maskedInnerProductPenaltySparse(row_i, row_j, mask_i, mask_j, nullptr);
+                                dot = full - penalty;
+                            } else {
+                                dot = maskedInnerProductPair(row_i, row_j, mask_i, mask_j, nullptr);
+                            }
+                        } else {
+                            dot = maskedInnerProductPair(row_i, row_j, mask_i, mask_j, &column_mask);
+                        }
+                    } else {
+                        dot = use_mask
                             ? maskedInnerProduct(row_i, row_j, column_mask)
-                            : static_cast<uint32_t>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_)));
+                            : static_cast<uint32_t>(inner_product_func(row_i, row_j, wpr_, n_cols_bits_));
+                    }
                     double cosine = static_cast<double>(dot) / denom;
                     if (cosine > 1.0) cosine = 1.0;
                     else if (cosine < -1.0) cosine = -1.0;
@@ -2236,6 +2337,48 @@ uint32_t BitMatrix::maskedInnerProductPair( const uint64_t* lhs,
     return dot;
 }
 
+uint32_t BitMatrix::maskedInnerProductPenaltySparse( const uint64_t* lhs,
+                                                     const uint64_t* rhs,
+                                                     const SparseMask& lhs_mask,
+                                                     const SparseMask& rhs_mask,
+                                                     const std::vector<uint64_t>* column_mask ) const {
+    if (lhs_mask.empty() && rhs_mask.empty()) {
+        return 0;
+    }
+    uint32_t penalty = 0;
+    auto it_l = lhs_mask.begin();
+    auto it_r = rhs_mask.begin();
+    while (it_l != lhs_mask.end() || it_r != rhs_mask.end()) {
+        size_t word = 0;
+        uint64_t mask = 0;
+        if (it_r == rhs_mask.end() || (it_l != lhs_mask.end() && it_l->first < it_r->first)) {
+            word = it_l->first;
+            mask = it_l->second;
+            ++it_l;
+        } else if (it_l == lhs_mask.end() || it_r->first < it_l->first) {
+            word = it_r->first;
+            mask = it_r->second;
+            ++it_r;
+        } else {
+            word = it_l->first;
+            mask = it_l->second | it_r->second;
+            ++it_l;
+            ++it_r;
+        }
+        if (column_mask) {
+            mask &= (*column_mask)[word];
+        }
+        if (word + 1 == wpr_) {
+            mask &= tail_mask_;
+        }
+        if (!mask) {
+            continue;
+        }
+        penalty += ardal::popcnt64((lhs[word] & rhs[word]) & mask);
+    }
+    return penalty;
+}
+
 
 uint32_t BitMatrix::maskedHammingPair( const uint64_t* lhs,
                                        const uint64_t* rhs,
@@ -2268,6 +2411,48 @@ uint32_t BitMatrix::maskedHammingPair( const uint64_t* lhs,
         dist += ardal::popcnt64(word);
     }
     return dist;
+}
+
+uint32_t BitMatrix::maskedHammingPenaltySparse( const uint64_t* lhs,
+                                                const uint64_t* rhs,
+                                                const SparseMask& lhs_mask,
+                                                const SparseMask& rhs_mask,
+                                                const std::vector<uint64_t>* column_mask ) const {
+    if (lhs_mask.empty() && rhs_mask.empty()) {
+        return 0;
+    }
+    uint32_t penalty = 0;
+    auto it_l = lhs_mask.begin();
+    auto it_r = rhs_mask.begin();
+    while (it_l != lhs_mask.end() || it_r != rhs_mask.end()) {
+        size_t word = 0;
+        uint64_t mask = 0;
+        if (it_r == rhs_mask.end() || (it_l != lhs_mask.end() && it_l->first < it_r->first)) {
+            word = it_l->first;
+            mask = it_l->second;
+            ++it_l;
+        } else if (it_l == lhs_mask.end() || it_r->first < it_l->first) {
+            word = it_r->first;
+            mask = it_r->second;
+            ++it_r;
+        } else {
+            word = it_l->first;
+            mask = it_l->second | it_r->second;
+            ++it_l;
+            ++it_r;
+        }
+        if (column_mask) {
+            mask &= (*column_mask)[word];
+        }
+        if (word + 1 == wpr_) {
+            mask &= tail_mask_;
+        }
+        if (!mask) {
+            continue;
+        }
+        penalty += ardal::popcnt64((lhs[word] ^ rhs[word]) & mask);
+    }
+    return penalty;
 }
 
 

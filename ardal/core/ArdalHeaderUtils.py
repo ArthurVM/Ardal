@@ -36,6 +36,8 @@ class ArdalHeaderUtils:
         self._site_lookup_cache = None
         self._missing_masks: Dict[str, List] = {}
         self._missing_mask_rows: Union[List[List[int]], None] = None
+        self._allele_position_map_cache: Union[Dict, None] = None
+        self._site_count_all_cache: Union[int, None] = None
         
         ## allele positions were not provided
         if not allele_positions:
@@ -259,6 +261,8 @@ class ArdalHeaderUtils:
             self._allele_id_format = allele_id_format
 
         self.allele_positions = allele_positions
+        self._allele_position_map_cache = None
+        self._site_count_all_cache = None
         return self.allele_positions
 
 
@@ -638,12 +642,14 @@ class ArdalHeaderUtils:
                               ) -> Dict:
         """ Returns allele positions by inverting the allele_positions dictionary
         """
-        return {
-            allele: (chr_key, pos)
-            for chr_key, pos_dict in self.get_allele_posmap().items()
-            for pos, alleles in pos_dict.items()
-            for allele in alleles
-        }
+        if self._allele_position_map_cache is None:
+            self._allele_position_map_cache = {
+                allele: (chr_key, pos)
+                for chr_key, pos_dict in self.get_allele_posmap().items()
+                for pos, alleles in pos_dict.items()
+                for allele in alleles
+            }
+        return self._allele_position_map_cache
 
 
     def _init_missing_masks(self, missing_masks: Union[Dict, None]) -> None:
@@ -716,6 +722,9 @@ class ArdalHeaderUtils:
             alleles = list(alleles)
         validate_type(alleles, list, "alleles")
 
+        if alleles is self.headers.get("alleles") and self._site_count_all_cache is not None:
+            return self._site_count_all_cache
+
         have_positions = bool(self._allele_positions_from_bed or self._allele_positions_from_ids)
         fmt_to_use = allele_id_format or self._allele_id_format
 
@@ -749,7 +758,10 @@ class ArdalHeaderUtils:
                 len(missing_alleles),
             )
 
-        return len(unique_sites)
+        site_count = len(unique_sites)
+        if alleles is self.headers.get("alleles"):
+            self._site_count_all_cache = site_count
+        return site_count
 
 
     def has_id_positions(self) -> bool:

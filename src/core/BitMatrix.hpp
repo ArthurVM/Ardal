@@ -133,6 +133,7 @@ private:
     std::vector<const std::uint64_t*> row_ptrs_;           // row pointers
     using SparseMask = std::vector<std::pair<size_t, uint64_t>>;
     std::vector<SparseMask> row_masks_sparse_;
+    std::vector<uint32_t> row_missing_ones_;
     bool has_missing_mask_ = false;
 
     // attributes
@@ -165,6 +166,11 @@ private:
                                      const SparseMask& lhs_mask,
                                      const SparseMask& rhs_mask,
                                      const std::vector<uint64_t>* column_mask = nullptr ) const;
+    uint32_t maskedInnerProductPenaltySparse( const uint64_t* lhs,
+                                              const uint64_t* rhs,
+                                              const SparseMask& lhs_mask,
+                                              const SparseMask& rhs_mask,
+                                              const std::vector<uint64_t>* column_mask = nullptr ) const;
     uint32_t maskedRowMass( const uint64_t* row_ptr,
                             const std::vector<uint64_t>& mask ) const;
     uint32_t maskedRowMass( const uint64_t* row_ptr,
@@ -175,6 +181,11 @@ private:
                                 const SparseMask& lhs_mask,
                                 const SparseMask& rhs_mask,
                                 const std::vector<uint64_t>* column_mask = nullptr ) const;
+    uint32_t maskedHammingPenaltySparse( const uint64_t* lhs,
+                                         const uint64_t* rhs,
+                                         const SparseMask& lhs_mask,
+                                         const SparseMask& rhs_mask,
+                                         const std::vector<uint64_t>* column_mask = nullptr ) const;
 
     // statistics helper functions
     double density( void ) const;
