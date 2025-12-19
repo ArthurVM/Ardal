@@ -6,6 +6,8 @@ Copyright 2025 Arthur V. Morris
 
 #include <memory>
 #include <iostream>
+#include <cstdint>
+#include <vector>
 #include "BitMatrix.hpp"
 #include "RoaringMatrix.hpp"
 #include "detail/flat_matrix.hpp"
@@ -14,24 +16,30 @@ Copyright 2025 Arthur V. Morris
 namespace py = pybind11;
 namespace ardal {
 
+class SnvFallbackBackend;
+
 class HybridMatrix {
 public:
     HybridMatrix( py::array packed_or_dense_matrix,
                   bool is_bitpacked,
                   size_t n_cols_bits,
                   bool use_roaring_if_sparse = true,
-                  double density_threshold = 0.02 );
+                  double density_threshold = 0.02,
+                  py::object missing_mask = py::object() );
+    ~HybridMatrix();
 
     // distance functions: BitMatrix and RoaringMatrix
     py::array_t<uint32_t> hamming( bool use_simd = true,
                                    int threads = 1,
-                                   const std::string& backend = "auto" ) const;
+                                   const std::string& backend = "auto",
+                                   bool mask_missing = false ) const;
     
     py::array_t<uint32_t> hamming_subset( const std::vector<size_t> row_indices,
                                           const std::vector<size_t> col_indices,
                                           bool use_simd = true,
                                           int threads = 1,
-                                          const std::string& backend = "auto" ) const;
+                                          const std::string& backend = "auto",
+                                          bool mask_missing = false ) const;
     
     py::array_t<double> jaccard( bool use_simd = true,
                                  int threads = 1,
@@ -39,16 +47,19 @@ public:
                                    
     py::array_t<int> innerProduct( bool use_simd = true,
                                    int threads = 1,
-                                   const std::string& backend = "auto" ) const;
+                                   const std::string& backend = "auto",
+                                   bool mask_missing = false ) const;
     
     py::array_t<double> cosineDistance( bool use_simd = true,
                                         int threads = 1,
-                                        const std::string& backend = "auto" ) const;
+                                        const std::string& backend = "auto",
+                                        bool mask_missing = false ) const;
     py::array_t<double> cosineDistance_subset( const std::vector<size_t> row_indices,
                                                const std::vector<size_t> col_indices,
                                                bool use_simd = true,
                                                int threads = 1,
-                                               const std::string& backend = "auto" ) const;
+                                               const std::string& backend = "auto",
+                                               bool mask_missing = false ) const;
  
 
     // neighbourhood functions: BitMatrix and RoaringMatrix
@@ -147,6 +158,24 @@ public:
     py::array_t<uint64_t> getSubsetPackedMatrix_rows( const std::vector<size_t>& row_indices, 
                                                       const int threads ) const;
 
+    void prepareSnvView( py::array_t<uint32_t> allele_to_locus,
+                         py::array_t<uint8_t> allele_to_base );
+
+    py::array_t<uint32_t> snvHamming( int threads = 1,
+                                      bool mask_missing = false ) const;
+    py::array_t<uint32_t> snvHamming_subset( const std::vector<size_t>& row_indices,
+                                            const std::vector<size_t>& col_indices,
+                                            int threads = 1,
+                                            bool mask_missing = false ) const;
+    py::array_t<int64_t> snvNeighbourhood( size_t row,
+                                           uint32_t epsilon,
+                                           int threads = 1,
+                                           bool mask_missing = false ) const;
+    py::list knnSnv( size_t row,
+                     uint32_t k,
+                     int threads = 1,
+                     bool mask_missing = false ) const;
+
 private:  
     // attributes
     size_t n_rows_ = 0;
@@ -156,15 +185,19 @@ private:
     py::array owner_;
     ardal::detail::FlatMatrix flat_;
     std::vector<uint64_t> storage_;
+    bool has_missing_mask_ = false;
+    std::vector<std::vector<uint32_t>> mask_columns_;
     
     // backends
     std::unique_ptr<BitMatrix> bit_backend;
     std::unique_ptr<RoaringMatrix> roaring_backend;
     bool roaring_enabled = false;
-    
+
     // backend selector
     enum class BackendType { AUTO, BIT, ROARING };
     BackendType selectBackend(size_t n_cols, double density) const;
+
+    mutable std::unique_ptr<SnvFallbackBackend> snv_fallback_backend_;
 
     inline BackendType parse_backend(const std::string& backend) const {
         if (backend == "auto" || backend == "AUTO") return BackendType::AUTO;

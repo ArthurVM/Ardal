@@ -15,6 +15,7 @@ set(ARDAL_CORE_SRCS
   src/utils/Logger.cpp
   src/core/BitMatrix.cpp
   src/core/RoaringMatrix.cpp
+  src/core/SnvFallbackBackend.cpp
   src/core/HybridMatrix.cpp
   src/roaring/roaring.c
 )

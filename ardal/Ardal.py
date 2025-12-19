@@ -41,7 +41,7 @@ class Ardal(object):
     def __init__( self,
                   data_source : Union[str, pd.DataFrame, Tuple[str, str], Tuple[np.ndarray, Dict]],
                   roaring : Union[str, bool] = "auto",
-                  density_threshold : float = 0.1,
+                  density_threshold : float = 0.20,
                   allele_id_format : Union[str, None] = None,
                   allele_coords_bed : Union[str, None] = None,
                   verbosity : Union[int, str] = "error",
@@ -71,6 +71,7 @@ class Ardal(object):
 
         self._hybrid_matrix = None
         self._headers = None
+        self._missing_sites = {"site_keys": {}, "per_guid": {}}
         is_packed_mem = False
         if isinstance(data_source, list):
             for item in data_source:
@@ -83,34 +84,40 @@ class Ardal(object):
         ## do some parameter fiddling to enforce the generation of a roaring matrix
         self._roaring_setter(roaring, density_threshold)
                     
-        if parser.matrix is not None:
-            log.info(f"""Initialising ardal::HybridMatrix backend with:
-                                    matrix = {parser.matrix.shape} {type(parser.matrix)}
-                                    is_bitpacked = {parser.is_bitpacked} {type(parser.is_bitpacked)}
-                                    n_cols_bits = {parser.meta["n_cols"]} {type(parser.meta["n_cols"])}
-                                    build_roaring = {self.build_roaring} {type(self.build_roaring)}
-                                    density_threshold = {self.density_threshold} {type(self.density_threshold)}""")
-            self._hybrid_matrix = backends.ardal.HybridMatrix( parser.matrix,
-                                                               is_bitpacked=parser.is_bitpacked,
-                                                               n_cols_bits=parser.meta["n_cols"],
-                                                               use_roaring_if_sparse=self.build_roaring,
-                                                               density_threshold=self.density_threshold )
-            self._headers = parser.headers
-            self._meta = parser.meta
-        else:
+        if parser.matrix is None:
             ## raise an error if parsing fails to prevent unexpected behaviour down the line
             raise MatrixParseError(f"Failed to parse data from: {data_source}") 
-        
-        ## set this as a signal from the backend
-        self.roaring = self._hybrid_matrix.roaringEnabled()
-        
+
+        self._headers = parser.headers
+        self._meta = parser.meta
+        self._missing_masks = parser.missing_masks
+
         log.info("Initialising Ardal component classes.")
-        ## Ardal component classes
         self._headerUtils = ArdalHeaderUtils(headers = self._headers,
                                              meta = self._meta,
                                              allele_coords_bed = allele_coords_bed,
                                              allele_id_format = allele_id_format,
-                                             allele_positions = allele_positions)
+                                             allele_positions = allele_positions,
+                                             missing_masks = self._missing_masks)
+
+        mask_rows = self._headerUtils.get_missing_mask_rows()
+        mask_arg = mask_rows if mask_rows else None
+
+        log.info(f"""Initialising ardal::HybridMatrix backend with:
+                                matrix = {parser.matrix.shape} {type(parser.matrix)}
+                                is_bitpacked = {parser.is_bitpacked} {type(parser.is_bitpacked)}
+                                n_cols_bits = {parser.meta["n_cols"]} {type(parser.meta["n_cols"])}
+                                build_roaring = {self.build_roaring} {type(self.build_roaring)}
+                                density_threshold = {self.density_threshold} {type(self.density_threshold)}""")
+        self._hybrid_matrix = backends.ardal.HybridMatrix( parser.matrix,
+                                                           is_bitpacked=parser.is_bitpacked,
+                                                           n_cols_bits=parser.meta["n_cols"],
+                                                           use_roaring_if_sparse=self.build_roaring,
+                                                           density_threshold=self.density_threshold,
+                                                           missing_mask=mask_arg )
+        
+        ## set this as a signal from the backend
+        self.roaring = self._hybrid_matrix.roaringEnabled()
         
         self.io = ArdalIO(headerUtils = self._headerUtils,
                           hybrid_matrix = self._hybrid_matrix,

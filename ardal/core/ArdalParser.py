@@ -5,7 +5,7 @@ import json
 import hashlib
 from sys import byteorder
 from pathlib import Path
-from typing import Union, Tuple
+from typing import Union, Tuple, Dict
 from importlib.metadata import version, PackageNotFoundError
 
 import pandas as pd
@@ -14,6 +14,7 @@ import numpy as np
 from ..utils.misc import require_package
 from ..utils.exceptions import MalformedInputError, UnsupportedFormatError, LoadMatrixError
 from ..utils.logger import get_logger
+from ..utils.make_meta import make_meta
 
 try:
     from _ardal_pack import pack_dense_to_words as _pack_words_cpp
@@ -28,26 +29,27 @@ class ArdalParser:
     """
     Parses Ardal inputs:
       - Dense: CSV, Parquet, NPY/JSON, NPZ/JSON
-      - Bitpacked: {headers.json, matrix.bin} with meta.format == "ardal.bitpack.v1"
+      - Bitpacked: BIN/JSON
 
     Returns:
       self.matrix  -> np.ndarray
         - dense: shape (n_rows, n_cols), dtype arbitrary
         - bitpack: memmap '<u8', shape (n_rows, words_per_row)
-      self.headers -> dict with "guids", "alleles"
-      self.meta    -> dict (bitpack only), else {}
+      self.headers -> Dict with "guids", "alleles"
+      self.meta    -> Dict (bitpack only), else {}
       self.is_bitpacked -> bool
     """
 
-    def __init__(self,
-                 input_data_structure: Union[list, str],
-                 verify_hash: bool = False,
-                 is_packed_mem: bool = False):
+    def __init__( self,
+                  input_data_structure: Union[list, str],
+                  verify_hash: bool = False,
+                  is_packed_mem: bool = False ):
         self.input_data = input_data_structure
         self.file_format = None
         self.matrix: np.ndarray | None = None
-        self.headers: dict = {}
-        self.meta: dict = {}
+        self.headers: Dict = {}
+        self.meta: Dict = {}
+        self.missing_masks: Dict = {"missing_masks": {}}
         self.is_bitpacked: bool = False
         self.verify_hash = verify_hash
         self.is_packed_mem = is_packed_mem
@@ -57,11 +59,15 @@ class ArdalParser:
 
     ## ------------- parsing -------------
 
-    def _parse(self) -> Union[int, None]:
+    def _parse( self ) -> Union[int, None]:
+        
+        ACCEPTED_META_EXTENSIONS = [".meta", ".json"]
+        
         if self.input_data is None:
             raise MalformedInputError("Input data structure cannot be None.")
 
-        ## in-memory [array, headers] or [headers, array]
+        ## two objects in a list
+        ## e.g. [np.ndarray, Dict] or [Path, Path]
         if isinstance(self.input_data, list):
             
             if len(self.input_data) != 2:
@@ -69,12 +75,17 @@ class ArdalParser:
 
             a, b = self.input_data
 
-            if (isinstance(a, np.ndarray) and isinstance(b, dict)) or (isinstance(b, np.ndarray) and isinstance(a, dict)):
-                matrix, headers = self._order_input(a, b)
+
+            ## in-memory [array, headers] or [headers, array]
+            if (isinstance(a, np.ndarray) and isinstance(b, Dict)) or (isinstance(b, np.ndarray) and isinstance(a, Dict)):
+                matrix, headers_meta_raw = self._order_input(a, b)
                 log.info(f"Parsing matrix data from list in memory of form: {[type(i) for i in self.input_data]}")
-                self.headers = headers
+                headers_clean, missing_obj, meta_obj = self._load_headers_dict(headers_meta_raw)
+                self.headers = headers_clean
+                self.missing_masks = self._normalise_missing_masks(missing_obj, self.headers)
 
                 want_bitpack = self.is_packed_mem or self._is_bitpacked_candidate(matrix)
+                print(want_bitpack)
                 self.matrix = np.ascontiguousarray(matrix)
 
                 if want_bitpack:
@@ -87,15 +98,16 @@ class ArdalParser:
                             raise LoadMatrixError(f"Bitpack matrix has incompatible dtype: {self.matrix.dtype}")
                     self.file_format = "bitpack"
                     self.is_bitpacked = True
-                    self.meta = self._mk_bitpack_meta_from_headers(self.matrix, self.headers)
-                    self._validate_bitpack()
+                    self.meta = meta_obj if meta_obj else self._ensure_meta(self.matrix, self.headers, None, is_bitpacked=True)
+                    # self._validate_bitpack(self.matrix, headers_clean, meta_obj)
                     return 0
 
                 self.file_format = "memory_npy"
                 self.is_bitpacked = False
                 self._validate_dense()
-                self.meta = self._mk_bitpack_meta_from_dense(self.matrix, self.headers)
+                self.meta = meta_obj if meta_obj else self._ensure_meta(self.matrix, self.headers, None, is_bitpacked=False)
                 return 0
+
 
             ## two file paths
             if isinstance(a, str) and isinstance(b, str):
@@ -104,92 +116,80 @@ class ArdalParser:
                 a, b = Path(a), Path(b)
                 if not a.exists() or not b.exists():
                     raise FileNotFoundError(f"One or more file paths do not exist: {a}, {b}")
-                exts = {a.suffix.lower(), b.suffix.lower()}
-                
-                json_path = a if a.suffix.lower() == ".json" else b
-                mat_path  = b if json_path == a else a
+                exts = [a.suffix.lower(), b.suffix.lower()]
+                                
+                meta_path = a if a.suffix.lower() in ACCEPTED_META_EXTENSIONS else b
+                mat_path  = b if meta_path == a else a
 
                 ## bitpack pair
-                if exts == {".json", ".bin"}:
+                ## 1. load pair
+                ## 2. validate data structures
+                ## 3. validate missing structures
+                ## 4. define file format
+                ## 5. construct variables
+                if exts[0] == ".bin":
                     log.info(f"Detected matrix format: .bit")
-                    self.matrix, self.headers, self.meta = self._load_bitpack_pair(json_path, mat_path)
+                    matrix, headers, meta, missing_raw = self._load_bitpack_pair(meta_path, mat_path)
+                    self._validate_bitpack(matrix, headers, meta)
+                    self.missing_masks = self._normalise_missing_masks(missing_raw, headers)
+                    self.matrix = matrix
+                    self.headers = headers
+                    self.meta = self._ensure_meta(matrix, headers, meta, is_bitpacked=True)
                     self.file_format = "bitpack"
                     self.is_bitpacked = True
-                    self._validate_bitpack()
                     return 0
 
                 ## dense pairs
-                if exts == {".json", ".npy"}:
+                if exts[0] == ".npy":
                     log.info(f"Detected matrix format: .npy")
-                    dense, headers = self._load_npy_pair(str(json_path), str(mat_path))
-                    self._validate_dense_pair(dense, headers)
-                    self.matrix = dense
+                    matrix, headers, meta, missing_raw = self._load_npy_pair(meta_path, mat_path)
+                    self._validate_dense_pair(matrix, headers)
+                    self.missing_masks = self._normalise_missing_masks(missing_raw, headers)
+                    self.matrix = matrix
                     self.headers = headers
-                    self.meta = self._mk_bitpack_meta_from_dense(self.matrix, headers)
+                    self.meta = self._ensure_meta(matrix, headers, meta, is_bitpacked=False)
                     self.file_format = "npy"
                     return 0
 
-                if exts == {".json", ".npz"}:
+                if exts[0] == ".npz":
                     log.info(f"Detected matrix format: .npz")
-                    dense, headers = self._load_npz_pair(str(json_path), str(mat_path))
-                    self._validate_dense_pair(dense, headers)
-                    self.matrix = dense
+                    matrix, headers, meta, missing_raw = self._load_npz_pair(meta_path, mat_path)
+                    self._validate_dense_pair(matrix, headers)
+                    self.missing_masks = self._normalise_missing_masks(missing_raw, headers)
+                    self.matrix = matrix
                     self.headers = headers
-                    self.meta = self._mk_bitpack_meta_from_dense(self.matrix, headers)
+                    self.meta = self._ensure_meta(matrix, headers, meta, is_bitpacked=False)
                     self.file_format = "npz"
                     return 0
 
                 raise UnsupportedFormatError(f"Unrecognized file pair: {a.suffix}, {b.suffix}")
 
             raise MalformedInputError(
-                "If list input, it must be [headers::dict, matrix::np.ndarray] or [headers.json, matrix.bin] or dense pairs."
+                "If list input, it must be [headers::Dict, matrix::np.ndarray] or [headers.json, matrix.bin] or dense pairs."
             )
 
-        ## single path
+        ## single object
         if isinstance(self.input_data, str):
             log.info(f"Parsing matrix data from one file path: {self.input_data}")
             
             p = Path(self.input_data)
             suffix = p.suffix.lower()
-            supported_suffixes = {".json", ".csv", ".parquet", ".npy", ".npz", ".bin"}
+            supported_suffixes = {".csv"}
             if suffix not in supported_suffixes:
                 raise UnsupportedFormatError(f"Unsupported file extension: {p.suffix}")
             if not p.exists():
                 raise FileNotFoundError(f"File does not exist: {p}")
 
-            if suffix == ".json":
-                ## might be a bitpack header
-                if self._is_bitpack_header(p):
-                    self.matrix, self.headers, self.meta = self._load_bitpack_header(p)
-                    self.file_format = "bitpack"
-                    self.is_bitpacked = True
-                    self._validate_bitpack()
-                    return 0
-                ## else it's a dense header without its matrix -> reject
-                raise MalformedInputError("Dense JSON headers provided without matrix path.")
-
             ## csv
-            ## TODO: needs fixing in line with new backend packing strategy
             if suffix == ".csv":
                 log.info(f"Detected matrix format: .csv")
                 matrix, headers = self._load_csv(str(p))
-                self.matrix, self.headers = matrix, headers
-                self.meta = self._mk_bitpack_meta_from_dense(self.matrix, self.headers)
+                headers_clean, missing_obj, meta_obj = self._load_headers_dict(headers)
+                self.matrix, self.headers = matrix, headers_clean
+                self.meta = meta_obj if meta_obj else self._ensure_meta(self.matrix, self.headers, None, is_bitpacked=False)
                 self.file_format = "csv"
                 self.is_bitpacked = False
-                return 0
-
-            ## parquet
-            ## might remove this
-            if suffix == ".parquet":
-                log.info(f"Detected matrix format: .parquet")
-                dense, headers = self._load_parquet(str(p))
-                self._validate_dense_pair(dense, headers)
-                self.matrix = dense
-                self.headers = headers
-                self.meta = self._mk_bitpack_meta_from_dense(self.matrix, headers)
-                self.file_format = "parquet"
-                self.is_bitpacked = False
+                self.missing_masks = self._normalise_missing_masks(missing_obj, self.headers)
                 return 0
 
             if suffix in (".npy", ".npz", ".bin"):
@@ -200,10 +200,49 @@ class ArdalParser:
         raise MalformedInputError("Input must be list or string.")
 
 
+    def _load_headers_dict( self,
+                            headers_meta_raw: Dict ) -> Tuple[Dict, Union[Dict, None], Union[Dict, None]]:
+        """
+        Validate an in-memory headers dictionary and extract missing-mask and metadata payloads.
+        Expected shapes:
+          1) {\"headers\": {...}, \"column_masks\": ..., \"meta\": ...}
+          2) {\"guids\": [...], \"alleles\": [...], \"column_masks\": ..., \"meta\": ...}
+        """
+        if not isinstance(headers_meta_raw, Dict):
+            raise LoadMatrixError("Headers metadata must be a Dictionary.")
 
-    ## ------------- validation -------------
+        # detect payload layout
+        if "headers" in headers_meta_raw and isinstance(headers_meta_raw["headers"], Dict):
+            headers_raw = headers_meta_raw["headers"]
+            missing_raw = headers_meta_raw.get("column_masks")
+            meta_raw = headers_meta_raw.get("meta")
+        else:
+            headers_raw = headers_meta_raw
+            missing_raw = headers_meta_raw.get("column_masks")
+            meta_raw = headers_meta_raw.get("meta")
 
-    def _validate_dense(self) -> None:
+        if "guids" not in headers_raw or "alleles" not in headers_raw:
+            raise LoadMatrixError("Headers must contain 'guids' and 'alleles' keys.")
+
+        guids = headers_raw["guids"]
+        alleles = headers_raw["alleles"]
+
+        if not isinstance(guids, list) or not all(isinstance(g, str) for g in guids):
+            raise LoadMatrixError("GUIDs must be a list of strings.")
+        if not isinstance(alleles, list) or not all(isinstance(a, str) for a in alleles):
+            raise LoadMatrixError("Alleles must be a list of strings.")
+        if len(set(guids)) != len(guids):
+            raise LoadMatrixError("GUIDs must be unique.")
+        if len(set(alleles)) != len(alleles):
+            raise LoadMatrixError("Alleles must be unique.")
+
+        headers_clean = {"guids": guids, "alleles": alleles}
+        return headers_clean, missing_raw, meta_raw
+
+
+    ## ------------- validators -------------
+
+    def _validate_dense( self ) -> None:
         if not isinstance(self.matrix, np.ndarray):
             raise LoadMatrixError("Matrix must be a NumPy array.")
         if self.matrix.ndim != 2:
@@ -216,8 +255,8 @@ class ArdalParser:
 
         n_rows, n_cols_bits = self.matrix.shape
 
-        if not isinstance(self.headers, dict):
-            raise LoadMatrixError("Headers must be a dictionary.")
+        if not isinstance(self.headers, Dict):
+            raise LoadMatrixError("Headers must be a Dictionary.")
         if "guids" not in self.headers or "alleles" not in self.headers:
             raise LoadMatrixError("Headers must contain 'guids' and 'alleles' keys.")
 
@@ -240,37 +279,42 @@ class ArdalParser:
             raise LoadMatrixError("Alleles must be unique.")
 
 
-    def _validate_bitpack(self) -> None:
-        if not isinstance(self.matrix, np.ndarray):
+    def _validate_bitpack( self,
+                           mmap_arr : np.memmap,
+                           headers_raw : Dict,
+                           meta_raw : Dict ) -> None:
+        supported_formats = ["ardal.dense.v1", "ardal.bitpack.v1", "ardal.bin.v1", "ardal.npy.v1", "ardal.npz.v1"]
+        
+        if not isinstance(mmap_arr, np.ndarray):
             raise LoadMatrixError("Bitpack matrix must be a NumPy memmap.")
-        if not self._is_le_uint64(self.matrix):
-            raise LoadMatrixError(f"Bitpack dtype must be little-endian uint64 ('<u8'), got {self.matrix.dtype}.")
-        if self.matrix.ndim != 2:
+        if not self._is_le_uint64(mmap_arr):
+            raise LoadMatrixError(f"Bitpack dtype must be little-endian uint64 ('<u8'), got {mmap_arr.dtype}.")
+        if mmap_arr.ndim != 2:
             raise LoadMatrixError("Bitpack matrix must be 2-dimensional.")
-        if not self.matrix.flags['C_CONTIGUOUS']:
+        if not mmap_arr.flags['C_CONTIGUOUS']:
             raise LoadMatrixError("Bitpack memmap must be C-contiguous.")
 
-        n_rows, words = self.matrix.shape
+        n_rows, words = mmap_arr.shape
 
-        if not isinstance(self.meta, dict):
-            raise LoadMatrixError("Bitpack JSON missing 'meta' dictionary.")
-        if self.meta.get("format") != "ardal.bitpack.v1":
-            raise LoadMatrixError(f"Unsupported bitpack format: {self.meta.get('format')}")
+        if not isinstance(meta_raw, Dict):
+            raise LoadMatrixError("Bitpack JSON missing 'meta' Dictionary.")
+        if meta_raw.get("format") not in  supported_formats:
+            raise LoadMatrixError(f"Unsupported bitpack format: {meta_raw.get('format')}")
 
-        if self.meta.get("dtype") != "<u8" or self.meta.get("endianness") != "little":
+        if meta_raw.get("dtype") != "<u8" or meta_raw.get("endianness") != "little":
             raise LoadMatrixError("dtype/endianness must be '<u8' and 'little'.")
-        if not bool(self.meta.get("row_major", True)):
+        if not bool(meta_raw.get("row_major", True)):
             raise LoadMatrixError("Only row-major bitpack is supported.")
-        if int(self.meta.get("bits_per_word", 64)) != 64:
+        if int(meta_raw.get("bits_per_word", 64)) != 64:
             raise LoadMatrixError("bits_per_word must be 64 for uint64 packing.")
 
-        n_cols_bits = int(self.meta["n_cols"])
+        n_cols_bits = int(meta_raw["n_cols"])
         expected_words = (n_cols_bits + 63) // 64
         if words != expected_words:
             raise LoadMatrixError(f"words_per_row mismatch: header {expected_words}, file {words}")
 
         ## file size check if loaded from a .bin
-        bin_resolved = self.meta.get("data_file_resolved")
+        bin_resolved = meta_raw.get("data_file_resolved")
         if bin_resolved:
             bin_path = Path(bin_resolved)
             expected_bytes = n_rows * expected_words * 8
@@ -278,15 +322,14 @@ class ArdalParser:
             if size != expected_bytes:
                 raise LoadMatrixError(f"Binary size mismatch: expected {expected_bytes}, got {size}")
 
-
         ## headers check
-        if not isinstance(self.headers, dict):
-            raise LoadMatrixError("Headers must be a dictionary.")
-        if "guids" not in self.headers or "alleles" not in self.headers:
+        if not isinstance(headers_raw, Dict):
+            raise LoadMatrixError("Headers must be a Dictionary.")
+        if "guids" not in headers_raw or "alleles" not in headers_raw:
             raise LoadMatrixError("Headers must contain 'guids' and 'alleles' keys.")
 
-        guids = self.headers["guids"]
-        alleles = self.headers["alleles"]
+        guids = headers_raw["guids"]
+        alleles = headers_raw["alleles"]
         if len(guids) != n_rows:
             raise LoadMatrixError(f"Mismatch: {n_rows} rows vs {len(guids)} GUIDs.")
         if len(alleles) != n_cols_bits:
@@ -297,16 +340,18 @@ class ArdalParser:
             raise LoadMatrixError("Alleles must be unique.")
 
         ## optional integrity check
-        want_hash = self.verify_hash and self.meta.get("data_sha256")
+        want_hash = self.verify_hash and meta_raw.get("data_sha256")
         if want_hash:
             digest = self._sha256_file(bin_path)
-            if digest != self.meta["data_sha256"]:
+            if digest != meta_raw["data_sha256"]:
                 raise LoadMatrixError(
                     f"SHA256 mismatch for {bin_path}: expected {self.meta['data_sha256']} got {digest}"
                 )
-
+            
     
-    def _validate_dense_pair(self, dense: np.ndarray, headers: dict) -> None:
+    def _validate_dense_pair( self,
+                              dense: np.ndarray,
+                              headers: Dict ) -> None:
         """
         Validate a dense matrix + headers without mutating them.
 
@@ -336,8 +381,8 @@ class ArdalParser:
             raise LoadMatrixError(f"Dense dtype {dense.dtype} not supported; use bool or integer {{0,1}}.")
 
         ## --- headers checks ---
-        if not isinstance(headers, dict):
-            raise LoadMatrixError("Headers must be a dictionary.")
+        if not isinstance(headers, Dict):
+            raise LoadMatrixError("Headers must be a Dictionary.")
         if "guids" not in headers or "alleles" not in headers:
             raise LoadMatrixError("Headers must contain 'guids' and 'alleles' keys.")
 
@@ -360,12 +405,96 @@ class ArdalParser:
             raise LoadMatrixError("Alleles must be unique.")
 
 
-
     ## ------------- loaders -------------
-    def _load_csv(self, csv_path: str) -> Tuple[np.ndarray, dict]:
+    def _load_bitpack_pair( self,
+                            header_meta_path: Path,
+                            bin_path: Path ) -> Tuple[np.memmap, Dict, Dict, Union[Dict, None]]:
+        """ Load bitpacked matrix/headers meta pair
+        """
+        ## parse and load header metadata
+        headers_raw, meta_raw, missing_raw = self._load_header_meta(header_meta_path)            
+        
+        ## check metadata and the input binary are congruous
+        hdr_bin = meta_raw.get("data_file")
+        if hdr_bin and Path(hdr_bin).name != bin_path.name:
+            log.warning(f"Header data_file='{hdr_bin}' != provided bin '{bin_path.name}'. Using provided bin.")
+            
+        meta_raw["data_file_resolved"] = str(bin_path.resolve())
+
+        n_rows = int(meta_raw["n_rows"])
+        words  = int(meta_raw["words_per_row"])
+
+        ## memmap the array
+        try:
+            mmap_arr = np.memmap(bin_path, mode="r", dtype=np.dtype("<u8"), shape=(n_rows, words), order="C")
+        except Exception as e:
+            raise LoadMatrixError(f"Failed to load packed matrix: {e}")
+        
+        return mmap_arr, headers_raw, meta_raw, missing_raw
+    
+    
+    def _load_npy_pair( self,
+                        header_meta_path: Path,
+                        npy_path: Path ) -> Tuple[np.ndarray, Dict, Dict, Union[Dict, None]]:
+        """ Load npy matrix/headers meta pair
+        """
+        ## parse and load header metadata
+        headers_raw, meta_raw, missing_raw = self._load_header_meta(header_meta_path) 
+        
+        ## check metadata and the input binary are congruous
+        hdr_bin = meta_raw.get("data_file")
+        if hdr_bin and Path(hdr_bin).name != npy_path.name:
+            log.warning(f"Header data_file='{hdr_bin}' != provided bin '{npy_path.name}'. Using provided bin.")
+            
+        meta_raw["data_file_resolved"] = str(npy_path.resolve())
+        
+        try:
+            matrix = np.ascontiguousarray(np.load(npy_path))
+        except Exception as e:
+            raise LoadMatrixError(f"Failed to load npy matrix: {e}")
+                
+        return matrix, headers_raw, meta_raw, missing_raw
+
+
+    def _load_npz_pair( self,
+                        header_meta_path: Path,
+                        npz_path: Path ) -> Tuple[np.ndarray, Dict, Dict, Union[Dict, None]]:
+        sp_sparse = require_package("scipy", attr="sparse")
+        
+        ## parse and load header metadata
+        headers_raw, meta_raw, missing_raw = self._load_header_meta(header_meta_path) 
+        
+        ## check metadata and the input binary are congruous
+        hdr_bin = meta_raw.get("data_file")
+        if hdr_bin and Path(hdr_bin).name != npz_path.name:
+            log.warning(f"Header data_file='{hdr_bin}' != provided bin '{npz_path.name}'. Using provided bin.")
+            
+        meta_raw["data_file_resolved"] = str(npz_path.resolve())
+        
+        try:
+            sp_mat = sp_sparse.load_npz(npz_path)
+            matrix = np.ascontiguousarray(sp_mat.toarray())
+        except Exception as sp_error:
+            try:
+                data = np.load(npz_path)
+                if 'matrix' not in data:
+                    raise ValueError("Key 'matrix' not found in .npz file.")
+                matrix = np.ascontiguousarray(data['matrix'])
+            except Exception as np_error:
+                raise LoadMatrixError(
+                    f"Failed to load matrix from npz: "
+                    f"scipy.sparse.load_npz failed with {sp_error}; "
+                    f"np.load failed with {np_error}"
+                )
+                
+        return matrix, headers_raw, meta_raw, missing_raw
+    
+    
+    def _load_csv( self,
+                   csv_path: str ) -> Tuple[np.ndarray, Dict]:
         """
         Load a dense CSV where first column is GUID and remaining columns are {0,1}.
-        Returns (matrix: np.ndarray[C-contig, uint8], headers: dict).
+        Returns (matrix: np.ndarray[C-contig, uint8], headers: Dict).
         """
         path = Path(csv_path)
         if not path.exists():
@@ -428,299 +557,102 @@ class ArdalParser:
         return matrix, headers
         
 
-    def _load_csv_bitpacked(self, csv_path: str, max_chunk_mb: int = 64) -> Tuple[np.memmap, dict, dict]:
-        """
-        AUTOGENERATED HEADER.
-        Stream a wide CSV: first column = GUID, remaining columns = {0,1}.
-        Build headers, then process rows in chunks:
-        - fill a dense uint8 buffer of shape (chunk_rows, n_cols_bits)
-        - pack with self._pack_dense_to_words (your existing function)
-        - write into a <u8> memmap on disk
-
-        Returns:
-        (memmap<uint64 little>[n_rows, ceil(n_cols_bits/64)], headers, meta)
-        """
-        ## pandas is horrible for memory, and Ardal handles very large matrices
-        ## it is not recommended to store as a csv, but for small matrices this is acceptable
-        ## for anything other than very small matrices, pandas is terrible and blooms memory enormously
-        ## consequently, this all needs to be manual
-        
-        path = Path(csv_path)
-
-        ## --- header ---
-        with path.open("r", newline="") as f:
-            reader = csv.reader(f)
-            try:
-                header = next(reader)
-            except StopIteration:
-                raise LoadMatrixError("CSV is empty.")
-        if len(header) < 2:
-            raise LoadMatrixError("CSV must have an index column + at least one allele column.")
-        alleles = [h.strip() for h in header[1:]]
-        n_cols_bits = len(alleles)
-        if len(set(alleles)) != n_cols_bits:
-            raise LoadMatrixError("Allele headers must be unique.")
-
-        ## --- row count ---
-        with path.open("r", newline="") as f:
-            reader = csv.reader(f)
-            _ = next(reader, None)  ## skip header
-            n_rows = sum(1 for _ in reader)
-
-        words_per_row = (n_cols_bits + 63) // 64
-        bin_path = path.with_suffix(path.suffix + ".bitpack.bin")
-        mm = np.memmap(bin_path, mode="w+", dtype=np.dtype("<u8"),
-                    shape=(n_rows, words_per_row), order="C")
-        mm[:] = 0
-
-        ## --- choose chunk size to bound RAM to ~max_chunk_mb ---
-        target_bytes = max(1, int(max_chunk_mb) * 1024 * 1024)
-        chunk_rows = max(1, target_bytes // max(1, n_cols_bits))
-
-        guids: list[str] = []
-        seen_guids: set[str] = set()
-
-        ## --- pass 2: stream + chunk pack ---
-        with path.open("r", newline="") as f:
-            reader = csv.reader(f)
-            _ = next(reader, None)  ## skip header
-
-            ## allocate once and reuse
-            dense_chunk = np.zeros((chunk_rows, n_cols_bits), dtype=np.uint8)
-            r_global = 0
-            r_in_chunk = 0
-
-            for row in reader:
-                if not row:
-                    continue
-                if len(row) != n_cols_bits + 1:
-                    raise LoadMatrixError(f"Row {r_global} has {len(row)-1} allele columns; expected {n_cols_bits}.")
-
-                guid = row[0].strip()
-                if guid in seen_guids:
-                    raise LoadMatrixError(f"Duplicate GUID encountered: {guid}")
-                seen_guids.add(guid)
-                guids.append(guid)
-
-                ## fill current dense row
-                ## strict: accept "0"/"1" (optionally "0.0"/"1.0"); treat "" as 0
-                vals = row[1:]
-                dr = dense_chunk[r_in_chunk]
-                dr.fill(0)
-                for j, tok in enumerate(vals):
-                    t = tok.strip()
-                    if t == "1" or t == "1.0":
-                        dr[j] = 1
-                    elif t == "" or t == "0" or t == "0.0":
-                        ## will (should) be zero already
-                        continue
-                    else:
-                        raise LoadMatrixError(f"Non-binary token at row {r_global}, col {j+1}: '{tok}'")
-
-                r_in_chunk += 1
-                r_global += 1
-
-                ## if chunk full, pack and flush
-                if r_in_chunk == chunk_rows:
-                    words_chunk = self._pack_dense_to_words(dense_chunk[:r_in_chunk])
-                    mm[r_global - r_in_chunk : r_global, :] = words_chunk
-                    r_in_chunk = 0  ## reset
-
-            ## flush any tail rows
-            if r_in_chunk > 0:
-                words_chunk = self._pack_dense_to_words(dense_chunk[:r_in_chunk])
-                mm[r_global - r_in_chunk : r_global, :] = words_chunk
-
-        mm.flush()
-
-        headers = {"guids": guids, "alleles": alleles}
-        meta = {
-            "format": "ardal.bitpack.v1",
-            "dtype": "<u8",
-            "endianness": "little",
-            "row_major": True,
-            "n_rows": n_rows,
-            "n_cols": n_cols_bits,
-            "words_per_row": words_per_row,
-            "bits_per_word": 64,
-            "row_stride_bytes": words_per_row * 8,
-            "data_file": bin_path.name,
-            "data_file_resolved": str(bin_path.resolve()),
-            "data_nbytes": int(n_rows * words_per_row * 8),
-            "data_sha256": None,
-            "generated_by" : "Ardal v" + version("ardal"),
-        }
-        return mm, headers, meta
-
-
-
-    def _load_parquet(self, filepath: str) -> Tuple[np.ndarray, dict]:
+    def _load_parquet( self,
+                       filepath: str ) -> Tuple[np.ndarray, Dict]:
         df = pd.read_parquet(filepath, engine="fastparquet")
         matrix = df.values
         headers = {"guids": list(df.index), "alleles": list(df.columns)}
         return matrix, headers
 
 
-    def _load_npy_pair(self, json_path: str, npy_path: str) -> Tuple[np.ndarray, dict]:
+    def _load_header_meta( self,
+                           header_meta_path: Path ) -> Tuple[Dict, Dict, Union[Dict, None]]:
+        """ Load metadata headers JSON
+        """
+        with open(header_meta_path, "r") as f:
+            header_meta_data = json.load(f)
+        
+        ## check headers and meta fields exist
+        ## super-legacy formats will fail here
+        if "meta" not in header_meta_data or "headers" not in header_meta_data:
+            raise LoadMatrixError("Bitpack metadata must contain 'meta' and 'headers' keys.")
+        else:
+            meta_raw = header_meta_data.get("meta")
+            headers_raw = header_meta_data.get("headers")
+        
+        ## handle missing sites data
+        ## this supports legacy formats where the headers-meta JSON does not contain missing sites data
+        if "column_masks" not in header_meta_data:
+            log.debug("Legacy headers detected. No missing sites provided.")
+            missing_raw = None
+        else:
+            missing_raw = header_meta_data.get("column_masks")
+        
+        return headers_raw, meta_raw, missing_raw
+
+
+    ## ----- helpers -----
+    def _is_bitpack_header( self,
+                            meta_path: Path ) -> bool:
         try:
-            matrix = np.ascontiguousarray(np.load(npy_path))
-            with open(json_path, "r") as f:
-                headers = json.load(f)
-        except Exception as e:
-            raise LoadMatrixError(f"Failed to load npy/json pair: {e}")
-        return matrix, headers
-
-
-    def _load_npz_pair(self, json_path: str, npz_path: str) -> Tuple[np.ndarray, dict]:
-        sp_sparse = require_package("scipy", attr="sparse")
-        try:
-            sp_mat = sp_sparse.load_npz(npz_path)
-            matrix = np.ascontiguousarray(sp_mat.toarray())
-        except Exception as sp_error:
-            try:
-                data = np.load(npz_path)
-                if 'matrix' not in data:
-                    raise ValueError("Key 'matrix' not found in .npz file.")
-                matrix = np.ascontiguousarray(data['matrix'])
-            except Exception as np_error:
-                raise LoadMatrixError(
-                    f"Failed to load matrix from npz: "
-                    f"scipy.sparse.load_npz failed with {sp_error}; "
-                    f"np.load failed with {np_error}"
-                )
-        try:
-            with open(json_path, "r") as f:
-                headers = json.load(f)
-        except Exception as e:
-            raise LoadMatrixError(f"Failed to load JSON headers: {e}")
-        return matrix, headers
-
-
-
-    ## ----- bitpack helpers -----
-
-    def _is_bitpack_header(self, json_path: Path) -> bool:
-        try:
-            with open(json_path, "r") as f:
+            with open(meta_path, "r") as f:
                 obj = json.load(f)
-            return isinstance(obj, dict) and "meta" in obj and obj["meta"].get("format") == "ardal.bitpack.v1"
+            return isinstance(obj, Dict) and "meta" in obj and obj["meta"].get("format") == "ardal.bitpack.v1"
         except Exception:
             return False
+        
+        
+    def _normalise_missing_masks( self,
+                                  missing_obj: Union[Dict, None],
+                                  headers: Dict ) -> Dict[str, Dict]:
+        guids: list[str] = []
+        
+        if isinstance(headers, Dict):
+            raw_guids = headers.get("guids", [])
+            if isinstance(raw_guids, list):
+                guids = [g for g in raw_guids if isinstance(g, str)]
+        else:
+            raise LoadMatrixError(f"headers should be <dict>, not <{type(headers)}>.")
 
+        per_guid = {guid: [] for guid in guids}
 
-    def _load_bitpack_header(self, json_path: Path) -> Tuple[np.memmap, dict, dict]:
-        with open(json_path, "r") as f:
-            obj = json.load(f)
-        if "meta" not in obj or "headers" not in obj:
-            raise LoadMatrixError("Bitpack JSON must contain 'meta' and 'headers' keys.")
-        meta = obj["meta"]
-        headers = obj["headers"]
+        if not missing_obj or not isinstance(missing_obj, Dict):
+            return {"column_masks": per_guid}
+                
+        if isinstance(missing_obj, Dict):
+            iterable = missing_obj.items()
+            for guid, sites in iterable:
+                if guid not in per_guid:
+                    log.warning(f"Missing-sites data references unknown GUID '{guid}'. Skipping.")
+                    continue
+                per_guid[guid] = self._coerce_site_list(sites)
+        else:
+            raise LoadMatrixError(f"missing sites data malformed.") 
 
-        bin_name = meta.get("data_file")
-        if not bin_name:
-            raise LoadMatrixError("Bitpack meta missing 'data_file'.")
-        bin_path = (json_path.parent / bin_name).resolve()
-        if not bin_path.exists():
-            raise LoadMatrixError(f"Bitpack binary file not found: {bin_path}")
-        meta["data_file_resolved"] = str(bin_path)
-
-        n_rows = int(meta["n_rows"])
-        words  = int(meta["words_per_row"])
-
-        arr = np.memmap(bin_path, mode="r", dtype=np.dtype("<u8"), shape=(n_rows, words), order="C")
-        return arr, headers, meta
-
-
-    def _load_bitpack_pair(self, json_path: Path, bin_path: Path) -> Tuple[np.memmap, dict, dict]:
-        with open(json_path, "r") as f:
-            obj = json.load(f)
-        if "meta" not in obj or "headers" not in obj:
-            raise LoadMatrixError("Bitpack JSON must contain 'meta' and 'headers' keys.")
-        meta = obj["meta"]
-        headers = obj["headers"]
-
-        hdr_bin = meta.get("data_file")
-        if hdr_bin and Path(hdr_bin).name != bin_path.name:
-            log.warning(f"Header data_file='{hdr_bin}' != provided bin '{bin_path.name}'. Using provided bin.")
-        meta["data_file_resolved"] = str(bin_path.resolve())
-
-        n_rows = int(meta["n_rows"])
-        words  = int(meta["words_per_row"])
-
-        arr = np.memmap(bin_path, mode="r", dtype=np.dtype("<u8"), shape=(n_rows, words), order="C")
-        return arr, headers, meta
-
-
-    @staticmethod
-    def _sha256_file(path: Path, chunk_mb: int = 8) -> str:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(chunk_mb * 1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        return {"column_masks": per_guid}
     
-
-    def _mk_bitpack_meta_from_dense( self,
-                                     matrix: np.ndarray,
-                                     headers: dict ) -> dict:
-        """ This is a little bit hacky, and can probably be removed since the
-        meta is recalculated when a packed bin is written.
+    
+    def _ensure_meta( self,
+                      matrix: np.ndarray,
+                      headers: Dict,
+                      meta_obj: Union[Dict, None],
+                      *,
+                      is_bitpacked: bool ) -> Dict:
         """
-        n_rows, n_cols_bits = matrix.shape
-        words_per_row = (n_cols_bits + 63) // 64
-        return {
-            "format": "ardal.bitpack.v1",
-            "dtype": "<u8",
-            "endianness": "little",
-            "row_major": True,
-            "n_rows": int(n_rows),
-            "n_cols": int(n_cols_bits),
-            "words_per_row": int(words_per_row),
-            "bits_per_word": 64,
-            "row_stride_bytes": int(words_per_row * 8),
-            "data_file": None,
-            "data_file_resolved": None,
-            "data_nbytes": int(n_rows * words_per_row * 8),
-            "data_sha256": None,
-            "generated_by": self._generated_by_string(),
-    }
-
-    def _mk_bitpack_meta_from_headers(self, matrix: np.ndarray, headers: dict) -> dict:
-        if not isinstance(headers, dict):
-            raise LoadMatrixError("Headers must be a dictionary.")
-        if "alleles" not in headers:
-            raise LoadMatrixError("Headers must contain 'alleles' key for bitpack matrices.")
-
-        n_rows, words = matrix.shape
-        alleles = headers["alleles"]
-
-        if not isinstance(alleles, list):
-            raise LoadMatrixError("Alleles must be provided as a list.")
-
-        n_cols_bits = len(alleles)
-        words_per_row = (n_cols_bits + 63) // 64 if n_cols_bits else 0
-
-        if words != words_per_row:
-            raise LoadMatrixError(
-                f"Bitpack matrix words_per_row mismatch: matrix has {words}, expected {words_per_row} for {n_cols_bits} columns."
-            )
-
-        return {
-            "format": "ardal.bitpack.v1",
-            "dtype": "<u8",
-            "endianness": "little",
-            "row_major": True,
-            "n_rows": int(n_rows),
-            "n_cols": int(n_cols_bits),
-            "words_per_row": int(words_per_row),
-            "bits_per_word": 64,
-            "row_stride_bytes": int(words_per_row * 8),
-            "data_file": None,
-            "data_file_resolved": None,
-            "data_nbytes": int(matrix.nbytes),
-            "data_sha256": None,
-            "generated_by": self._generated_by_string(),
-        }
+        Ensure metadata is available for downstream consumers.
+        If a meta dictionary already exists, return it unchanged.
+        Otherwise synthesise a placeholder tailored to the matrix type.
+        """
+        if isinstance(meta_obj, Dict):
+            return meta_obj
+        else:
+            fmt = "ardal.bitpack.v1" if is_bitpacked else "ardal.dense.v1"
+            return make_meta(matrix,
+                             headers,
+                             generated_by="ardal::ArdalParser",
+                             format_name=fmt,
+                             matrix_file=None)
+    
     
     @staticmethod
     def _is_le_uint64( arr: np.ndarray ) -> bool:
@@ -732,14 +664,16 @@ class ArdalParser:
             return True
         return False
 
+
     @staticmethod
-    def _is_bitpacked_candidate(arr: np.ndarray) -> bool:
+    def _is_bitpacked_candidate( arr: np.ndarray ) -> bool:
         return (
             isinstance(arr, np.ndarray)
             and arr.ndim == 2
             and arr.dtype.kind == "u"
             and arr.dtype.itemsize == 8
         )
+
 
     @staticmethod
     def _generated_by_string() -> str:
@@ -750,13 +684,34 @@ class ArdalParser:
     
     
     @staticmethod
-    def _order_input( a : Union[dict,np.ndarray],
-                      b : Union[dict,np.ndarray] ) -> Tuple[np.ndarray, dict]:
-        """ Returns the data tuple in a predictable order
+    def _order_input( a : Union[Dict,np.ndarray],
+                      b : Union[Dict,np.ndarray] ) -> Tuple[np.ndarray, Dict]:
+        """ Returns the data tuple in a preDictable order
         """
-        if isinstance(a, np.ndarray) and isinstance(b, dict):
+        if isinstance(a, np.ndarray) and isinstance(b, Dict):
             return [a, b]
-        elif isinstance(a, dict) and isinstance(b, np.ndarray):
+        elif isinstance(a, Dict) and isinstance(b, np.ndarray):
             return [b, a]
         else:
-            raise MalformedInputError("Input list from memory must contain two elements: matrix (np.ndarray) and headers (dict).")
+            raise MalformedInputError("Input list from memory must contain two elements: matrix (np.ndarray) and headers (Dict).")
+
+
+    @staticmethod
+    def _coerce_site_list( sites : Union[None, list, tuple, set] ) -> list:
+        if sites is None:
+            return []
+        if isinstance(sites, list):
+            return sites
+        if isinstance(sites, (tuple, set)):
+            return list(sites)
+        return [sites]
+
+
+    @staticmethod
+    def _sha256_file( path: Path,
+                      chunk_mb: int = 8 ) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(chunk_mb * 1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()

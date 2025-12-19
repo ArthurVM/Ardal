@@ -46,25 +46,31 @@ public:
     // constructor: takes a NumPy matrix
     BitMatrix( ardal::detail::FlatMatrix matrix_,
                std::shared_ptr<const std::vector<int>> row_masses,
-               std::shared_ptr<const std::vector<int>> col_masses );
+               std::shared_ptr<const std::vector<int>> col_masses,
+               const std::vector<std::vector<uint32_t>>* missing_mask = nullptr );
 
     // distance functions
     py::array_t<uint32_t> hamming( bool fill_cache = false,
                                    bool use_simd = true,
-                                   int threads = 1 ) const;
+                                   int threads = 1,
+                                   bool mask_missing = false ) const;
     py::array_t<uint32_t> hamming_subset( const std::vector<size_t>& row_indices,
                                           const std::vector<size_t>& col_indices,
                                           bool use_simd,
-                                          int threads ) const;
+                                          int threads,
+                                          bool mask_missing = false ) const;
     py::array_t<int> innerProduct( bool fill_cache = false,
                                    bool use_simd = true,
-                                   int threads = 1 ) const;
+                                   int threads = 1,
+                                   bool mask_missing = false ) const;
     py::array_t<double> cosineDistanceAll( bool use_simd = true,
-                                           int threads = 1 ) const;
+                                           int threads = 1,
+                                           bool mask_missing = false ) const;
     py::array_t<double> cosineDistance_subset( const std::vector<size_t>& row_indices,
                                                const std::vector<size_t>& col_indices,
                                                bool use_simd = true,
-                                               int threads = 1 ) const;
+                                               int threads = 1,
+                                               bool mask_missing = false ) const;
  
     // neighbourhood functions
     py::array_t<int64_t> neighbourhood( size_t row_idx,
@@ -125,6 +131,9 @@ private:
     // bit-packed matrix
     ardal::detail::FlatMatrix matrix_;                     // packed matrix
     std::vector<const std::uint64_t*> row_ptrs_;           // row pointers
+    using SparseMask = std::vector<std::pair<size_t, uint64_t>>;
+    std::vector<SparseMask> row_masks_sparse_;
+    bool has_missing_mask_ = false;
 
     // attributes
     const uint64_t* base_;                                 // pointer to the matrix base
@@ -138,11 +147,34 @@ private:
 
     // access functions
     std::vector<size_t> getRowSetBitIndices( size_t row_idx ) const;
-    std::vector<uint64_t> getColumnVector(size_t col_idx) const;
+    // std::vector<uint64_t> getColumnVector(size_t col_idx) const;
     std::vector<size_t> getColSetBitIndices( size_t col_idx ) const;
     std::vector<std::vector<uint64_t>> subsetPackedMatrix( const std::vector<size_t>& row_indices,
                                                            const std::vector<size_t>& col_indices,
                                                            const int threads = 1 ) const;
+    std::vector<uint64_t> buildColumnMask( const std::vector<size_t>& col_indices ) const;
+    bool isFullColumnSelection( const std::vector<size_t>& col_indices ) const;
+    uint32_t maskedHamming( const uint64_t* lhs,
+                            const uint64_t* rhs,
+                            const std::vector<uint64_t>& mask ) const;
+    uint32_t maskedInnerProduct( const uint64_t* lhs,
+                                 const uint64_t* rhs,
+                                 const std::vector<uint64_t>& mask ) const;
+    uint32_t maskedInnerProductPair( const uint64_t* lhs,
+                                     const uint64_t* rhs,
+                                     const SparseMask& lhs_mask,
+                                     const SparseMask& rhs_mask,
+                                     const std::vector<uint64_t>* column_mask = nullptr ) const;
+    uint32_t maskedRowMass( const uint64_t* row_ptr,
+                            const std::vector<uint64_t>& mask ) const;
+    uint32_t maskedRowMass( const uint64_t* row_ptr,
+                            const SparseMask& row_mask,
+                            const std::vector<uint64_t>* column_mask = nullptr ) const;
+    uint32_t maskedHammingPair( const uint64_t* lhs,
+                                const uint64_t* rhs,
+                                const SparseMask& lhs_mask,
+                                const SparseMask& rhs_mask,
+                                const std::vector<uint64_t>* column_mask = nullptr ) const;
 
     // statistics helper functions
     double density( void ) const;
