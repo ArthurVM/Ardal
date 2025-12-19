@@ -39,11 +39,11 @@ def test_write_npy(io_component, test_data_mem, tmp_path):
     matrix, headers = test_data_mem
     output_dir = tmp_path / "test_output_npy"
     output_dir.mkdir()
-    io_component.write(str(output_dir), "test_data", npz=False)
+    io_component.write("test_data", str(output_dir), format="npy")
 
     ## verify files were created
-    json_file = output_dir / "test_data_headers.json"
-    npy_file = output_dir / "test_data_matrix.npy"
+    json_file = output_dir / "test_data.json"
+    npy_file = output_dir / "test_data.npy"
     assert json_file.exists()
     assert npy_file.exists()
 
@@ -63,11 +63,31 @@ def test_write_npz(io_component, test_data_mem, tmp_path):
     matrix, _ = test_data_mem
     output_dir = tmp_path / "test_output_npz"
     output_dir.mkdir()
-    io_component.write(str(output_dir), "test_data", npz=True)
+    io_component.write("test_data", str(output_dir), format="npz")
 
-    npz_file = output_dir / "test_data_matrix.npz"
+    npz_file = output_dir / "test_data.npz"
     assert npz_file.exists()
 
     loaded_data = np.load(npz_file)
     assert "matrix" in loaded_data
     np.testing.assert_array_equal(loaded_data["matrix"], matrix)
+    
+
+def test_write_bin(io_component, test_data_mem, tmp_path):
+    """
+    Tests the write method with npz output.
+    """
+    matrix, _ = test_data_mem
+    output_dir = tmp_path / "test_output_bin"
+    output_dir.mkdir()
+    io_component.write("test_data", str(output_dir), format="bin")
+
+    bin_file = output_dir / "test_data.bin"
+    assert bin_file.exists()
+    
+    json_file = output_dir / "test_data.json"
+    assert json_file.exists()
+
+    loaded_json = json.load(open(json_file, 'r'))
+    assert "meta" in loaded_json
+    assert "headers" in loaded_json
