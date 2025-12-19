@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 import argparse
 import gc
+import re
 import sys, json, hashlib, csv
 from collections import defaultdict, OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Sequence, Tuple
 import numpy as np
 from numpy.lib.format import open_memmap
+
+DEFAULT_ALLELE_ID_FORMAT = "{chr}.{pos}.{ref}.{alt}"
+_ALLELE_ID_FORMAT: str | None = None
+_ALLELE_ID_PATTERN: re.Pattern | None = None
+_ALLELE_ID_POS_KEY: str | None = None
+_ALLELE_ID_HAS_CHR: bool = True
 
 
 def build_matrix_metadata(
@@ -167,7 +174,13 @@ def normalize_missing_entries(
     normalized = []
     for entry in entries or []:
         ## keep chrom/pos pair as string, coerce other types via str()
-        normalized.append(str(entry))
+        entry_str = str(entry)
+        if ( not _ALLELE_ID_HAS_CHR ):
+            if ( "." in entry_str ):
+                _, tail = entry_str.rsplit(".", 1)
+                if ( tail.isdigit() ):
+                    entry_str = tail
+        normalized.append(entry_str)
 
     return normalized
 
@@ -213,6 +226,8 @@ def position_key(
     pos : str | int,
 ) -> str:
     """Compose a string key for positional lookups."""
+    if ( chrom is None or chrom == "" ):
+        return f"{pos}"
     
     return f"{chrom}.{pos}"
 
@@ -221,7 +236,10 @@ def sort_position_key(
     loc : str,
 ) -> Tuple[str, int, str]:
     """Produce a tuple that allows consistent ordering of positional keys."""
-    chrom, pos = loc.rsplit(".", 1)
+    if ( "." in loc ):
+        chrom, pos = loc.rsplit(".", 1)
+    else:
+        chrom, pos = "", loc
     try:
         pos_val = int(pos)
         
@@ -235,12 +253,124 @@ def parse_allele_key(
     allele_id : str,
 ):
     """Split an allele identifier into chrom, position, reference, and alternate entries."""
-    try:
-        chrom, pos, ref, alt = allele_id.rsplit(".", 3)
-    except ValueError as exc:
-        raise ValueError(f"Unexpected allele identifier format: {allele_id}") from exc
-    
+    if ( _ALLELE_ID_PATTERN is None ):
+        try:
+            chrom, pos, ref, alt = allele_id.rsplit(".", 3)
+        except ValueError as exc:
+            raise ValueError(f"Unexpected allele identifier format: {allele_id}") from exc
+        
+        return chrom, pos, ref, alt
+
+    match = _ALLELE_ID_PATTERN.match(allele_id)
+    if ( not match ):
+        raise ValueError(
+            f"Allele ID '{allele_id}' does not match the format '{_ALLELE_ID_FORMAT}'."
+        )
+
+    parts = match.groupdict()
+    chrom = parts.get("chr") if _ALLELE_ID_HAS_CHR else None
+    pos = parts.get(_ALLELE_ID_POS_KEY)
+    ref = parts.get("ref")
+    alt = parts.get("alt")
+
+    if ( pos is None or ref is None or alt is None or ( _ALLELE_ID_HAS_CHR and chrom is None ) ):
+        raise ValueError(
+            "allele_id_format must include {pos}/{start}, {ref}, and {alt} placeholders."
+        )
+
     return chrom, pos, ref, alt
+
+
+def compile_allele_id_format(
+    allele_id_format : str,
+) -> Tuple[re.Pattern, str, bool]:
+    """Compile an allele_id_format string into a regex pattern and return the position placeholder key."""
+    if ( not allele_id_format ):
+        raise ValueError("allele_id_format cannot be empty.")
+
+    placeholders = re.findall(r"\{([^}]+)\}", allele_id_format)
+    if ( not placeholders ):
+        raise ValueError(
+            "allele_id_format must include placeholders like {pos}, {ref}, {alt}."
+        )
+
+    allowed = {"chr", "pos", "start", "end", "ref", "alt"}
+    invalid = sorted({p for p in placeholders if p not in allowed})
+    if ( invalid ):
+        raise ValueError(
+            "Unsupported placeholders in allele_id_format: "
+            + ", ".join(invalid)
+            + f". Allowed: {', '.join(sorted(allowed))}."
+        )
+
+    seen = set()
+    dupes = set()
+    for p in placeholders:
+        if p in seen:
+            dupes.add(p)
+        seen.add(p)
+    if ( dupes ):
+        raise ValueError(
+            "allele_id_format contains duplicate placeholders: "
+            + ", ".join(sorted(dupes))
+        )
+
+    if ( "pos" in placeholders and "start" in placeholders ):
+        raise ValueError("allele_id_format must use either {pos} or {start}, not both.")
+
+    pos_key = "pos" if "pos" in placeholders else "start"
+    if ( pos_key not in placeholders ):
+        raise ValueError("allele_id_format must include {pos} or {start}.")
+
+    missing_required = []
+    if ( "ref" not in placeholders ):
+        missing_required.append("{ref}")
+    if ( "alt" not in placeholders ):
+        missing_required.append("{alt}")
+    if ( missing_required ):
+        raise ValueError(
+            "allele_id_format missing required placeholders: "
+            + ", ".join(missing_required)
+        )
+
+    pattern = re.escape(allele_id_format)
+    replacements = {
+        "ref": r"(?P<ref>.+)",
+        "alt": r"(?P<alt>.+)",
+        "chr": r"(?P<chr>.+)",
+        "start": r"(?P<start>\d+)",
+        "pos": r"(?P<pos>\d+)",
+        "end": r"(?P<end>\d+)",
+    }
+    for key, regex_pattern in replacements.items():
+        escaped_placeholder = re.escape(f"{{{key}}}")
+        if escaped_placeholder in pattern:
+            pattern = pattern.replace(escaped_placeholder, regex_pattern)
+
+    pattern = f"^{pattern}$"
+
+    return re.compile(pattern), pos_key, ("chr" in placeholders)
+
+
+def configure_allele_id_format(
+    allele_id_format : str | None,
+):
+    """Configure how allele identifiers are parsed within this module."""
+    global _ALLELE_ID_FORMAT, _ALLELE_ID_PATTERN, _ALLELE_ID_POS_KEY, _ALLELE_ID_HAS_CHR
+
+    if ( allele_id_format is None ):
+        _ALLELE_ID_FORMAT = None
+        _ALLELE_ID_PATTERN = None
+        _ALLELE_ID_POS_KEY = None
+        _ALLELE_ID_HAS_CHR = True
+        
+        return
+
+    pattern, pos_key, has_chr = compile_allele_id_format(allele_id_format)
+    _ALLELE_ID_FORMAT = allele_id_format
+    _ALLELE_ID_PATTERN = pattern
+    _ALLELE_ID_POS_KEY = pos_key
+    _ALLELE_ID_HAS_CHR = has_chr
 
 
 def allele_sort_key(
@@ -271,8 +401,13 @@ def site_sort_key(
     site_id : str,
 ) -> Tuple[str, int, object, str]:
     """Return a deterministic ordering tuple for site identifiers."""
-    chrom_pos, ref = site_id.rsplit(".", 1)
-    chrom, pos = chrom_pos.rsplit(".", 1)
+    parts = site_id.rsplit(".", 2)
+    if ( len(parts) == 3 ):
+        chrom, pos, ref = parts
+    elif ( len(parts) == 2 ):
+        chrom, pos, ref = "", parts[0], parts[1]
+    else:
+        raise ValueError(f"Unexpected site identifier format: {site_id}")
     try:
         pos_val = int(pos)
         
@@ -288,6 +423,8 @@ def site_identifier(
     ref : str,
 ):
     """Construct the canonical identifier for a site."""
+    if ( chrom is None or chrom == "" ):
+        return f"{pos}.{ref}"
     return f"{chrom}.{pos}.{ref}"
 
 
@@ -839,6 +976,7 @@ def create_all_outputs(
     emit_npz = False,
     emit_csv = False,
     emit_agnostic = True,
+    allele_id_format : str | None = None,
     json_indent : int | None = None,
 ):
     """
@@ -857,6 +995,7 @@ def create_all_outputs(
     Exceptions:
         Propagates exceptions from subordinate helper routines.
     """
+    configure_allele_id_format(allele_id_format)
     (
         sample_to_idx,
         allele_to_idx,
@@ -902,7 +1041,8 @@ def create_all_outputs(
     ## create a dictionary of sites and alleles which land in those sites
     missing_site_key = defaultdict(list)
     for a in ordered_alleles:
-        site = ".".join(a.split(".")[:2])
+        chrom, pos, _ref, _alt = parse_allele_key(a)
+        site = position_key(chrom, pos)
         missing_site_key[site].append(a)
 
     # print(missing_site_key)
@@ -1035,6 +1175,11 @@ def parse_args():
                     help="Write dense matrices as wide CSV files")
     ap.add_argument("--no-agnostic", action="store_true",
                     help="Skip generating reference-agnostic/minor allele matrices")
+    ap.add_argument("--allele-id-format", type=str, default=None,
+                    help=(
+                        f"Allele ID format string (default: {DEFAULT_ALLELE_ID_FORMAT}; "
+                        "{chr} optional for single-chrom references)"
+                    ))
     ap.add_argument("--indent", type=int, dest="json_indent",
                     help="Indentation level for JSON artifacts (default uses compact JSON)")
     
@@ -1061,6 +1206,7 @@ def main():
         emit_npz=args.emit_npz,
         emit_csv=args.emit_csv,
         emit_agnostic=not args.no_agnostic,
+        allele_id_format=args.allele_id_format,
         json_indent=args.json_indent,
     )
 

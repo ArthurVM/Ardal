@@ -164,10 +164,13 @@ py::array_t<uint32_t> HybridMatrix::hamming( bool use_simd,
                                              const std::string& backend,
                                              bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::AUTO) {
         chosen_backend = selectBackend(n_cols_bits_, density_);
+        if (apply_mask) {
+            chosen_backend = BackendType::BIT;
+        }
     }
-    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");
@@ -187,12 +190,15 @@ py::array_t<uint32_t> HybridMatrix::hamming_subset( const std::vector<size_t> ro
                                                     const std::string& backend,
                                                     bool mask_missing ) const {
     BackendType chosen_backend = parse_backend(backend);
+    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::AUTO) {
         // note: this assumes local density isnt significantly different from global
         // not a terrible assumption but may not always be the case
         chosen_backend = selectBackend(row_indices.size(), density_);
+        if (apply_mask) {
+            chosen_backend = BackendType::BIT;
+        }
     }
-    const bool apply_mask = mask_missing && has_missing_mask_;
     if (chosen_backend == BackendType::ROARING) {
         if (!roaring_enabled)
             throw std::runtime_error("Roaring backend not available.");

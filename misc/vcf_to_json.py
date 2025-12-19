@@ -4,7 +4,8 @@ vcf_snps_to_json.py
 
 Read one or more VCF/VCF.GZ files, filter by quality, keep SNPs only,
 and write JSON payloads containing both allele calls and non-callable (missing)
-positions inferred from `samtools depth -aa` BED/BED.GZ files.
+positions inferred from `samtools depth -aa` BED/BED.GZ files. Sample IDs are
+taken from the VCF header; merged VCFs emit one JSON per sample.
 
 Defaults:
   - QUAL >= 30
@@ -79,24 +80,52 @@ def passes_filters(
 
     return True
 
-def snp_ids_from_vcf(
+def apply_sample_regex(sample_name: str, sample_regex: str | None, sample_regex_group: int) -> str:
+    if sample_regex:
+        m = re.search(sample_regex, sample_name)
+        if m:
+            try:
+                return m.group(sample_regex_group)
+            except IndexError:
+                pass
+    return sample_name
+
+def sample_alleles_from_vcf(
     vcf_path: Path,
     min_qual: float,
     allow_filtered: bool,
     accept_missing_qual: bool,
     min_dp: int | None,
-) -> List[str]:
-    snp_ids: List[str] = []
+    sample_regex: str | None,
+    sample_regex_group: int,
+) -> Dict[str, Set[str]]:
+    sample_ids: List[str] | None = None
+    allele_map: Dict[str, Set[str]] = {}
     with open_maybe_gzip(vcf_path) as fh:
         for line in fh:
-            if not line or line[0] == "#":
+            if not line:
                 continue
-            # VCF columns: CHROM POS ID REF ALT QUAL FILTER INFO [FORMAT ...]
+            if line[0] == "#":
+                if line.startswith("#CHROM"):
+                    header_parts = line.rstrip("\n").split("\t")
+                    if len(header_parts) <= 9:
+                        raise SystemExit(f"No sample columns found in {vcf_path}")
+                    header_samples = header_parts[9:]
+                    sample_ids = [
+                        apply_sample_regex(sample, sample_regex, sample_regex_group)
+                        for sample in header_samples
+                    ]
+                    allele_map = {sample: set() for sample in sample_ids}
+                continue
+
+            if sample_ids is None:
+                raise SystemExit(f"Missing #CHROM header in {vcf_path}")
+
             parts = line.rstrip("\n").split("\t")
-            if len(parts) < 8:
-                # malformed
+            if len(parts) < 9:
                 continue
-            chrom, pos, _id, ref, alt_field, qual, filt, info = parts[:8]
+            # VCF columns: CHROM POS ID REF ALT QUAL FILTER INFO FORMAT [SAMPLES...]
+            chrom, pos, _id, ref, alt_field, qual, filt, info, fmt = parts[:9]
 
             # Quick reject: if ref has length != 1 or non-ACGT, we can still keep
             # multi-allelic lines if any ALT is a length-1 A/C/G/T AND ref is length-1 A/C/G/T.
@@ -107,28 +136,46 @@ def snp_ids_from_vcf(
             if not passes_filters(qual, filt, min_qual, allow_filtered, accept_missing_qual, min_dp, info):
                 continue
 
-            # ALT may be comma-separated; generate one ID per simple SNP ALT.
-            for alt in alt_field.split(","):
-                if is_simple_snp(ref, alt):
-                    snp_ids.append(f"{chrom}.{pos}.{ref.upper()}.{alt.upper()}")
-
-    return snp_ids
-
-def derive_sample_id(path: Path, sample_regex: str | None, sample_regex_group: int) -> str:
-    base = path.name
-    # Strip .vcf or .vcf.gz
-    if base.endswith(".vcf.gz"):
-        base = base[:-7]
-    elif base.endswith(".vcf"):
-        base = base[:-4]
-    if sample_regex:
-        m = re.search(sample_regex, base)
-        if m:
+            format_fields = fmt.split(":")
             try:
-                return m.group(sample_regex_group)
-            except IndexError:
-                pass
-    return base
+                gt_index = format_fields.index("GT")
+            except ValueError:
+                # No genotype; cannot attribute alleles to samples.
+                continue
+
+            alt_alleles = alt_field.split(",")
+            if not alt_alleles:
+                continue
+
+            for sample_offset, sample_id in enumerate(sample_ids):
+                sample_col_idx = 9 + sample_offset
+                if sample_col_idx >= len(parts):
+                    continue
+                sample_fields = parts[sample_col_idx].split(":")
+                if len(sample_fields) <= gt_index:
+                    continue
+                gt_value = sample_fields[gt_index]
+                if not gt_value or gt_value == ".":
+                    continue
+
+                for allele_token in re.split(r"[|/]", gt_value):
+                    if not allele_token or allele_token == ".":
+                        continue
+                    try:
+                        allele_idx = int(allele_token)
+                    except ValueError:
+                        continue
+                    if allele_idx <= 0:
+                        continue
+                    alt_idx = allele_idx - 1
+                    if alt_idx < 0 or alt_idx >= len(alt_alleles):
+                        continue
+                    alt = alt_alleles[alt_idx]
+                    if not is_simple_snp(ref, alt):
+                        continue
+                    allele_map[sample_id].add(f"{chrom}.{pos}.{ref.upper()}.{alt.upper()}")
+
+    return allele_map
 
 def strip_suffix(name: str, suffixes: Tuple[str, ...]) -> str:
     for suffix in sorted(suffixes, key=len, reverse=True):
@@ -228,7 +275,7 @@ def main():
     ap.add_argument("--min-dp", type=int, default=None,
                     help="Require INFO/DP >= this value if present; if absent, variant fails this check")
     ap.add_argument("--sample-regex", type=str, default=None,
-                    help="Optional regex to extract sample_id from filename (applied to basename without .vcf[.gz])")
+                    help="Optional regex to transform sample IDs from the VCF header")
     ap.add_argument("--sample-regex-group", type=int, default=1,
                     help="Capture group index to take from --sample-regex (default: 1)")
     ap.add_argument("--min-missing-depth", type=int, default=10,
@@ -240,32 +287,34 @@ def main():
     inputs = pair_files(args.vcf_in, args.depth_in)
     total = len(inputs)
     for idx, (vcf, depth) in enumerate(inputs, start=1):
-        sample_id = derive_sample_id(vcf, args.sample_regex, args.sample_regex_group)
-        print(f"\r {idx}/{total} : {sample_id}", end="             ", flush=True)
-
-        out_path = args.outdir / f"{sample_id}_snps.json"
-        if out_path.exists():
-            continue
-
-        alleles = snp_ids_from_vcf(
+        allele_map = sample_alleles_from_vcf(
             vcf_path=vcf,
             min_qual=args.min_qual,
             allow_filtered=args.allow_filtered,
             accept_missing_qual=args.accept_missing_qual,
             min_dp=args.min_dp,
+            sample_regex=args.sample_regex,
+            sample_regex_group=args.sample_regex_group,
         )
+        print(f"\r {idx}/{total} : {vcf.name} ({len(allele_map)} samples)", end="             ", flush=True)
+
         if depth is None:
             missing: List[str] = []
         else:
             missing = missing_positions_from_bed(depth, args.min_missing_depth)
 
-        payload = {
-            "alleles": sorted(set(alleles)),
-            "missing": missing,
-        }
+        for sample_id, alleles in allele_map.items():
+            out_path = args.outdir / f"{sample_id}_snps.json"
+            if out_path.exists():
+                continue
 
-        with open(out_path, "w") as outfh:
-            json.dump(payload, outfh, indent=2)
+            payload = {
+                "alleles": sorted(alleles),
+                "missing": missing,
+            }
+
+            with open(out_path, "w") as outfh:
+                json.dump(payload, outfh, indent=2)
 
 if __name__ == "__main__":
     main()
