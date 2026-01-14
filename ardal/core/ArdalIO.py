@@ -10,6 +10,7 @@ from typing import Union
 from importlib.metadata import version, PackageNotFoundError
 
 from ..utils.misc import require_package
+from ..utils.make_meta import make_meta
 from ..utils.decorators import check_backend_argument
 from ..utils.exceptions import MatrixWriteError, ParameterError
 from ..utils.logger import get_logger
@@ -118,11 +119,8 @@ class ArdalIO:
             log.info("Writing packed matrix as .bin")
             headers_meta = self._write_packed(matrix_out_path)
         
-        ## capture missing sites data
-        headers_meta["missing_sites"] = {"site_keys" : self._headerUtils._missing_site_keys, "guid_missing" : self._headerUtils._guid_missing_sites}
-        ## propagate column masks for GUIDs
-        if hasattr(self._headerUtils, "_missing_masks") and self._headerUtils._missing_masks:
-            headers_meta["column_masks"] = self._headerUtils._missing_masks
+        ## update with missing sites data
+        headers_meta.update(self._headerUtils._missing_masks)
             
         log.info(f"Wrote allele matrix to disk : {matrix_out_path}")
 
@@ -170,5 +168,165 @@ class ArdalIO:
 
         E.g. for the allele `A.chr1.100.101.T` would be decoded using the allele_id_format string `{ref}.{chr}.{start}.{end}.{alt}`.
         """
-        raise NotImplementedError("makeFastas function not yet implemented.")
+        SeqIO = require_package("Bio", attr="SeqIO")
+        Seq = require_package("Bio.Seq", import_as="Bio.Seq", attr="Seq")
+        SeqRecord = require_package("Bio.SeqRecord", import_as="Bio.SeqRecord", attr="SeqRecord")
+
+        if ref is None:
+            raise ParameterError("Reference FASTA path is required.")
+        if not os.path.exists(ref):
+            raise ParameterError(f"Reference FASTA not found: {ref}")
+
+        if guids:
+            self._headerUtils.check_guids(guids)
+        else:
+            guids = list(self._headerUtils.headers.get("guids", []))
+
+        if not allele_id_format:
+            allele_id_format = self._headerUtils.get_cached_allele_id_format()
+        if not allele_id_format:
+            raise ParameterError("allele_id_format is required to decode allele positions.")
+
+        pattern = self._headerUtils._check_allele_format_grammar(allele_id_format=allele_id_format)
+
+        try:
+            ref_records = SeqIO.to_dict(SeqIO.parse(ref, "fasta"))
+        except Exception as exc:
+            raise MatrixWriteError(f"Failed to parse reference FASTA: {exc}") from exc
+
+        if not ref_records:
+            raise MatrixWriteError("Reference FASTA appears to be empty.")
+
+        ref_seqs: dict[str, str] = {
+            name: str(record.seq).upper()
+            for name, record in ref_records.items()
+        }
+
+        ## decode alleles once
+        alleles = self._headerUtils.headers.get("alleles", [])
+        allele_info: list[Union[tuple[str, int, Union[int, None], str, str], None]] = [None] * len(alleles)
+        for idx, allele_id in enumerate(alleles):
+            try:
+                chr_key, start, end, ref_base, alt_base = self._headerUtils._decode_allele_position(
+                    allele_id=allele_id,
+                    pattern=pattern,
+                    allele_id_format=allele_id_format
+                )
+            except ValueError:
+                continue
+            if chr_key is None or start is None:
+                continue
+            chr_key = str(chr_key)
+            if chr_key not in ref_seqs:
+                continue
+            ref_base = "" if ref_base is None else str(ref_base)
+            alt_base = "" if alt_base is None else str(alt_base)
+            allele_info[idx] = (chr_key, int(start), end, ref_base, alt_base)
+
+        ## infer per contig coordinate offsets
+        ## switch from 0based to 1based
+        contig_offset: dict[str, int] = {}
+        for contig, seq in ref_seqs.items():
+            match_zero = 0
+            match_one = 0
+            checked = 0
+            for info in allele_info:
+                if not info or info[0] != contig:
+                    continue
+                _, start, end, ref_base, _ = info
+                if not ref_base or start is None:
+                    continue
+                if end is None:
+                    end = start + len(ref_base)
+                try:
+                    end_val = int(end)
+                except (TypeError, ValueError):
+                    continue
+                if start < 0:
+                    continue
+                if start + len(ref_base) > len(seq) and start - 1 + len(ref_base) > len(seq):
+                    continue
+                checked += 1
+                if start + len(ref_base) <= len(seq):
+                    if seq[start:start + len(ref_base)] == ref_base.upper():
+                        match_zero += 1
+                if start - 1 >= 0 and start - 1 + len(ref_base) <= len(seq):
+                    if seq[start - 1:start - 1 + len(ref_base)] == ref_base.upper():
+                        match_one += 1
+            if checked == 0:
+                contig_offset[contig] = 0
+                log.warning(f"No reference matches found for contig '{contig}'. Assuming 0-based coordinates.")
+            else:
+                contig_offset[contig] = -1 if match_one >= match_zero else 0
+
+        ## generate fastas
+        for guid in guids:
+            guid_idx = self._headerUtils.encode_guid(guid)
+            allele_indices = self._matrix.getSetBitIndices(guid_idx, backend="auto")
+
+            contig_variants: dict[str, list[tuple[int, int, str, str]]] = defaultdict(list)
+            for allele_idx in allele_indices:
+                info = allele_info[int(allele_idx)]
+                if info is None:
+                    continue
+                contig, start, end, ref_base, alt_base = info
+                if contig not in ref_seqs:
+                    continue
+                offset = contig_offset.get(contig, 0)
+                start_idx = start + offset
+                if start_idx < 0:
+                    continue
+                if end is None:
+                    if ref_base:
+                        end_val = start + len(ref_base)
+                    elif alt_base:
+                        end_val = start + max(1, len(alt_base))
+                    else:
+                        end_val = start + 1
+                else:
+                    end_val = int(end)
+                end_idx = end_val + offset
+                if end_idx < start_idx:
+                    continue
+                contig_variants[contig].append((start_idx, end_idx, ref_base, alt_base))
+
+            records = []
+            for contig, seq in ref_seqs.items():
+                variants = contig_variants.get(contig, [])
+                if not variants:
+                    out_seq = seq
+                else:
+                    variants.sort(key=lambda v: v[0])
+                    cursor = 0
+                    out_chunks: list[str] = []
+                    for start_idx, end_idx, ref_base, alt_base in variants:
+                        if start_idx < cursor:
+                            log.warning(f"Overlapping variants for {guid} on {contig}; skipping at {start_idx}.")
+                            continue
+                        if start_idx > len(seq):
+                            continue
+                        end_idx = min(end_idx, len(seq))
+                        if ref_base:
+                            ref_slice = seq[start_idx:end_idx]
+                            if ref_slice != ref_base.upper():
+                                log.warning(f"Reference mismatch for {guid} on {contig} at {start_idx}; skipping.")
+                                continue
+                        out_chunks.append(seq[cursor:start_idx])
+                        if alt_base:
+                            out_chunks.append(alt_base.upper())
+                        cursor = end_idx
+                    out_chunks.append(seq[cursor:])
+                    out_seq = "".join(out_chunks)
+
+                record_id = f"{guid}|{contig}"
+                records.append(SeqRecord(Seq(out_seq), id=record_id, description=""))
+
+            out_path = f"{guid}.fasta"
+            try:
+                SeqIO.write(records, out_path, "fasta")
+            except Exception as exc:
+                raise MatrixWriteError(f"Failed to write FASTA for {guid}: {exc}") from exc
+
+            log.info(f"Wrote FASTA for GUID '{guid}' to {out_path}")
+
         return None
