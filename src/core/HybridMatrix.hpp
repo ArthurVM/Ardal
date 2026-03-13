@@ -156,7 +156,8 @@ public:
                                                const int threads ) const;
     
     py::array_t<uint64_t> getSubsetPackedMatrix_rows( const std::vector<size_t>& row_indices, 
-                                                      const int threads ) const;
+                                                      const int threads,
+                                                      bool silence_log = false ) const;
 
     void prepareSnvView( py::array_t<uint32_t> allele_to_locus,
                          py::array_t<uint8_t> allele_to_base );

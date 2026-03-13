@@ -83,7 +83,7 @@ def validate_coords_bed( coords_bed ) -> None:
     
 
 def validate_guids( guids ) -> None:
-    validate_type(guids, Union[list, None], "guids")
+    validate_type(guids, Union[list, set, None], "guids")
     
     if guids:
         for i in guids:
@@ -91,7 +91,7 @@ def validate_guids( guids ) -> None:
         
 
 def validate_alleles( alleles ) -> None:
-    validate_type(alleles, Union[list, None], "alleles")
+    validate_type(alleles, Union[list, set, None], "alleles")
     
     if alleles:
         for i in alleles:

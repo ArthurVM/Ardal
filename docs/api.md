@@ -172,6 +172,9 @@ Statistical summaries and divergence metrics.
 - `allele_entropy() -> Dict[str, float]`  
   Shannon entropy for every allele.
 
+- `allele_missingness(guids: List[str] = [], alleles: List[str] = [], normalise: bool = False, window_size: Optional[int] = None, window_step: Optional[int] = None) -> np.ndarray`  
+  Per-allele missing counts across selected GUIDs. If `normalise=True`, returns proportions (count / n_guids). If `window_size` is provided, returns window-averaged missingness across the allele order.
+
 - `allele_cooc(alleles: List[str] = [], threshold: float = 0.95, threads: int = 1) -> Dict[str, List[str]]`  
   Allele co-occurrence above `threshold`. Subset to specific alleles or compute across the entire matrix.
 

@@ -85,7 +85,7 @@ class ArdalParser:
                 self.missing_masks = self._normalise_missing_masks(missing_obj, self.headers)
 
                 want_bitpack = self.is_packed_mem or self._is_bitpacked_candidate(matrix)
-                print(want_bitpack)
+                # print(want_bitpack)
                 self.matrix = np.ascontiguousarray(matrix)
 
                 if want_bitpack:
@@ -415,7 +415,7 @@ class ArdalParser:
         headers_raw, meta_raw, missing_raw = self._load_header_meta(header_meta_path)            
         
         ## check metadata and the input binary are congruous
-        hdr_bin = meta_raw.get("data_file")
+        hdr_bin = meta_raw.get("matrix_file") or meta_raw.get("data_file")
         if hdr_bin and Path(hdr_bin).name != bin_path.name:
             log.warning(f"Header data_file='{hdr_bin}' != provided bin '{bin_path.name}'. Using provided bin.")
             
@@ -442,7 +442,7 @@ class ArdalParser:
         headers_raw, meta_raw, missing_raw = self._load_header_meta(header_meta_path) 
         
         ## check metadata and the input binary are congruous
-        hdr_bin = meta_raw.get("data_file")
+        hdr_bin = meta_raw.get("matrix_file") or meta_raw.get("data_file")
         if hdr_bin and Path(hdr_bin).name != npy_path.name:
             log.warning(f"Header data_file='{hdr_bin}' != provided bin '{npy_path.name}'. Using provided bin.")
             
@@ -465,7 +465,7 @@ class ArdalParser:
         headers_raw, meta_raw, missing_raw = self._load_header_meta(header_meta_path) 
         
         ## check metadata and the input binary are congruous
-        hdr_bin = meta_raw.get("data_file")
+        hdr_bin = meta_raw.get("matrix_file") or meta_raw.get("data_file")
         if hdr_bin and Path(hdr_bin).name != npz_path.name:
             log.warning(f"Header data_file='{hdr_bin}' != provided bin '{npz_path.name}'. Using provided bin.")
             

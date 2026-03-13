@@ -124,7 +124,8 @@ public:
                                            const std::vector<size_t>& col_indices,
                                            const int threads = 1 ) const;
     py::array_t<uint64_t> getSubsetMatrix_rows( const std::vector<size_t>& row_indices, 
-                                                const int threads ) const;
+                                                const int threads,
+                                                bool silence_log = false ) const;
     py::array_t<uint64_t> getPackedMatrix( void ) const;
 
 private:

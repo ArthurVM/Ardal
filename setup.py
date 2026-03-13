@@ -38,12 +38,12 @@ setup(
         "Topic :: Scientific/Engineering :: Bioinformatics"
     ],
     install_requires=[
-        "numpy",
-        "pandas",
-        "scipy",
-        "pyjson",
-        "humanize",
-        "Bio"
+        "numpy>=2.3.3",
+        "pandas>=2.3.2",
+        "scipy>=1.16.2",
+        "pyjson>=1.4.1",
+        "humanize>=4.13.0",
+        "biopython>=1.85"
     ],
     ext_modules=ext_modules,
     python_requires='>=3.8'

@@ -65,8 +65,8 @@ def test_data():
     # }
 
     data_dir = Path(__file__).resolve().parent
-    matrix = data_dir / "test_10k.ref.bin"
-    meta = data_dir / "test_10k.ref.bin.meta"
+    matrix = "/home/arthur/BioInf/Ardal_MAIN/benchmarking_data/test_10k.ref.bin"
+    meta = "/home/arthur/BioInf/Ardal_MAIN/benchmarking_data/test_10k.ref.bin.meta"
 
     return [str(matrix), str(meta)]
 

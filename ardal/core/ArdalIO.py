@@ -32,6 +32,40 @@ class ArdalIO:
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
+    def _build_column_masks_payload(self) -> dict:
+        """Return canonical per-GUID missing-column masks."""
+        payload = {}
+        for guid in self._headerUtils.headers.get("guids", []):
+            payload[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
+        return payload
+
+
+    def _normalise_meta_for_write(self, meta: dict, matrix_file: str) -> dict:
+        """Emit metadata with stable key names expected by Ardal write outputs."""
+        return {
+            "format": meta.get("format"),
+            "dtype": meta.get("dtype"),
+            "endianness": meta.get("endianness"),
+            "row_major": meta.get("row_major"),
+            "n_rows": meta.get("n_rows"),
+            "n_cols": meta.get("n_cols"),
+            "matrix_file": matrix_file,
+            "data_nbytes": meta.get("data_nbytes"),
+            "data_sha256": meta.get("data_sha256"),
+            "words_per_row": meta.get("words_per_row"),
+            "bits_per_word": meta.get("bits_per_word"),
+            "row_stride_bytes": meta.get("row_stride_bytes"),
+            "generated_by": meta.get("generated_by"),
+        }
+
+
+    def _build_headers_meta_payload(self, meta: dict, matrix_file: str) -> dict:
+        return {
+            "meta": self._normalise_meta_for_write(meta, matrix_file),
+            "headers": self._headerUtils.headers,
+            "column_masks": self._build_column_masks_payload(),
+        }
+
 
     def to_dataframe( self ) -> pd.DataFrame:
         """ Return the allele matrix as a Pandas DataFrame.
@@ -105,7 +139,7 @@ class ArdalIO:
                              generated_by="ardal::io::write",
                              format_name="ardal.dense.v1",
                              matrix_file=matrix_out_path)
-            headers_meta = {"meta": meta, "headers": self._headerUtils.headers}
+            headers_meta = self._build_headers_meta_payload(meta, matrix_out_path)
         elif format == "npz":
             log.info("Writing dense matrix as .npz")
             np.savez_compressed(matrix_out_path, matrix=matrix_to_save)
@@ -114,13 +148,10 @@ class ArdalIO:
                              generated_by="ardal::io::write",
                              format_name="ardal.dense.v1",
                              matrix_file=matrix_out_path)
-            headers_meta = {"meta": meta, "headers": self._headerUtils.headers}
+            headers_meta = self._build_headers_meta_payload(meta, matrix_out_path)
         elif format == "bin":
             log.info("Writing packed matrix as .bin")
             headers_meta = self._write_packed(matrix_out_path)
-        
-        ## update with missing sites data
-        headers_meta.update(self._headerUtils._missing_masks)
             
         log.info(f"Wrote allele matrix to disk : {matrix_out_path}")
 
@@ -147,7 +178,7 @@ class ArdalIO:
                          generated_by="ardal::io::write",
                          format_name="ardal.bitpack.v1",
                          matrix_file=matrix_out_path)
-        headers_meta = { "meta" : meta, "headers" : self._headerUtils.headers }
+        headers_meta = self._build_headers_meta_payload(meta, matrix_out_path)
         
         return headers_meta
         
@@ -160,22 +191,36 @@ class ArdalIO:
     def make_fastas( self,
                      guids : list = [],
                      ref : Union[str, None] = None,
-                     allele_id_format : str = "{ref}.{chr}.{start}.{alt}"
-                     ) -> None:
+                     allele_id_format : Union[str, None] = None,
+                     out_directory : str = "./",
+                     snp_only : bool = True
+                     ) -> dict:
         """ Takes a set of guids and a reference fasta and constructs a simulated fasta from each dataset using alleles stored
         in the allele matrix. The position of each allele is determined by the allele_id_format argument, whereby the keywords:
         ref, alt, chr, start, end, are used to outline the allele id naming convention.
 
         E.g. for the allele `A.chr1.100.101.T` would be decoded using the allele_id_format string `{ref}.{chr}.{start}.{end}.{alt}`.
+
+        Returns:
+            dict: Mapping of guid to output FASTA file paths.
         """
-        SeqIO = require_package("Bio", attr="SeqIO")
-        Seq = require_package("Bio.Seq", import_as="Bio.Seq", attr="Seq")
-        SeqRecord = require_package("Bio.SeqRecord", import_as="Bio.SeqRecord", attr="SeqRecord")
+        # SeqIO = require_package("Bio", attr="SeqIO")
+        # Seq = require_package("Bio.Seq", import_as="Bio.Seq", attr="Seq")
+        # SeqRecord = require_package("Bio.SeqRecord", import_as="Bio.SeqRecord", attr="SeqRecord")
+        
+        from Bio import SeqIO, Seq, SeqRecord
 
         if ref is None:
             raise ParameterError("Reference FASTA path is required.")
         if not os.path.exists(ref):
             raise ParameterError(f"Reference FASTA not found: {ref}")
+
+        if not out_directory:
+            raise ParameterError("Output directory is required.")
+        if not os.path.exists(out_directory):
+            raise ParameterError(f"Output directory not found: {out_directory}")
+        if not os.path.isdir(out_directory):
+            raise ParameterError(f"Output directory is not a directory: {out_directory}")
 
         if guids:
             self._headerUtils.check_guids(guids)
@@ -202,9 +247,489 @@ class ArdalIO:
             for name, record in ref_records.items()
         }
 
-        ## decode alleles once
+        try:
+            ardal_version = version("ardal")
+        except PackageNotFoundError:
+            ardal_version = None
+        generated_by = "ardal::io::make_fastas"
+
+        ## resolve allele positions and decode alleles once
+        self._headerUtils.ensure_id_positions(allele_id_format)
+        allele_position_map = self._headerUtils.get_allele_positions()
         alleles = self._headerUtils.headers.get("alleles", [])
-        allele_info: list[Union[tuple[str, int, Union[int, None], str, str], None]] = [None] * len(alleles)
+
+        ref_default_chr = None
+        if len(ref_seqs) == 1:
+            ref_default_chr = next(iter(ref_seqs.keys()))
+
+        ## precompute allele edits (chr, pos0, span_len, alt)
+        allele_info = [None] * len(alleles)
+        for idx, allele_id in enumerate(alleles):
+            coord = allele_position_map.get(allele_id)
+            chr_key = coord[0] if coord else None
+            start = coord[1] if coord else None
+
+            try:
+                dec_chr, dec_start, dec_end, ref_base, alt_base = self._headerUtils._decode_allele_position(
+                    allele_id=allele_id,
+                    pattern=pattern,
+                    allele_id_format=allele_id_format
+                )
+            except ValueError:
+                dec_chr = None
+                dec_start = None
+                dec_end = None
+                ref_base = None
+                alt_base = None
+
+            if chr_key is None:
+                chr_key = dec_chr
+            if start is None:
+                start = dec_start
+
+            if start is None:
+                log.warning(f"Skipping allele '{allele_id}': missing position.")
+                continue
+
+            if chr_key is None:
+                if ref_default_chr is None:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': missing chromosome and reference has multiple sequences."
+                    )
+                    continue
+                chr_key = ref_default_chr
+
+            chr_key = str(chr_key)
+            if chr_key not in ref_seqs:
+                log.warning(
+                    f"Skipping allele '{allele_id}': chromosome '{chr_key}' not found in reference."
+                )
+                continue
+
+            alt_base = (alt_base or "").upper()
+            ref_base = (ref_base or "").upper()
+            if not alt_base:
+                log.warning(f"Skipping allele '{allele_id}': missing alt base.")
+                continue
+
+            if snp_only:
+                if len(alt_base) != 1 or (ref_base and len(ref_base) != 1):
+                    continue
+                if dec_end is not None and dec_start is not None and dec_end != dec_start:
+                    continue
+                span_len = 1
+            else:
+                if dec_end is not None:
+                    length_start = dec_start if dec_start is not None else start
+                    if length_start is not None and dec_end >= length_start:
+                        span_len = dec_end - length_start + 1
+                    else:
+                        span_len = 0
+                elif ref_base:
+                    span_len = len(ref_base)
+                else:
+                    span_len = len(alt_base)
+                if span_len <= 0 or len(alt_base) != span_len:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': unsupported length change for non-SNP allele."
+                    )
+                    continue
+
+            ref_seq = ref_seqs[chr_key]
+            start_int = int(start)
+            pos_candidates = []
+            for pos in (start_int - 1, start_int):
+                if pos not in pos_candidates:
+                    pos_candidates.append(pos)
+            pos_candidates = [
+                pos for pos in pos_candidates
+                if 0 <= pos <= len(ref_seq) - span_len
+            ]
+            if not pos_candidates:
+                log.warning(
+                    f"Skipping allele '{allele_id}': position out of reference bounds."
+                )
+                continue
+
+            if ref_base:
+                match_pos = None
+                for pos in pos_candidates:
+                    if ref_seq[pos:pos + span_len] == ref_base:
+                        match_pos = pos
+                        break
+                if match_pos is None:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': reference base mismatch at {chr_key}:{start}."
+                    )
+                    continue
+                pos0 = match_pos
+            else:
+                pos0 = pos_candidates[0]
+
+            allele_info[idx] = (chr_key, pos0, span_len, alt_base)
+
+        ## convert reference sequences to mutable lists once
+        ref_seq_lists = {name: list(seq) for name, seq in ref_seqs.items()}
+
+        ## guard against overwriting existing outputs
+        out_paths = {guid: os.path.join(out_directory, f"{guid}.fasta") for guid in guids}
+        existing = [path for path in out_paths.values() if os.path.exists(path)]
+        if existing:
+            raise MatrixWriteError(f"Output FASTA already exists: {existing[0]}")
+
+        for guid in guids:
+            guid_idx = self._headerUtils.encode_guid(guid)
+            allele_indices = self._matrix.getSetBitIndices(guid_idx, backend="auto")
+
+            ## apply allele edits to a per-guid copy
+            guid_seq_lists = {name: seq[:] for name, seq in ref_seq_lists.items()}
+            applied_sites = {}
+
+            for allele_idx in allele_indices:
+                info = allele_info[int(allele_idx)]
+                if info is None:
+                    continue
+                chr_key, pos0, span_len, alt_base = info
+                site_key = (chr_key, pos0, span_len)
+                existing = applied_sites.get(site_key)
+                if existing is not None and existing != alt_base:
+                    log.warning(
+                        f"GUID '{guid}' has multiple alleles at {chr_key}:{pos0 + 1}. "
+                        f"Keeping '{existing}', skipping '{alt_base}'."
+                    )
+                    continue
+                applied_sites[site_key] = alt_base
+
+                seq_list = guid_seq_lists[chr_key]
+                if span_len == 1:
+                    seq_list[pos0] = alt_base
+                else:
+                    seq_list[pos0:pos0 + span_len] = list(alt_base)
+
+            ## write modified sequences to FASTA
+            records = []
+            for name, seq_list in guid_seq_lists.items():
+                base_record = ref_records[name]
+                description = base_record.description or name
+                meta_parts = []
+                if f"guid={guid}" not in description:
+                    meta_parts.append(f"guid={guid}")
+                if "generated_by=" not in description:
+                    meta_parts.append(f"generated_by={generated_by}")
+                if ardal_version and "ardal_version=" not in description:
+                    meta_parts.append(f"ardal_version={ardal_version}")
+                if meta_parts:
+                    description = f"| ref={ref} | length={len(seq_list)} | {' '.join(meta_parts)} snp_only={snp_only}"
+                record = SeqRecord.SeqRecord(
+                    Seq.Seq("".join(seq_list)),
+                    id=base_record.id,
+                    name=base_record.name,
+                    description=description
+                )
+                records.append(record)
+            out_path = out_paths[guid]
+            SeqIO.write(records, out_path, "fasta")
+
+        return out_paths
+
+
+    def make_alignment( self,
+                        output_prefix : str,
+                        guids : list = [],
+                        ref : Union[str, None] = None,
+                        allele_id_format : Union[str, None] = None,
+                        out_directory : str = "./",
+                        snp_only : bool = True,
+                        missing_char : str = "N"
+                        ) -> str:
+        """Write a multi-FASTA alignment of ordered alleles.
+
+        When a reference FASTA is provided, absent alleles are represented by the
+        reference base at each locus. When no reference is provided, the reference
+        base encoded in the allele IDs (if present) is used; otherwise `missing_char`
+        is emitted for absent alleles.
+        """
+        from Bio import SeqIO, Seq, SeqRecord
+
+        if not output_prefix:
+            raise ParameterError("Output prefix is required.")
+        if not out_directory:
+            raise ParameterError("Output directory is required.")
+        if not os.path.exists(out_directory):
+            raise ParameterError(f"Output directory not found: {out_directory}")
+        if not os.path.isdir(out_directory):
+            raise ParameterError(f"Output directory is not a directory: {out_directory}")
+
+        if not isinstance(missing_char, str) or len(missing_char) != 1:
+            raise ParameterError("missing_char must be a single character.")
+
+        if guids:
+            self._headerUtils.check_guids(guids)
+        else:
+            guids = list(self._headerUtils.headers.get("guids", []))
+
+        if not guids:
+            raise ParameterError("No GUIDs available for alignment.")
+
+        if allele_id_format is None:
+            allele_id_format = self._headerUtils.get_cached_allele_id_format()
+        if not allele_id_format:
+            raise ParameterError("allele_id_format is required to build an alignment.")
+
+        pattern = self._headerUtils._check_allele_format_grammar(allele_id_format=allele_id_format)
+        self._headerUtils.ensure_id_positions(allele_id_format)
+        allele_position_map = self._headerUtils.get_allele_positions()
+        alleles = self._headerUtils.headers.get("alleles", [])
+
+        ref_records = None
+        ref_seqs = None
+        ref_default_chr = None
+        if ref is not None:
+            if not os.path.exists(ref):
+                raise ParameterError(f"Reference FASTA not found: {ref}")
+            try:
+                ref_records = SeqIO.to_dict(SeqIO.parse(ref, "fasta"))
+            except Exception as exc:
+                raise MatrixWriteError(f"Failed to parse reference FASTA: {exc}") from exc
+            if not ref_records:
+                raise MatrixWriteError("Reference FASTA appears to be empty.")
+            ref_seqs = {
+                name: str(record.seq).upper()
+                for name, record in ref_records.items()
+            }
+            if len(ref_seqs) == 1:
+                ref_default_chr = next(iter(ref_seqs.keys()))
+
+        ## build ordered allele list with metadata
+        allele_records = []
+        for idx, allele_id in enumerate(alleles):
+            coord = allele_position_map.get(allele_id)
+            chr_key = coord[0] if coord else None
+            start = coord[1] if coord else None
+
+            try:
+                dec_chr, dec_start, dec_end, ref_base, alt_base = self._headerUtils._decode_allele_position(
+                    allele_id=allele_id,
+                    pattern=pattern,
+                    allele_id_format=allele_id_format
+                )
+            except ValueError:
+                dec_chr = None
+                dec_start = None
+                dec_end = None
+                ref_base = None
+                alt_base = None
+
+            if chr_key is None:
+                chr_key = dec_chr
+            if start is None:
+                start = dec_start
+
+            if start is None:
+                log.warning(f"Skipping allele '{allele_id}': missing position.")
+                continue
+
+            if chr_key is None:
+                if ref_default_chr is None:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': missing chromosome and reference has multiple sequences."
+                    )
+                    continue
+                chr_key = ref_default_chr
+
+            chr_key = str(chr_key)
+
+            alt_base = (alt_base or "").upper()
+            ref_base = (ref_base or "").upper()
+            if not alt_base:
+                log.warning(f"Skipping allele '{allele_id}': missing alt base.")
+                continue
+
+            if len(alt_base) != 1:
+                if snp_only:
+                    continue
+                log.warning(f"Skipping allele '{allele_id}': non-SNP allele not supported in alignment.")
+                continue
+            if ref_base and len(ref_base) != 1:
+                if snp_only:
+                    continue
+                log.warning(f"Skipping allele '{allele_id}': non-SNP allele not supported in alignment.")
+                continue
+            if snp_only and dec_end is not None and dec_start is not None and dec_end != dec_start:
+                continue
+
+            ref_char = None
+            if ref_seqs is not None:
+                if chr_key not in ref_seqs:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': chromosome '{chr_key}' not found in reference."
+                    )
+                    continue
+                ref_seq = ref_seqs[chr_key]
+                start_int = int(start)
+                pos_candidates = []
+                for pos in (start_int - 1, start_int):
+                    if pos not in pos_candidates:
+                        pos_candidates.append(pos)
+                pos_candidates = [pos for pos in pos_candidates if 0 <= pos < len(ref_seq)]
+                if not pos_candidates:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': position out of reference bounds."
+                    )
+                    continue
+
+                if ref_base:
+                    match_pos = None
+                    for pos in pos_candidates:
+                        if ref_seq[pos] == ref_base:
+                            match_pos = pos
+                            break
+                    if match_pos is None:
+                        log.warning(
+                            f"Skipping allele '{allele_id}': reference base mismatch at {chr_key}:{start}."
+                        )
+                        continue
+                    pos0 = match_pos
+                else:
+                    pos0 = pos_candidates[0]
+                ref_char = ref_seq[pos0]
+            else:
+                if ref_base and len(ref_base) == 1:
+                    ref_char = ref_base
+
+            allele_records.append({
+                "idx": idx,
+                "chr": chr_key,
+                "pos": int(start),
+                "id": allele_id,
+                "alt": alt_base,
+                "ref": ref_char,
+            })
+
+        if not allele_records:
+            raise ParameterError("No alleles available for alignment.")
+
+        allele_records.sort(key=lambda rec: (rec["chr"], rec["pos"], rec["id"]))
+        ordered_indices = [rec["idx"] for rec in allele_records]
+        ordered_alt = [rec["alt"] for rec in allele_records]
+        ordered_ref = [rec["ref"] for rec in allele_records]
+
+        out_path = os.path.join(out_directory, f"{output_prefix}.fasta")
+        if os.path.exists(out_path):
+            raise MatrixWriteError(f"File '{out_path}' already exists.")
+
+        missing_rows = self._headerUtils.get_missing_mask_rows()
+        missing_sets = [set(row) for row in missing_rows] if missing_rows else None
+
+        try:
+            ardal_version = version("ardal")
+        except PackageNotFoundError:
+            ardal_version = None
+
+        records = []
+        for guid in guids:
+            guid_idx = self._headerUtils.encode_guid(guid)
+            allele_indices = self._matrix.getSetBitIndices(guid_idx, backend="auto")
+            present = set(int(idx) for idx in allele_indices)
+            missing_set = missing_sets[guid_idx] if missing_sets else None
+
+            seq_chars = []
+            for allele_idx, alt_base, ref_char in zip(ordered_indices, ordered_alt, ordered_ref):
+                if missing_set is not None and allele_idx in missing_set:
+                    seq_chars.append(missing_char)
+                elif allele_idx in present:
+                    seq_chars.append(alt_base)
+                else:
+                    seq_chars.append(ref_char if ref_char else missing_char)
+
+            desc_parts = [f"sites={len(seq_chars)}", f"snp_only={snp_only}"]
+            if ref:
+                desc_parts.append(f"ref={ref}")
+            if ardal_version:
+                desc_parts.append(f"ardal_version={ardal_version}")
+            description = " ".join(desc_parts)
+
+            record = SeqRecord.SeqRecord(
+                Seq.Seq("".join(seq_chars)),
+                id=guid,
+                name=guid,
+                description=description
+            )
+            records.append(record)
+
+        SeqIO.write(records, out_path, "fasta")
+        return out_path
+
+
+    def to_plink( self,
+                  out_prefix: str,
+                  out_directory: str = "./",
+                  allele_id_format: Union[str, None] = None,
+                  snp_only: bool = True,
+                  chr_to_int: bool = False,
+                  chunk_size: Union[int, None] = 10000
+                  ) -> None:
+        """Write PLINK1 binary files (.bed/.bim/.fam) for the current matrix.
+
+        Notes:
+            - Allele presence is encoded as heterozygous (01).
+            - Absence is encoded as homozygous reference (10).
+            - Missing masks are encoded as missing (11).
+            - chr_to_int optionally recodes chromosome labels to PLINK numeric codes.
+            - When chr_to_int is True, a sidecar <prefix>.chrmap file is written.
+        """
+        if not out_prefix:
+            raise ParameterError("Output prefix is required.")
+        if not out_directory:
+            raise ParameterError("Output directory is required.")
+        if not os.path.exists(out_directory):
+            raise ParameterError(f"Output directory not found: {out_directory}")
+        if not os.path.isdir(out_directory):
+            raise ParameterError(f"Output directory is not a directory: {out_directory}")
+
+        bed_path = os.path.join(out_directory, f"{out_prefix}.bed")
+        bim_path = os.path.join(out_directory, f"{out_prefix}.bim")
+        fam_path = os.path.join(out_directory, f"{out_prefix}.fam")
+
+        for path in (bed_path, bim_path, fam_path):
+            if os.path.exists(path):
+                raise MatrixWriteError(f"File '{path}' already exists.")
+
+        if allele_id_format is None:
+            allele_id_format = self._headerUtils.get_cached_allele_id_format()
+        if not allele_id_format:
+            raise ParameterError("allele_id_format is required to generate PLINK outputs.")
+
+        ## decode variant metadata from allele IDs
+        pattern = self._headerUtils._check_allele_format_grammar(allele_id_format=allele_id_format)
+        self._headerUtils.ensure_id_positions(allele_id_format)
+        allele_position_map = self._headerUtils.get_allele_positions()
+
+        ## optional chromosome recoding for PLINK
+        def _standard_chr_code(raw_value: str) -> Union[int, None]:
+            raw = str(raw_value)
+            norm = raw[3:] if raw.lower().startswith("chr") else raw
+            norm_upper = norm.upper()
+            chr_map = {
+                "X": 23,
+                "Y": 24,
+                "XY": 25,
+                "M": 26,
+                "MT": 26,
+            }
+            if norm_upper in chr_map:
+                return chr_map[norm_upper]
+            try:
+                return int(norm)
+            except ValueError:
+                return None
+
+        contig_map = {}
+        used_codes = set()
+        max_code = 0
+
+        alleles = self._headerUtils.headers.get("alleles", [])
+        variants = []
         for idx, allele_id in enumerate(alleles):
             try:
                 chr_key, start, end, ref_base, alt_base = self._headerUtils._decode_allele_position(
@@ -213,120 +738,156 @@ class ArdalIO:
                     allele_id_format=allele_id_format
                 )
             except ValueError:
-                continue
+                coord = allele_position_map.get(allele_id)
+                if coord:
+                    chr_key, start = coord
+                else:
+                    chr_key = None
+                    start = None
+                end = None
+                ref_base = None
+                alt_base = None
+
             if chr_key is None or start is None:
+                log.warning(f"Skipping allele '{allele_id}': missing position.")
                 continue
-            chr_key = str(chr_key)
-            if chr_key not in ref_seqs:
-                continue
-            ref_base = "" if ref_base is None else str(ref_base)
-            alt_base = "" if alt_base is None else str(alt_base)
-            allele_info[idx] = (chr_key, int(start), end, ref_base, alt_base)
 
-        ## infer per contig coordinate offsets
-        ## switch from 0based to 1based
-        contig_offset: dict[str, int] = {}
-        for contig, seq in ref_seqs.items():
-            match_zero = 0
-            match_one = 0
-            checked = 0
-            for info in allele_info:
-                if not info or info[0] != contig:
-                    continue
-                _, start, end, ref_base, _ = info
-                if not ref_base or start is None:
-                    continue
-                if end is None:
-                    end = start + len(ref_base)
-                try:
-                    end_val = int(end)
-                except (TypeError, ValueError):
-                    continue
-                if start < 0:
-                    continue
-                if start + len(ref_base) > len(seq) and start - 1 + len(ref_base) > len(seq):
-                    continue
-                checked += 1
-                if start + len(ref_base) <= len(seq):
-                    if seq[start:start + len(ref_base)] == ref_base.upper():
-                        match_zero += 1
-                if start - 1 >= 0 and start - 1 + len(ref_base) <= len(seq):
-                    if seq[start - 1:start - 1 + len(ref_base)] == ref_base.upper():
-                        match_one += 1
-            if checked == 0:
-                contig_offset[contig] = 0
-                log.warning(f"No reference matches found for contig '{contig}'. Assuming 0-based coordinates.")
-            else:
-                contig_offset[contig] = -1 if match_one >= match_zero else 0
+            ref_base = (ref_base or "").upper()
+            alt_base = (alt_base or "").upper()
 
-        ## generate fastas
-        for guid in guids:
-            guid_idx = self._headerUtils.encode_guid(guid)
-            allele_indices = self._matrix.getSetBitIndices(guid_idx, backend="auto")
-
-            contig_variants: dict[str, list[tuple[int, int, str, str]]] = defaultdict(list)
-            for allele_idx in allele_indices:
-                info = allele_info[int(allele_idx)]
-                if info is None:
+            if snp_only:
+                if not alt_base or len(alt_base) != 1:
                     continue
-                contig, start, end, ref_base, alt_base = info
-                if contig not in ref_seqs:
+                if ref_base and len(ref_base) != 1:
                     continue
-                offset = contig_offset.get(contig, 0)
-                start_idx = start + offset
-                if start_idx < 0:
+                if end is not None and end != start:
                     continue
-                if end is None:
-                    if ref_base:
-                        end_val = start + len(ref_base)
-                    elif alt_base:
-                        end_val = start + max(1, len(alt_base))
-                    else:
-                        end_val = start + 1
-                else:
-                    end_val = int(end)
-                end_idx = end_val + offset
-                if end_idx < start_idx:
+
+            raw_chr = str(chr_key)
+            if chr_to_int:
+                std_code = _standard_chr_code(raw_chr)
+                if std_code is not None:
+                    used_codes.add(std_code)
+                    if std_code > max_code:
+                        max_code = std_code
+
+            variants.append({
+                "idx": idx,
+                "id": allele_id,
+                "chr_raw": raw_chr,
+                "pos": int(start),
+                "ref": ref_base or "0",
+                "alt": alt_base or "0"
+            })
+
+        if not variants:
+            raise ParameterError("No variants available for PLINK export.")
+
+        if chr_to_int:
+            ## assign numeric codes for non-standard contigs
+            next_code = max(26, max_code) + 1
+            for variant in variants:
+                raw = variant["chr_raw"]
+                std_code = _standard_chr_code(raw)
+                if std_code is not None:
+                    variant["chr"] = str(std_code)
                     continue
-                contig_variants[contig].append((start_idx, end_idx, ref_base, alt_base))
+                if raw in contig_map:
+                    variant["chr"] = str(contig_map[raw])
+                    continue
+                while next_code in used_codes:
+                    next_code += 1
+                contig_map[raw] = next_code
+                used_codes.add(next_code)
+                variant["chr"] = str(next_code)
+                next_code += 1
+        else:
+            for variant in variants:
+                variant["chr"] = variant["chr_raw"]
 
-            records = []
-            for contig, seq in ref_seqs.items():
-                variants = contig_variants.get(contig, [])
-                if not variants:
-                    out_seq = seq
-                else:
-                    variants.sort(key=lambda v: v[0])
-                    cursor = 0
-                    out_chunks: list[str] = []
-                    for start_idx, end_idx, ref_base, alt_base in variants:
-                        if start_idx < cursor:
-                            log.warning(f"Overlapping variants for {guid} on {contig}; skipping at {start_idx}.")
-                            continue
-                        if start_idx > len(seq):
-                            continue
-                        end_idx = min(end_idx, len(seq))
-                        if ref_base:
-                            ref_slice = seq[start_idx:end_idx]
-                            if ref_slice != ref_base.upper():
-                                log.warning(f"Reference mismatch for {guid} on {contig} at {start_idx}; skipping.")
-                                continue
-                        out_chunks.append(seq[cursor:start_idx])
-                        if alt_base:
-                            out_chunks.append(alt_base.upper())
-                        cursor = end_idx
-                    out_chunks.append(seq[cursor:])
-                    out_seq = "".join(out_chunks)
+        guids = list(self._headerUtils.headers.get("guids", []))
+        if not guids:
+            raise ParameterError("No GUIDs available for PLINK export.")
 
-                record_id = f"{guid}|{contig}"
-                records.append(SeqRecord(Seq(out_seq), id=record_id, description=""))
+        ## write BIM and FAM using stable header order
+        with open(bim_path, "w") as bim:
+            for variant in variants:
+                bim.write(
+                    f"{variant['chr']}\t{variant['id']}\t0\t{variant['pos']}\t"
+                    f"{variant['alt']}\t{variant['ref']}\n"
+                )
 
-            out_path = f"{guid}.fasta"
-            try:
-                SeqIO.write(records, out_path, "fasta")
-            except Exception as exc:
-                raise MatrixWriteError(f"Failed to write FASTA for {guid}: {exc}") from exc
+        with open(fam_path, "w") as fam:
+            for guid in guids:
+                fam.write(f"{guid}\t{guid}\t0\t0\t0\t-9\n")
 
-            log.info(f"Wrote FASTA for GUID '{guid}' to {out_path}")
+        if chr_to_int and contig_map:
+            ## write contig mapping for non-standard chromosome labels
+            map_path = os.path.join(out_directory, f"{out_prefix}.chrmap")
+            if os.path.exists(map_path):
+                raise MatrixWriteError(f"File '{map_path}' already exists.")
+            with open(map_path, "w") as cmap:
+                for raw, code in contig_map.items():
+                    cmap.write(f"{raw}\t{code}\n")
 
-        return None
+        if chunk_size is None or chunk_size <= 0:
+            chunk_size = len(variants)
+
+        missing_rows = self._headerUtils.get_missing_mask_rows()
+        missing_sets = [set(row) for row in missing_rows] if missing_rows else None
+
+        guid_indices = list(range(len(guids)))
+        n_samples = len(guids)
+
+        hom_ref_code = np.uint8(2)
+        het_code = np.uint8(1)
+        missing_code = np.uint8(3)
+
+        ## write SNP major BED stream
+        with open(bed_path, "wb") as bed:
+            bed.write(bytes([0x6C, 0x1B, 0x01]))
+
+            for chunk_start in range(0, len(variants), chunk_size):
+                chunk_vars = variants[chunk_start:chunk_start + chunk_size]
+                allele_indices = [v["idx"] for v in chunk_vars]
+                if not allele_indices:
+                    continue
+
+                chunk_packed = self._matrix.getSubsetPackedMatrix(guid_indices, allele_indices, 1)
+                if chunk_packed.dtype.byteorder not in ('<', '='):
+                    chunk_packed = chunk_packed.byteswap().newbyteorder('<')
+                chunk_packed = np.asarray(chunk_packed, dtype=np.uint64, copy=False)
+                if chunk_packed.ndim == 1:
+                    chunk_packed = chunk_packed.reshape(1, chunk_packed.shape[0])
+
+                for local_idx, variant in enumerate(chunk_vars):
+                    ## extract presence per sample for this variant
+                    word = local_idx // 64
+                    bit = local_idx % 64
+                    presence = (chunk_packed[:, word] >> np.uint64(bit)) & np.uint64(1)
+                    genotypes = np.full(n_samples, hom_ref_code, dtype=np.uint8)
+                    if presence.any():
+                        genotypes[presence.astype(bool)] = het_code
+
+                    if missing_sets:
+                        ## apply missing mask (guid x allele index)
+                        missing_mask = np.fromiter(
+                            (variant["idx"] in missing_set for missing_set in missing_sets),
+                            dtype=bool,
+                            count=n_samples
+                        )
+                        if missing_mask.any():
+                            genotypes[missing_mask] = missing_code
+
+                    ## pack 4 samples per byte (PLINK bed spec)
+                    n_bytes = (n_samples + 3) // 4
+                    out_bytes = np.zeros(n_bytes, dtype=np.uint8)
+                    for byte_idx in range(n_bytes):
+                        base = byte_idx * 4
+                        g0 = int(genotypes[base]) if base < n_samples else 0
+                        g1 = int(genotypes[base + 1]) if base + 1 < n_samples else 0
+                        g2 = int(genotypes[base + 2]) if base + 2 < n_samples else 0
+                        g3 = int(genotypes[base + 3]) if base + 3 < n_samples else 0
+                        out_bytes[byte_idx] = g0 | (g1 << 2) | (g2 << 4) | (g3 << 6)
+
+                    bed.write(out_bytes.tobytes())

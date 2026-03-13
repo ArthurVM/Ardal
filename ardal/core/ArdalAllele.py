@@ -34,10 +34,11 @@ class ArdalAllele:
                 guids : List,
                 backend : str = "auto" ) -> Dict:
         """
-        Finds the set of alleles unique to a given set of GUIDs.
+        Finds alleles restricted to the provided GUID set.
 
-        An allele is considered unique if it is present in ANY of the specified
-        GUIDs and absent in all other GUIDs.
+        For each input GUID, returns alleles that are:
+        1) present in that GUID, and
+        2) absent from every GUID outside the input set.
 
         INPUT:
             guids (list): A list of GUIDs.
@@ -53,12 +54,25 @@ class ArdalAllele:
             self._headerUtils.check_guids(guids)
         else:
             raise EmptySelectionError("guids list cannot be empty.")
-                    
+
+        input_guid_set = set(guids)
+        outgroup_guids = [
+            guid for guid in self._headerUtils.headers["guids"] if guid not in input_guid_set
+        ]
+
+        outgroup_alleles = set()
+        for out_guid in outgroup_guids:
+            out_idx = self._headerUtils.encode_guid(out_guid)
+            outgroup_alleles.update(self._matrix.getSetBitIndices(out_idx, backend=backend))
+
         unique_alleles = defaultdict(set)
         for guid in guids:
-            guid_unique_alleles = self._matrix.uniqueSharedBits([self._headerUtils.encode_guid(guid)], 
-                                                                 backend=backend)
-            unique_alleles[guid] = {self._headerUtils.decode_allele(idx) for idx in guid_unique_alleles}
+            guid_idx = self._headerUtils.encode_guid(guid)
+            guid_alleles = set(self._matrix.getSetBitIndices(guid_idx, backend=backend))
+            guid_unique_alleles = guid_alleles - outgroup_alleles
+            unique_alleles[guid] = {
+                self._headerUtils.decode_allele(idx) for idx in guid_unique_alleles
+            }
         
         return unique_alleles
     
@@ -154,7 +168,7 @@ class ArdalAllele:
                   ) -> List:
         """ Return a list of alleles which fall within the given genomic intervals.
         """
-        print(allele_id_format)
+        # print(allele_id_format)
         return self._headerUtils.get_interval_alleles(intervals=intervals,
                                                       allele_id_format=allele_id_format,
                                                       intervals_bed=intervals_bed,

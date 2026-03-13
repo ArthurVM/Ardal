@@ -646,8 +646,9 @@ py::array_t<size_t> HybridMatrix::getSubsetPackedMatrix( const std::vector<size_
 
 
 py::array_t<uint64_t> HybridMatrix::getSubsetPackedMatrix_rows( const std::vector<size_t>& row_indices, 
-                                                                const int threads ) const {
-    return bit_backend->getSubsetMatrix_rows(row_indices, threads);
+                                                                const int threads,
+                                                                bool silence_log ) const {
+    return bit_backend->getSubsetMatrix_rows(row_indices, threads, silence_log);
 }
 
 } // namespace ardal

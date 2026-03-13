@@ -1427,6 +1427,10 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
     // get the colwise roaring bitmap
     auto colwise_roaring = colwiseRoaringFromRowwise();
     size_t n_cols = colwise_roaring.size();
+    std::vector<uint64_t> cardinalities(n_cols, 0);
+    for (size_t col = 0; col < n_cols; ++col) {
+        cardinalities[col] = colwise_roaring[col].cardinality();
+    }
 
     // sanity checks
     if (roaring_bitmap_.size() != n_rows_) {
@@ -1458,11 +1462,20 @@ py::dict RoaringMatrix::bitCooccurrence_all( double threshold, int threads ) con
             #pragma omp for schedule(static)
             for (size_t i = 0; i < n_cols - 1; ++i) {
                 const auto& i_bitmap = colwise_roaring[i];
+                const uint64_t i_cardinality = cardinalities[i];
                 std::vector<size_t> cooccurring_partners;
                 for (size_t j = i + 1; j < n_cols; ++j) {
                     const auto& j_bitmap = colwise_roaring[j];
+                    const uint64_t j_cardinality = cardinalities[j];
+                    const uint64_t max_cardinality = std::max(i_cardinality, j_cardinality);
+                    if (max_cardinality == 0) continue;
+                    const double max_possible_jaccard =
+                        static_cast<double>(std::min(i_cardinality, j_cardinality)) /
+                        static_cast<double>(max_cardinality);
+                    if (max_possible_jaccard < threshold) continue;
+
                     double intersection_size = (i_bitmap & j_bitmap).cardinality();
-                    double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
+                    double union_size = static_cast<double>(i_cardinality + j_cardinality) - intersection_size;
 
                     if (union_size == 0) continue;
                     double jaccard_index = intersection_size / union_size;
@@ -1534,16 +1547,27 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
     if (col_indices.empty() || col_indices.size() == 1) {
         return py::dict();
     }
+
+    std::vector<size_t> subset_cols = col_indices;
+    std::sort(subset_cols.begin(), subset_cols.end());
+    subset_cols.erase(std::unique(subset_cols.begin(), subset_cols.end()), subset_cols.end());
+
     // check if col_indices are valid
-    for (const auto& idx : col_indices) {
+    for (const auto& idx : subset_cols) {
         if (idx >= n_cols_bits_) {
             throw std::runtime_error("Column index out of bounds.");
         }
     }
+    if (subset_cols.size() < 2) {
+        return py::dict();
+    }
 
     // get the colwise roaring bitmap
     auto colwise_roaring = colwiseRoaringFromRowwise();
-    size_t n_cols = colwise_roaring.size();
+    std::vector<uint64_t> cardinalities(subset_cols.size(), 0);
+    for (size_t subset_idx = 0; subset_idx < subset_cols.size(); ++subset_idx) {
+        cardinalities[subset_idx] = colwise_roaring[subset_cols[subset_idx]].cardinality();
+    }
 
     std::map<size_t, std::vector<size_t>> global_map;
 
@@ -1555,22 +1579,24 @@ py::dict RoaringMatrix::bitCooccurrence_subset( const std::vector<size_t>& col_i
             std::map<size_t, std::vector<size_t>> local_map;
 
             #pragma omp for schedule(static)
-            for (size_t i = 0; i < n_cols - 1; ++i) {
-                // check if the column is in the subset
-                if (std::find(col_indices.begin(), col_indices.end(), i) == col_indices.end()) {
-                    continue; // skip columns not in the subset
-                }
-                
+            for (size_t subset_i = 0; subset_i < subset_cols.size() - 1; ++subset_i) {
+                const size_t i = subset_cols[subset_i];
                 std::vector<size_t> cooccurring_partners;
                 const auto& i_bitmap = colwise_roaring[i];
-                for (size_t j = i + 1; j < n_cols; ++j) {
-                    // check if the column is in the subset
-                    if (std::find(col_indices.begin(), col_indices.end(), j) == col_indices.end()) {
-                        continue; // skip columns not in the subset
-                    }
+                const uint64_t i_cardinality = cardinalities[subset_i];
+                for (size_t subset_j = subset_i + 1; subset_j < subset_cols.size(); ++subset_j) {
+                    const size_t j = subset_cols[subset_j];
                     const auto& j_bitmap = colwise_roaring[j];
+                    const uint64_t j_cardinality = cardinalities[subset_j];
+                    const uint64_t max_cardinality = std::max(i_cardinality, j_cardinality);
+                    if (max_cardinality == 0) continue;
+                    const double max_possible_jaccard =
+                        static_cast<double>(std::min(i_cardinality, j_cardinality)) /
+                        static_cast<double>(max_cardinality);
+                    if (max_possible_jaccard < threshold) continue;
+
                     double intersection_size = (i_bitmap & j_bitmap).cardinality();
-                    double union_size = i_bitmap.cardinality() + j_bitmap.cardinality() - intersection_size;
+                    double union_size = static_cast<double>(i_cardinality + j_cardinality) - intersection_size;
                     if (union_size == 0) continue;
                     double jaccard_index = intersection_size / union_size;
                     if (jaccard_index >= threshold) {

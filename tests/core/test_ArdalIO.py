@@ -91,3 +91,62 @@ def test_write_bin(io_component, test_data_mem, tmp_path):
     loaded_json = json.load(open(json_file, 'r'))
     assert "meta" in loaded_json
     assert "headers" in loaded_json
+
+
+def test_write_metadata_shape(io_component, tmp_path):
+    output_dir = tmp_path / "test_output_meta_shape"
+    output_dir.mkdir()
+
+    io_component.write("test_data", str(output_dir), format="bin")
+    meta_file = output_dir / "test_data.bin.meta"
+    assert meta_file.exists()
+
+    with open(meta_file, "r") as f:
+        payload = json.load(f)
+
+    assert set(payload.keys()) == {"meta", "headers", "column_masks"}
+    assert set(payload["headers"].keys()) == {"guids", "alleles"}
+    assert isinstance(payload["column_masks"], dict)
+
+    expected_meta_keys = {
+        "format",
+        "dtype",
+        "endianness",
+        "row_major",
+        "n_rows",
+        "n_cols",
+        "matrix_file",
+        "data_nbytes",
+        "data_sha256",
+        "words_per_row",
+        "bits_per_word",
+        "row_stride_bytes",
+        "generated_by",
+    }
+    assert set(payload["meta"].keys()) == expected_meta_keys
+
+
+def test_write_metadata_column_masks_format(hybrid_matrix, headers, meta, tmp_path):
+    from ardal.core.ArdalHeaderUtils import ArdalHeaderUtils
+    from ardal.core.ArdalIO import ArdalIO
+
+    masks = {"column_masks": {"GUID1": [0, 7], "GUID2": [0], "GUID10": []}}
+    header_utils = ArdalHeaderUtils(
+        headers=headers,
+        meta=meta,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+        missing_masks=masks,
+    )
+    io_component = ArdalIO(header_utils, hybrid_matrix, hybrid_matrix.roaringEnabled())
+
+    output_dir = tmp_path / "test_output_meta_masks"
+    output_dir.mkdir()
+    io_component.write("test_data", str(output_dir), format="npy")
+
+    meta_file = output_dir / "test_data.npy.meta"
+    with open(meta_file, "r") as f:
+        payload = json.load(f)
+
+    assert payload["column_masks"]["GUID1"] == [0, 7]
+    assert payload["column_masks"]["GUID2"] == [0]
+    assert payload["column_masks"]["GUID10"] == []

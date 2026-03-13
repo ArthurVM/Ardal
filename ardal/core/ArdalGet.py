@@ -8,7 +8,7 @@ from typing import Union, Tuple, List, TYPE_CHECKING
 
 from ..utils.misc import require_package
 from ..utils.decorators import check_thread_count, check_alleles_list, check_guids_list
-from ..utils.exceptions import ParameterError, RoaringError
+from ..utils.exceptions import ParameterError, RoaringError, IntervalError
 from ..utils.logger import get_logger
 from ..utils.make_meta import make_meta
 
@@ -29,6 +29,49 @@ class ArdalGet:
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
+    def _subset_missing_masks(self,
+                              guids: List[str],
+                              allele_indices: List[int],
+                              rows_only_flag: bool) -> Union[dict, None]:
+        """Build per-GUID missing masks aligned to a subset, or None if unavailable."""
+        if not self._headerUtils.has_missing_mask():
+            return None
+
+        per_guid_masks = {}
+        if rows_only_flag:
+            for guid in guids:
+                per_guid_masks[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
+            return per_guid_masks
+
+        idx_map = {orig: new for new, orig in enumerate(allele_indices)}
+        for guid in guids:
+            cols = self._headerUtils.get_guid_missing_mask(guid)
+            remapped = []
+            for c in cols:
+                if c in idx_map:
+                    remapped.append(idx_map[c])
+            per_guid_masks[guid] = remapped
+        return per_guid_masks
+
+
+    def _subset_allele_posmap(self, alleles: List[str]) -> dict:
+        """Build an allele-position map limited to alleles present in the subset."""
+        parent_pos_map = self._headerUtils.get_allele_positions()
+        if not parent_pos_map:
+            return {}
+
+        subset_pos_map = defaultdict(lambda: defaultdict(list))
+        for allele in alleles:
+            coord = parent_pos_map.get(allele)
+            if coord is None:
+                continue
+            chr_key, pos = coord
+            if chr_key is None or pos is None:
+                continue
+            subset_pos_map[str(chr_key)][int(pos)].append(allele)
+
+        return subset_pos_map
+
     
     def _subset_chunk( self,
                        guids: List[str],
@@ -43,6 +86,7 @@ class ArdalGet:
         """Packed subset helper used for chunked extraction."""
         from ..Ardal import Ardal
 
+        ## rows-only fast path
         rows_only_flag = len(allele_indices) == 0
 
         if rows_only_flag:
@@ -57,20 +101,12 @@ class ArdalGet:
 
         headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
 
-        if self._headerUtils.has_missing_mask():
-            per_guid_masks = {}
-            if rows_only_flag:
-                for guid in guids:
-                    per_guid_masks[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
-            else:
-                idx_map = {orig: new for new, orig in enumerate(allele_indices)}
-                for guid in guids:
-                    cols = self._headerUtils.get_guid_missing_mask(guid)
-                    remapped = []
-                    for c in cols:
-                        if c in idx_map:
-                            remapped.append(idx_map[c])
-                    per_guid_masks[guid] = remapped
+        per_guid_masks = self._subset_missing_masks(
+            guids=guids,
+            allele_indices=allele_indices,
+            rows_only_flag=rows_only_flag,
+        )
+        if per_guid_masks is not None:
             headers_meta["column_masks"] = per_guid_masks
 
         headers_meta["meta"] = make_meta(sub_matrix,
@@ -82,7 +118,7 @@ class ArdalGet:
         if not data_only:
             return Ardal(data_source=[sub_matrix, headers_meta],
                          allele_id_format=self._headerUtils._allele_id_format,
-                         allele_positions=self._headerUtils.get_allele_positions(),
+                         allele_positions=self._subset_allele_posmap(alleles),
                          verbosity=child_verbosity,
                          quiet_init=child_quiet_init)
         return [sub_matrix, headers_meta]
@@ -94,6 +130,10 @@ class ArdalGet:
     def subset( self,
                 guids : List[str] = [],
                 alleles : List[str] = [],
+                intervals : Union[list, None] = None,
+                intervals_bed : Union[str, None] = None,
+                allele_coords_bed : Union[str, None] = None,
+                allele_id_format : Union[str, None] = None,
                 drop_zero_cols : bool = True,
                 chunk_size : Union[int, None] = None,
                 yield_chunks : bool = False,
@@ -108,9 +148,20 @@ class ArdalGet:
         yield_chunks returns a generator over chunked outputs.
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
+        has_interval_query = intervals is not None or intervals_bed is not None
+
         ## check input
-        if len(guids) == 0 and len(alleles) == 0:
-            raise ParameterError("guids and alleles cannot both be empty.")
+        if len(guids) == 0 and len(alleles) == 0 and intervals == None and intervals_bed == None:
+            raise ParameterError("Please provide alleles or guids or intervals to perform a subset.")
+        
+        if alleles and has_interval_query:
+            raise ParameterError("alleles argument is mutually exclusive with intervals/intervals_bed arguments.")
+        
+        if intervals and intervals_bed:
+            raise ParameterError("intervals and intervals_bed arguments are mutually exclusive.")
+        
+        if allele_coords_bed and not has_interval_query:
+            raise ParameterError("Either intervals or intervals_bed must be provided when allele_coords_bed is not None.")
 
         ## check GUIDs
         if guids:
@@ -118,7 +169,8 @@ class ArdalGet:
         else:
             guids = list(self._headerUtils.headers["guids"])
 
-        guid_indices = sorted([self._headerUtils.encode_guid(guid) for guid in guids], reverse=False)
+        ## keep caller order for row/header alignment
+        guid_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
 
         ## check alleles
         if alleles:
@@ -128,6 +180,22 @@ class ArdalGet:
             ## default to all alleles when no explicit subset requested
             alleles = list(self._headerUtils.headers["alleles"])
             rows_only_flag = True
+            
+        ## get interval alleles
+        if has_interval_query:
+            if allele_id_format == None:
+                allele_id_format = self._headerUtils._allele_id_format
+            log.info("[PAIRWISE] Constructing intervals")
+            alleles = self._headerUtils.get_interval_alleles(
+                intervals=intervals,
+                intervals_bed=intervals_bed,
+                allele_coords_bed=allele_coords_bed,
+                allele_id_format=allele_id_format,
+            )
+            log.info("[PAIRWISE] Interval constructed.")
+            rows_only_flag = False
+            if len(alleles) == 0:
+                raise IntervalError("No alleles found within the requested genomic intervals.")
         
         ## remove columns which have zero mass in the subset matrix
         if drop_zero_cols:
@@ -146,16 +214,17 @@ class ArdalGet:
                     for allele, idx in zip(alleles, allele_indices)
                     if col_freqs[idx] > 0.0
                 ]
+        
+        if has_interval_query and len(alleles) == 0:
+            raise IntervalError("No alleles remain in the interval subset after filtering.")
             
         log.info(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
 
         if rows_only_flag:
             allele_indices = []
         else:
-            allele_indices = sorted([self._headerUtils.encode_allele(allele) for allele in alleles], reverse=False)
-            if alleles:
-                index_to_allele = {self._headerUtils.encode_allele(allele): allele for allele in alleles}
-                alleles = [index_to_allele[idx] for idx in allele_indices]
+            ## keep caller order for column/header alignment
+            allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
 
         if chunk_size is not None and not rows_only_flag and allele_indices:
             if chunk_size <= 0:
@@ -182,6 +251,7 @@ class ArdalGet:
             out_matrix = np.zeros((n_rows, wpr), dtype=np.uint64)
             col_offset = 0
 
+            ## stitch packed chunks into full matrix
             for start in range(0, len(allele_indices), chunk_size):
                 chunk_indices = allele_indices[start:start + chunk_size]
                 if not chunk_indices:
@@ -195,6 +265,7 @@ class ArdalGet:
 
                 word_offset = col_offset // 64
                 bit_offset = col_offset % 64
+                ## align chunk words into output buffer
                 if bit_offset == 0:
                     out_matrix[:, word_offset:word_offset + chunk_packed.shape[1]] |= chunk_packed
                 else:
@@ -217,16 +288,12 @@ class ArdalGet:
             sub_matrix = out_matrix
             headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
 
-            if self._headerUtils.has_missing_mask():
-                per_guid_masks = {}
-                idx_map = {orig: new for new, orig in enumerate(allele_indices)}
-                for guid in guids:
-                    cols = self._headerUtils.get_guid_missing_mask(guid)
-                    remapped = []
-                    for c in cols:
-                        if c in idx_map:
-                            remapped.append(idx_map[c])
-                    per_guid_masks[guid] = remapped
+            per_guid_masks = self._subset_missing_masks(
+                guids=guids,
+                allele_indices=allele_indices,
+                rows_only_flag=False,
+            )
+            if per_guid_masks is not None:
                 headers_meta["column_masks"] = per_guid_masks
 
             headers_meta["meta"] = make_meta(sub_matrix,
@@ -239,7 +306,7 @@ class ArdalGet:
                 from ..Ardal import Ardal
                 return Ardal(data_source=[sub_matrix, headers_meta],
                              allele_id_format=self._headerUtils._allele_id_format,
-                             allele_positions=self._headerUtils.get_allele_positions(),
+                             allele_positions=self._subset_allele_posmap(alleles),
                              verbosity=child_verbosity,
                              quiet_init=child_quiet_init)
             return [sub_matrix, headers_meta]
@@ -251,6 +318,7 @@ class ArdalGet:
         if sub_matrix.ndim == 1:
             sub_matrix = sub_matrix.reshape(1, sub_matrix.shape[0])
 
+        ## unpack selected columns to dense bits
         if not rows_only_flag:
             allele_idx = np.asarray(allele_indices, dtype=np.uint64)
             word_idx = (allele_idx >> np.uint64(6)).astype(np.intp, copy=False)
@@ -263,21 +331,13 @@ class ArdalGet:
         headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
 
         ## propagate missing masks for subset
-        if self._headerUtils.has_missing_mask():
-            per_guid_masks = {}
-            if rows_only_flag:
-                for guid in guids:
-                    per_guid_masks[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
-            else:
-                ## remap column indices to the subset
-                idx_map = {orig: new for new, orig in enumerate(allele_indices)}
-                for guid in guids:
-                    cols = self._headerUtils.get_guid_missing_mask(guid)
-                    remapped = []
-                    for c in cols:
-                        if c in idx_map:
-                            remapped.append(idx_map[c])
-                    per_guid_masks[guid] = remapped
+        ## remap missing masks to subset indices
+        per_guid_masks = self._subset_missing_masks(
+            guids=guids,
+            allele_indices=allele_indices,
+            rows_only_flag=rows_only_flag,
+        )
+        if per_guid_masks is not None:
             headers_meta["column_masks"] = per_guid_masks
         
         if rows_only_flag and data_only:
@@ -297,7 +357,7 @@ class ArdalGet:
             from ..Ardal import Ardal
             return Ardal(data_source=[sub_matrix, headers_meta],
                          allele_id_format=self._headerUtils._allele_id_format,
-                         allele_positions=self._headerUtils.get_allele_positions(),
+                         allele_positions=self._subset_allele_posmap(alleles),
                          verbosity=child_verbosity,
                          quiet_init=child_quiet_init)
         else:
@@ -418,22 +478,65 @@ class ArdalGet:
         return self._headerUtils.meta
     
     
-    def row_masses( self ) -> dict:
+    def row_masses( self,
+                    as_dict : bool = False ) -> dict:
         """ Return the row masses.
         """
-        return self._matrix.getRowMasses()
+        if as_dict:
+            return dict(zip(self._headerUtils.headers["guids"], self._matrix.getRowMasses()))
+        else:
+            return self._matrix.getRowMasses()
     
     
-    def column_masses( self ) -> dict:
+    def column_masses( self,
+                       as_dict : bool = False ) -> dict:
         """ Return the col masses.
         """
-        return self._matrix.getColumnMasses()
+        if as_dict:
+            return dict(zip(self._headerUtils.headers["alleles"], self._matrix.getColumnMasses()))
+        else:
+            return self._matrix.getColumnMasses()
     
     
-    # def missing_sites( self ) -> dict:
-    #     """ Returns a dictionary of missing sites.
-    #     """
-    #     missing_sites = defaultdict(list)
-    #     for guid, site_idxs in self._headerUtils._guid_missing_sites.items():
-    #         missing_sites[guid] = [self._headerUtils._missing_site_keys.get(str(idx)) for idx in site_idxs]
-    #     return missing_sites
+    def missing_sites( self ) -> dict:
+        """Return per-GUID missing genomic sites from stored column masks.
+
+        Output values are unique site keys. If allele positions are available, keys are
+        returned as ``"chr:start"``; otherwise allele IDs are returned.
+        """
+        result = defaultdict(list)
+
+        if not self._headerUtils.has_missing_mask():
+            return dict(result)
+
+        allele_headers = self._headerUtils.headers.get("alleles", [])
+        allele_pos = self._headerUtils.get_allele_positions()
+
+        for guid in self._headerUtils.headers.get("guids", []):
+            raw_idxs = self._headerUtils.get_guid_missing_mask(guid)
+            site_keys = []
+            seen = set()
+
+            for idx in raw_idxs:
+                try:
+                    col = int(idx)
+                except (TypeError, ValueError):
+                    continue
+                if col < 0 or col >= len(allele_headers):
+                    continue
+
+                allele_id = allele_headers[col]
+                pos = allele_pos.get(allele_id)
+                if pos:
+                    chr_key, start = pos
+                    site_key = f"{chr_key}:{start}"
+                else:
+                    site_key = allele_id
+
+                if site_key not in seen:
+                    seen.add(site_key)
+                    site_keys.append(site_key)
+
+            result[guid] = site_keys
+
+        return dict(result)
