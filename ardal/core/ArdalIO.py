@@ -476,6 +476,15 @@ class ArdalIO:
         if not allele_id_format:
             raise ParameterError("allele_id_format is required to build an alignment.")
 
+        if ref is not None and not snp_only:
+            return self._make_reference_alignment(
+                output_prefix=output_prefix,
+                guids=guids,
+                ref=ref,
+                allele_id_format=allele_id_format,
+                out_directory=out_directory,
+            )
+
         pattern = self._headerUtils._check_allele_format_grammar(allele_id_format=allele_id_format)
         self._headerUtils.ensure_id_positions(allele_id_format)
         allele_position_map = self._headerUtils.get_allele_positions()
@@ -656,6 +665,200 @@ class ArdalIO:
                 description=description
             )
             records.append(record)
+
+        SeqIO.write(records, out_path, "fasta")
+        return out_path
+
+
+    def _make_reference_alignment( self,
+                                   output_prefix: str,
+                                   guids: list[str],
+                                   ref: str,
+                                   allele_id_format: str,
+                                   out_directory: str ) -> str:
+        from Bio import SeqIO, Seq, SeqRecord
+
+        pattern = self._headerUtils._check_allele_format_grammar(allele_id_format=allele_id_format)
+
+        if not os.path.exists(ref):
+            raise ParameterError(f"Reference FASTA not found: {ref}")
+
+        try:
+            ref_records = SeqIO.to_dict(SeqIO.parse(ref, "fasta"))
+        except Exception as exc:
+            raise MatrixWriteError(f"Failed to parse reference FASTA: {exc}") from exc
+
+        if not ref_records:
+            raise MatrixWriteError("Reference FASTA appears to be empty.")
+
+        ref_seqs: dict[str, str] = {
+            name: str(record.seq).upper()
+            for name, record in ref_records.items()
+        }
+        ref_seq_lists = {name: list(seq) for name, seq in ref_seqs.items()}
+        ref_default_chr = next(iter(ref_seqs.keys())) if len(ref_seqs) == 1 else None
+
+        self._headerUtils.ensure_id_positions(allele_id_format)
+        allele_position_map = self._headerUtils.get_allele_positions()
+        alleles = self._headerUtils.headers.get("alleles", [])
+
+        allele_info = [None] * len(alleles)
+        for idx, allele_id in enumerate(alleles):
+            coord = allele_position_map.get(allele_id)
+            chr_key = coord[0] if coord else None
+            start = coord[1] if coord else None
+
+            try:
+                dec_chr, dec_start, dec_end, ref_base, alt_base = self._headerUtils._decode_allele_position(
+                    allele_id=allele_id,
+                    pattern=pattern,
+                    allele_id_format=allele_id_format,
+                )
+            except ValueError:
+                dec_chr = None
+                dec_start = None
+                dec_end = None
+                ref_base = None
+                alt_base = None
+
+            if chr_key is None:
+                chr_key = dec_chr
+            if start is None:
+                start = dec_start
+
+            if start is None:
+                log.warning(f"Skipping allele '{allele_id}': missing position.")
+                continue
+
+            if chr_key is None:
+                if ref_default_chr is None:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': missing chromosome and reference has multiple sequences."
+                    )
+                    continue
+                chr_key = ref_default_chr
+
+            chr_key = str(chr_key)
+            if chr_key not in ref_seqs:
+                log.warning(
+                    f"Skipping allele '{allele_id}': chromosome '{chr_key}' not found in reference."
+                )
+                continue
+
+            alt_base = (alt_base or "").upper()
+            ref_base = (ref_base or "").upper()
+            if not alt_base:
+                log.warning(f"Skipping allele '{allele_id}': missing alt base.")
+                continue
+
+            if dec_end is not None:
+                length_start = dec_start if dec_start is not None else start
+                if length_start is not None and dec_end >= length_start:
+                    span_len = dec_end - length_start + 1
+                else:
+                    span_len = 0
+            elif ref_base:
+                span_len = len(ref_base)
+            else:
+                span_len = len(alt_base)
+
+            if span_len <= 0 or len(alt_base) != span_len:
+                log.warning(
+                    f"Skipping allele '{allele_id}': unsupported length change for non-SNP allele."
+                )
+                continue
+
+            ref_seq = ref_seqs[chr_key]
+            start_int = int(start)
+            pos_candidates = []
+            for pos in (start_int - 1, start_int):
+                if pos not in pos_candidates:
+                    pos_candidates.append(pos)
+            pos_candidates = [
+                pos for pos in pos_candidates
+                if 0 <= pos <= len(ref_seq) - span_len
+            ]
+            if not pos_candidates:
+                log.warning(
+                    f"Skipping allele '{allele_id}': position out of reference bounds."
+                )
+                continue
+
+            if ref_base:
+                match_pos = None
+                for pos in pos_candidates:
+                    if ref_seq[pos:pos + span_len] == ref_base:
+                        match_pos = pos
+                        break
+                if match_pos is None:
+                    log.warning(
+                        f"Skipping allele '{allele_id}': reference base mismatch at {chr_key}:{start}."
+                    )
+                    continue
+                pos0 = match_pos
+            else:
+                pos0 = pos_candidates[0]
+
+            allele_info[idx] = (chr_key, pos0, span_len, alt_base)
+
+        out_path = os.path.join(out_directory, f"{output_prefix}.fasta")
+        if os.path.exists(out_path):
+            raise MatrixWriteError(f"File '{out_path}' already exists.")
+
+        try:
+            ardal_version = version("ardal")
+        except PackageNotFoundError:
+            ardal_version = None
+
+        multi_contig = len(ref_records) > 1
+        records = []
+        for guid in guids:
+            guid_idx = self._headerUtils.encode_guid(guid)
+            allele_indices = self._matrix.getSetBitIndices(guid_idx, backend="auto")
+
+            guid_seq_lists = {name: seq[:] for name, seq in ref_seq_lists.items()}
+            applied_sites = {}
+
+            for allele_idx in allele_indices:
+                info = allele_info[int(allele_idx)]
+                if info is None:
+                    continue
+                chr_key, pos0, span_len, alt_base = info
+                site_key = (chr_key, pos0, span_len)
+                existing = applied_sites.get(site_key)
+                if existing is not None and existing != alt_base:
+                    log.warning(
+                        f"GUID '{guid}' has multiple alleles at {chr_key}:{pos0 + 1}. "
+                        f"Keeping '{existing}', skipping '{alt_base}'."
+                    )
+                    continue
+                applied_sites[site_key] = alt_base
+
+                seq_list = guid_seq_lists[chr_key]
+                if span_len == 1:
+                    seq_list[pos0] = alt_base
+                else:
+                    seq_list[pos0:pos0 + span_len] = list(alt_base)
+
+            for name, seq_list in guid_seq_lists.items():
+                record_id = f"{guid}|{name}" if multi_contig else guid
+                desc_parts = [
+                    f"length={len(seq_list)}",
+                    "snp_only=False",
+                    f"ref={ref}",
+                    f"chrom={name}",
+                ]
+                if ardal_version:
+                    desc_parts.append(f"ardal_version={ardal_version}")
+                description = " ".join(desc_parts)
+                records.append(
+                    SeqRecord.SeqRecord(
+                        Seq.Seq("".join(seq_list)),
+                        id=record_id,
+                        name=record_id,
+                        description=description,
+                    )
+                )
 
         SeqIO.write(records, out_path, "fasta")
         return out_path

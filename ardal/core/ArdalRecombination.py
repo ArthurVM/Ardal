@@ -55,8 +55,9 @@ def _recomb_worker(guid: str,
             emit[:, missing_slice] = 0.0
 
         ## run viterbi to assign populations
-        states = recomb._viterbi(emit, model["log_trans"], model["log_start"])
-        state_post = recomb._forward_backward_posteriors(emit, model["log_trans"], model["log_start"])
+        chr_log_trans = model["log_trans_by_chr"].get(chr_key, model["log_trans"])
+        states = recomb._viterbi(emit, chr_log_trans, model["log_start"])
+        state_post = recomb._forward_backward_posteriors(emit, chr_log_trans, model["log_start"])
 
         if return_loci:
             ## expand per locus assignments
@@ -127,7 +128,8 @@ class ArdalRecombination:
     
     
     def _build_ordered_snv_loci(self,
-                                allele_id_format: str) -> Tuple[List[int], List[int], List[str], Dict[str, Tuple[int, int]]]:
+                                allele_id_format: str,
+                                skip_telomere_kb: Union[int, float, None] = None) -> Tuple[List[int], List[int], List[str], Dict[str, Tuple[int, int]]]:
         ## collect valid snv loci and preserve allele indices
         allele_to_locus, _, _ = self._headerUtils.get_snv_lookup(allele_id_format=allele_id_format)
         invalid = np.uint32(np.iinfo(np.uint32).max)
@@ -160,10 +162,28 @@ class ArdalRecombination:
         ordered_pos: List[int] = []
         ordered_alleles: List[str] = []
         chr_slices: Dict[str, Tuple[int, int]] = {}
+        trim_bp = None if skip_telomere_kb is None else float(skip_telomere_kb) * 1000.0
+        telomere_trimmed = 0
+        if trim_bp is not None and trim_bp > 0.0:
+            log.warning(
+                "Applying skip_telomere_kb=%s. Proximal trimming uses absolute chromosome "
+                "position, but distal trimming is relative to the last observed locus on each "
+                "chromosome. This can be confounded by incomplete chromosome coverage or uneven "
+                "locus density.",
+                skip_telomere_kb,
+            )
 
         cursor = 0
         for chr_key in sorted(chr_groups.keys()):
             items = sorted(chr_groups[chr_key], key=lambda row: row[0])
+            if trim_bp is not None and trim_bp > 0.0 and items:
+                chr_end_pos = float(items[-1][0])
+                trimmed_items = [
+                    row for row in items
+                    if float(row[0]) > trim_bp and float(row[0]) <= chr_end_pos - trim_bp
+                ]
+                telomere_trimmed += len(items) - len(trimmed_items)
+                items = trimmed_items
             start = cursor
             for pos, idx, allele_id in items:
                 ordered_indices.append(idx)
@@ -174,6 +194,8 @@ class ArdalRecombination:
 
         if not ordered_indices:
             raise ParameterError("No SNV loci with positions were available for tract detection.")
+        if telomere_trimmed:
+            log.info(f"Trimmed {telomere_trimmed} loci from telomeric regions using skip_telomere_kb={skip_telomere_kb}.")
 
         return ordered_indices, ordered_pos, ordered_alleles, chr_slices
 
@@ -226,7 +248,8 @@ class ArdalRecombination:
         ptr[:, 0] = -1
 
         for t in range(1, n_sites):
-            scores = dp[:, t - 1][:, None] + log_trans
+            trans_t = log_trans[t - 1] if log_trans.ndim == 3 else log_trans
+            scores = dp[:, t - 1][:, None] + trans_t
             best_prev = np.argmax(scores, axis=0)
             dp[:, t] = scores[best_prev, np.arange(n_states)] + emit[:, t]
             ptr[:, t] = best_prev
@@ -262,12 +285,14 @@ class ArdalRecombination:
 
         alpha[:, 0] = log_start + emit[:, 0]
         for t in range(1, n_sites):
-            scores = alpha[:, t - 1][:, None] + log_trans
+            trans_t = log_trans[t - 1] if log_trans.ndim == 3 else log_trans
+            scores = alpha[:, t - 1][:, None] + trans_t
             alpha[:, t] = emit[:, t] + ArdalRecombination._logsumexp(scores, axis=0)
 
         beta[:, -1] = 0.0
         for t in range(n_sites - 2, -1, -1):
-            scores = log_trans + emit[:, t + 1][None, :] + beta[:, t + 1][None, :]
+            trans_t = log_trans[t] if log_trans.ndim == 3 else log_trans
+            scores = trans_t + emit[:, t + 1][None, :] + beta[:, t + 1][None, :]
             beta[:, t] = ArdalRecombination._logsumexp(scores, axis=1)
 
         log_norm = float(ArdalRecombination._logsumexp(alpha[:, -1], axis=0))
@@ -277,6 +302,43 @@ class ArdalRecombination:
         post_sum[post_sum == 0.0] = 1.0
         post /= post_sum
         return post
+
+
+    @staticmethod
+    def _build_distance_log_transitions(chr_slices: Dict[str, Tuple[int, int]],
+                                        ordered_pos: List[int],
+                                        n_states: int,
+                                        expected_tract_len: float,
+                                        eps: float) -> Dict[str, np.ndarray]:
+        """Build per-gap transition matrices using genomic distances between adjacent loci."""
+        log_trans_by_chr: Dict[str, np.ndarray] = {}
+        if n_states <= 1:
+            return log_trans_by_chr
+
+        denom = float(n_states - 1)
+        for chr_key, (start, end) in chr_slices.items():
+            chr_n_sites = end - start
+            if chr_n_sites <= 1:
+                log_trans_by_chr[chr_key] = np.zeros((0, n_states, n_states), dtype=np.float64)
+                continue
+
+            chr_pos = np.asarray(ordered_pos[start:end], dtype=np.float64)
+            gaps = np.diff(chr_pos)
+            gaps = np.maximum(gaps, 1.0)
+
+            p_switch = 1.0 - np.exp(-gaps / float(expected_tract_len))
+            p_switch = np.clip(p_switch, eps, 1.0 - eps)
+            stay = 1.0 - p_switch
+            switch = p_switch / denom
+
+            chr_log_trans = np.empty((gaps.size, n_states, n_states), dtype=np.float64)
+            chr_log_trans[:] = np.log(switch)[:, None, None]
+            for state_idx in range(n_states):
+                chr_log_trans[:, state_idx, state_idx] = np.log(stay)
+
+            log_trans_by_chr[chr_key] = chr_log_trans
+
+        return log_trans_by_chr
 
 
     @staticmethod
@@ -412,7 +474,7 @@ class ArdalRecombination:
                        anchor_pops : Dict, 
                        allele_id_format : Union[str, None] = None, 
                        guids : Union[List, None] = None, 
-                       expected_tract_len : int = 200, 
+                       expected_tract_len : Union[int, None] = None, 
                        min_tract_sites : int = 5, 
                        pseudocount : float = 0.5, 
                        return_loci : bool = False,
@@ -422,14 +484,16 @@ class ArdalRecombination:
                        cooc_enabled: bool = False,
                        cooc_threshold: float = 0.90,
                        cooc_partition: str = "global",
-                       cooc_window_size: Union[int, None] = None ) -> Dict[str, Dict[str, List[Dict[str, Union[str, int, float, Dict[str, float]]]]]]:
+                       cooc_window_size: Union[int, None] = None,
+                       expected_tract_sites: int = 200,
+                       skip_telomere_kb: Union[int, float, None] = None ) -> Dict[str, Dict[str, List[Dict[str, Union[str, int, float, Dict[str, float]]]]]]:
         """Detect ancestry tracts by assigning lineage along ordered SNV loci.
 
         Args:
             guids: Query GUIDs to segment.
             anchor_pops: Mapping of population name -> list of GUIDs.
             allele_id_format: Format string used to decode SNV loci.
-            expected_tract_len: Expected tract length in sites (controls switch penalty).
+            expected_tract_len: Expected tract length in genomic distance units between loci.
             min_tract_sites: Minimum tract length in sites for reporting.
             pseudocount: Pseudocount for allele frequency smoothing.
             return_loci: When True, return per-locus assignments alongside tracts.
@@ -440,6 +504,9 @@ class ArdalRecombination:
             cooc_threshold: Threshold passed to allele cooc computation.
             cooc_partition: Partitioning mode for co-occurrence weighting: global, chromosome, or window.
             cooc_window_size: Genomic window size used when cooc_partition='window'.
+            expected_tract_sites: Expected tract length in loci; preserves the legacy transition model.
+            skip_telomere_kb: Exclude loci in the first N kilobases from chromosome start
+                and the last N kilobases from the final observed locus on each chromosome.
 
         Returns:
             Dict keyed by GUID, each containing "windows" entries (and optional "loci")
@@ -452,8 +519,12 @@ class ArdalRecombination:
         self._headerUtils.check_guids(guids)
         if not anchor_pops or not isinstance(anchor_pops, dict):
             raise ParameterError("anchor_pops must be a non-empty dict of {population: [guids]}.")
-        if expected_tract_len < 1:
-            raise ParameterError("expected_tract_len must be at least 1.")
+        if expected_tract_len is not None and expected_tract_len < 1:
+            raise ParameterError("expected_tract_len must be at least 1 when provided.")
+        if expected_tract_sites < 1:
+            raise ParameterError("expected_tract_sites must be at least 1.")
+        if skip_telomere_kb is not None and skip_telomere_kb < 0:
+            raise ParameterError("skip_telomere_kb must be non-negative when provided.")
         if min_tract_sites < 1:
             raise ParameterError("min_tract_sites must be at least 1.")
         if pseudocount < 0:
@@ -475,7 +546,8 @@ class ArdalRecombination:
 
         ## build ordered snv loci
         ordered_indices, ordered_pos, ordered_alleles, chr_slices = self._build_ordered_snv_loci(
-            allele_id_format=allele_id_format
+            allele_id_format=allele_id_format,
+            skip_telomere_kb=skip_telomere_kb,
         )
 
         allele_idx_arr = np.asarray(ordered_indices, dtype=np.uint64)
@@ -509,13 +581,27 @@ class ArdalRecombination:
         if len(pop_names) == 1:
             log_trans = np.zeros((1, 1), dtype=np.float64)
             log_start = np.zeros(1, dtype=np.float64)
+            log_trans_by_chr: Dict[str, np.ndarray] = {}
         else:
-            p_switch = 1.0 / float(expected_tract_len)
-            p_switch = min(max(p_switch, eps), 1.0 - eps)
-            stay = 1.0 - p_switch
-            switch = p_switch / float(len(pop_names) - 1)
-            log_trans = np.full((len(pop_names), len(pop_names)), np.log(switch), dtype=np.float64)
-            np.fill_diagonal(log_trans, np.log(stay))
+            if expected_tract_len is None:
+                log.info(f"Using legacy site-count transition model with expected_tract_sites={expected_tract_sites}.")
+                p_switch = 1.0 / float(expected_tract_sites)
+                p_switch = min(max(p_switch, eps), 1.0 - eps)
+                stay = 1.0 - p_switch
+                switch = p_switch / float(len(pop_names) - 1)
+                log_trans = np.full((len(pop_names), len(pop_names)), np.log(switch), dtype=np.float64)
+                np.fill_diagonal(log_trans, np.log(stay))
+                log_trans_by_chr = {}
+            else:
+                log.info(f"Using genomic-distance transition model with expected_tract_len={expected_tract_len}.")
+                log_trans = np.zeros((len(pop_names), len(pop_names)), dtype=np.float64)
+                log_trans_by_chr = self._build_distance_log_transitions(
+                    chr_slices=chr_slices,
+                    ordered_pos=ordered_pos,
+                    n_states=len(pop_names),
+                    expected_tract_len=float(expected_tract_len),
+                    eps=eps,
+                )
             log_start = np.full(len(pop_names), -np.log(len(pop_names)), dtype=np.float64)
 
         ## build cooc weights once and fold them into emissions up front
@@ -577,6 +663,7 @@ class ArdalRecombination:
             "logp": logp,
             "log1p": log1p,
             "log_trans": log_trans,
+            "log_trans_by_chr": log_trans_by_chr,
             "log_start": log_start,
             "pop_names": pop_names,
             "cooc_weights": cooc_weights,
@@ -632,7 +719,7 @@ class ArdalRecombination:
                                 anchor_pops: Dict,
                                 allele_id_format: Union[str, None] = None,
                                 guids: Union[List, None] = None,
-                                expected_tract_len: int = 200,
+                                expected_tract_len: Union[int, None] = None,
                                 min_tract_sites: int = 5,
                                 pseudocount: float = 0.5,
                                 return_loci: bool = False,
@@ -642,7 +729,9 @@ class ArdalRecombination:
                                 cooc_enabled: bool = False,
                                 cooc_threshold: float = 0.95,
                                 cooc_partition: str = "global",
-                                cooc_window_size: Union[int, None] = None
+                                cooc_window_size: Union[int, None] = None,
+                                expected_tract_sites: int = 200,
+                                skip_telomere_kb: Union[int, float, None] = None
                                 ) -> Dict[str, Dict[str, List[Dict[str, Union[str, int, float, Dict[str, float]]]]]]:
         """LEGACY FUNCTION: Parallel recombination tract detection across GUIDs.
 
@@ -664,4 +753,6 @@ class ArdalRecombination:
             cooc_threshold=cooc_threshold,
             cooc_partition=cooc_partition,
             cooc_window_size=cooc_window_size,
+            expected_tract_sites=expected_tract_sites,
+            skip_telomere_kb=skip_telomere_kb,
         )

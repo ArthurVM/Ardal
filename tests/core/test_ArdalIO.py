@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import json
 import os
+from Bio import SeqIO
+
+from ardal import Ardal
 
 
 def test_to_dataframe(io_component, test_data_mem):
@@ -150,3 +153,39 @@ def test_write_metadata_column_masks_format(hybrid_matrix, headers, meta, tmp_pa
     assert payload["column_masks"]["GUID1"] == [0, 7]
     assert payload["column_masks"]["GUID2"] == [0]
     assert payload["column_masks"]["GUID10"] == []
+
+
+def test_make_alignment_non_snp_uses_reference_sequence(tmp_path):
+    matrix = np.asarray(
+        [
+            [1, 0],
+            [0, 1],
+        ],
+        dtype=np.uint8,
+    )
+    headers = {
+        "guids": ["GUID1", "GUID2"],
+        "alleles": ["chr1.2.A.T", "chr1.5.A.G"],
+    }
+
+    ardal = Ardal(
+        data_source=[matrix, headers],
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+        quiet_init=True,
+    )
+
+    ref_path = tmp_path / "ref.fa"
+    ref_path.write_text(">chr1\nAAAAAA\n")
+
+    out_path = ardal.io.make_alignment(
+        output_prefix="alignment",
+        ref=str(ref_path),
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+        out_directory=str(tmp_path),
+        snp_only=False,
+    )
+
+    records = list(SeqIO.parse(out_path, "fasta"))
+    assert [record.id for record in records] == ["GUID1", "GUID2"]
+    assert str(records[0].seq) == "ATAAAA"
+    assert str(records[1].seq) == "AAAAGA"

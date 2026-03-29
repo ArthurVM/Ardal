@@ -9,7 +9,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
     
 def read_version() -> str:
-    """Resolve the package version from a single source of truth."""
+    """Resolve the package version"""
     env_version = os.environ.get("ARDAL_VERSION")
     if env_version:
         return env_version
@@ -26,7 +26,7 @@ def read_version() -> str:
             if match:
                 return match.group(1)
 
-    return "0.3.0-alpha"
+    return "0.4.0"
 
 ext_modules = [
     Extension(

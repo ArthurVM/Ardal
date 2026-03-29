@@ -29,12 +29,12 @@ class ArdalParser:
     """
     Parses Ardal inputs:
       - Dense: CSV, Parquet, NPY/JSON, NPZ/JSON
-      - Bitpacked: BIN/JSON
+      - Bitpacked: BIN/JSON, BIN.ZST/JSON
 
     Returns:
       self.matrix  -> np.ndarray
         - dense: shape (n_rows, n_cols), dtype arbitrary
-        - bitpack: memmap '<u8', shape (n_rows, words_per_row)
+        - bitpack: memmap '<u8' or in-memory '<u8', shape (n_rows, words_per_row)
       self.headers -> Dict with "guids", "alleles"
       self.meta    -> Dict (bitpack only), else {}
       self.is_bitpacked -> bool
@@ -116,10 +116,9 @@ class ArdalParser:
                 a, b = Path(a), Path(b)
                 if not a.exists() or not b.exists():
                     raise FileNotFoundError(f"One or more file paths do not exist: {a}, {b}")
-                exts = [a.suffix.lower(), b.suffix.lower()]
-                                
                 meta_path = a if a.suffix.lower() in ACCEPTED_META_EXTENSIONS else b
                 mat_path  = b if meta_path == a else a
+                matrix_format = self._matrix_path_format(mat_path)
 
                 ## bitpack pair
                 ## 1. load pair
@@ -127,8 +126,8 @@ class ArdalParser:
                 ## 3. validate missing structures
                 ## 4. define file format
                 ## 5. construct variables
-                if exts[0] == ".bin":
-                    log.info(f"Detected matrix format: .bit")
+                if matrix_format in (".bin", ".bin.zst"):
+                    log.info(f"Detected matrix format: {matrix_format}")
                     matrix, headers, meta, missing_raw = self._load_bitpack_pair(meta_path, mat_path)
                     self._validate_bitpack(matrix, headers, meta)
                     self.missing_masks = self._normalise_missing_masks(missing_raw, headers)
@@ -140,7 +139,7 @@ class ArdalParser:
                     return 0
 
                 ## dense pairs
-                if exts[0] == ".npy":
+                if matrix_format == ".npy":
                     log.info(f"Detected matrix format: .npy")
                     matrix, headers, meta, missing_raw = self._load_npy_pair(meta_path, mat_path)
                     self._validate_dense_pair(matrix, headers)
@@ -151,7 +150,7 @@ class ArdalParser:
                     self.file_format = "npy"
                     return 0
 
-                if exts[0] == ".npz":
+                if matrix_format == ".npz":
                     log.info(f"Detected matrix format: .npz")
                     matrix, headers, meta, missing_raw = self._load_npz_pair(meta_path, mat_path)
                     self._validate_dense_pair(matrix, headers)
@@ -162,10 +161,11 @@ class ArdalParser:
                     self.file_format = "npz"
                     return 0
 
-                raise UnsupportedFormatError(f"Unrecognized file pair: {a.suffix}, {b.suffix}")
+                raise UnsupportedFormatError(f"Unrecognized file pair: {a.name}, {b.name}")
 
             raise MalformedInputError(
-                "If list input, it must be [headers::Dict, matrix::np.ndarray] or [headers.json, matrix.bin] or dense pairs."
+                "If list input, it must be [headers::Dict, matrix::np.ndarray] or "
+                "[headers.json, matrix.bin|matrix.bin.zst] or dense pairs."
             )
 
         ## single object
@@ -192,7 +192,7 @@ class ArdalParser:
                 self.missing_masks = self._normalise_missing_masks(missing_obj, self.headers)
                 return 0
 
-            if suffix in (".npy", ".npz", ".bin"):
+            if suffix in (".npy", ".npz", ".bin", ".zst"):
                 raise MalformedInputError("Binary file provided without matching headers.json; provide both.")
 
             raise UnsupportedFormatError(f"Unsupported file extension: {p.suffix}")
@@ -286,13 +286,13 @@ class ArdalParser:
         supported_formats = ["ardal.dense.v1", "ardal.bitpack.v1", "ardal.bin.v1", "ardal.npy.v1", "ardal.npz.v1"]
         
         if not isinstance(mmap_arr, np.ndarray):
-            raise LoadMatrixError("Bitpack matrix must be a NumPy memmap.")
+            raise LoadMatrixError("Bitpack matrix must be a NumPy array.")
         if not self._is_le_uint64(mmap_arr):
             raise LoadMatrixError(f"Bitpack dtype must be little-endian uint64 ('<u8'), got {mmap_arr.dtype}.")
         if mmap_arr.ndim != 2:
             raise LoadMatrixError("Bitpack matrix must be 2-dimensional.")
         if not mmap_arr.flags['C_CONTIGUOUS']:
-            raise LoadMatrixError("Bitpack memmap must be C-contiguous.")
+            raise LoadMatrixError("Bitpack matrix must be C-contiguous.")
 
         n_rows, words = mmap_arr.shape
 
@@ -313,7 +313,7 @@ class ArdalParser:
         if words != expected_words:
             raise LoadMatrixError(f"words_per_row mismatch: header {expected_words}, file {words}")
 
-        ## file size check if loaded from a .bin
+        ## file size check if loaded from an uncompressed .bin
         bin_resolved = meta_raw.get("data_file_resolved")
         if bin_resolved:
             bin_path = Path(bin_resolved)
@@ -321,6 +321,8 @@ class ArdalParser:
             size = bin_path.stat().st_size
             if size != expected_bytes:
                 raise LoadMatrixError(f"Binary size mismatch: expected {expected_bytes}, got {size}")
+        else:
+            expected_bytes = n_rows * expected_words * 8
 
         ## headers check
         if not isinstance(headers_raw, Dict):
@@ -342,10 +344,13 @@ class ArdalParser:
         ## optional integrity check
         want_hash = self.verify_hash and meta_raw.get("data_sha256")
         if want_hash:
-            digest = self._sha256_file(bin_path)
+            hash_target = meta_raw.get("data_file_resolved") or meta_raw.get("compressed_data_file_resolved")
+            if not hash_target:
+                raise LoadMatrixError("Hash verification requested but no matrix file path was recorded.")
+            digest = self._sha256_file(Path(hash_target))
             if digest != meta_raw["data_sha256"]:
                 raise LoadMatrixError(
-                    f"SHA256 mismatch for {bin_path}: expected {self.meta['data_sha256']} got {digest}"
+                    f"SHA256 mismatch for {hash_target}: expected {self.meta['data_sha256']} got {digest}"
                 )
             
     
@@ -408,7 +413,7 @@ class ArdalParser:
     ## ------------- loaders -------------
     def _load_bitpack_pair( self,
                             header_meta_path: Path,
-                            bin_path: Path ) -> Tuple[np.memmap, Dict, Dict, Union[Dict, None]]:
+                            bin_path: Path ) -> Tuple[np.ndarray, Dict, Dict, Union[Dict, None]]:
         """ Load bitpacked matrix/headers meta pair
         """
         ## parse and load header metadata
@@ -416,21 +421,33 @@ class ArdalParser:
         
         ## check metadata and the input binary are congruous
         hdr_bin = meta_raw.get("matrix_file") or meta_raw.get("data_file")
-        if hdr_bin and Path(hdr_bin).name != bin_path.name:
+        matrix_format = self._matrix_path_format(bin_path)
+        hdr_name = Path(hdr_bin).name if hdr_bin else None
+        compressed_match = (
+            matrix_format == ".bin.zst"
+            and hdr_name == bin_path.with_suffix("").name
+        )
+        if hdr_name and hdr_name != bin_path.name and not compressed_match:
             log.warning(f"Header data_file='{hdr_bin}' != provided bin '{bin_path.name}'. Using provided bin.")
-            
-        meta_raw["data_file_resolved"] = str(bin_path.resolve())
 
         n_rows = int(meta_raw["n_rows"])
         words  = int(meta_raw["words_per_row"])
 
-        ## memmap the array
-        try:
-            mmap_arr = np.memmap(bin_path, mode="r", dtype=np.dtype("<u8"), shape=(n_rows, words), order="C")
-        except Exception as e:
-            raise LoadMatrixError(f"Failed to load packed matrix: {e}")
+        if matrix_format == ".bin":
+            meta_raw["data_file_resolved"] = str(bin_path.resolve())
+            ## memmap the array
+            try:
+                mmap_arr = np.memmap(bin_path, mode="r", dtype=np.dtype("<u8"), shape=(n_rows, words), order="C")
+            except Exception as e:
+                raise LoadMatrixError(f"Failed to load packed matrix: {e}")
+            return mmap_arr, headers_raw, meta_raw, missing_raw
+
+        if matrix_format == ".bin.zst":
+            meta_raw["compressed_data_file_resolved"] = str(bin_path.resolve())
+            meta_raw["data_file_resolved"] = None
+            return self._load_bitpack_zstd(bin_path, n_rows, words), headers_raw, meta_raw, missing_raw
         
-        return mmap_arr, headers_raw, meta_raw, missing_raw
+        raise UnsupportedFormatError(f"Unsupported bitpacked matrix format: {bin_path.name}")
     
     
     def _load_npy_pair( self,
@@ -654,6 +671,47 @@ class ArdalParser:
                              matrix_file=None)
     
     
+    @staticmethod
+    def _matrix_path_format(path: Path) -> str:
+        suffixes = [suffix.lower() for suffix in path.suffixes]
+        if suffixes[-2:] == [".bin", ".zst"]:
+            return ".bin.zst"
+        if suffixes:
+            return suffixes[-1]
+        return ""
+
+
+    def _load_bitpack_zstd(self,
+                           bin_path: Path,
+                           n_rows: int,
+                           words: int) -> np.ndarray:
+        zstandard = require_package(
+            "zstandard",
+            error_message="The package 'zstandard' is required to load .bin.zst matrices. Install it with `pip install zstandard`."
+        )
+        expected_bytes = n_rows * words * 8
+        dctx = zstandard.ZstdDecompressor()
+        data = bytearray()
+
+        try:
+            with open(bin_path, "rb") as fin, dctx.stream_reader(fin) as reader:
+                while True:
+                    chunk = reader.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+        except Exception as e:
+            raise LoadMatrixError(f"Failed to decompress packed matrix '{bin_path.name}': {e}")
+
+        if len(data) != expected_bytes:
+            raise LoadMatrixError(
+                f"Decompressed binary size mismatch for {bin_path.name}: expected {expected_bytes}, got {len(data)}"
+            )
+
+        arr = np.frombuffer(data, dtype=np.dtype("<u8")).reshape((n_rows, words))
+        return np.ascontiguousarray(arr)
+
+
     @staticmethod
     def _is_le_uint64( arr: np.ndarray ) -> bool:
         """True if dtype is little-endian uint64 (<u8) or native-little uint64."""
