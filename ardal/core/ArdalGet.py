@@ -4,11 +4,11 @@ This module provides functionality for retrieving and manipulating allele matric
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from typing import Union, Tuple, List, TYPE_CHECKING
+from typing import Any, Dict, Union, Tuple, List, TYPE_CHECKING
 
 from ..utils.misc import require_package
 from ..utils.decorators import check_thread_count, check_alleles_list, check_guids_list
-from ..utils.exceptions import ParameterError, RoaringError
+from ..utils.exceptions import ParameterError, RoaringError, IntervalError
 from ..utils.logger import get_logger
 from ..utils.make_meta import make_meta
 
@@ -29,6 +29,129 @@ class ArdalGet:
         self._matrix = hybrid_matrix
         self.roaring = roaring_enabled
 
+    def _subset_missing_masks(self,
+                              guids: List[str],
+                              allele_indices: List[int],
+                              rows_only_flag: bool) -> Union[dict, None]:
+        """Build per-GUID missing masks aligned to a subset, or None if unavailable."""
+        if not self._headerUtils.has_missing_mask():
+            return None
+
+        per_guid_masks = {}
+        if rows_only_flag:
+            for guid in guids:
+                per_guid_masks[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
+            return per_guid_masks
+
+        idx_map = {orig: new for new, orig in enumerate(allele_indices)}
+        for guid in guids:
+            cols = self._headerUtils.get_guid_missing_mask(guid)
+            remapped = []
+            for c in cols:
+                if c in idx_map:
+                    remapped.append(idx_map[c])
+            per_guid_masks[guid] = remapped
+        return per_guid_masks
+
+
+    def _subset_allele_posmap(self, alleles: List[str]) -> dict:
+        """Build an allele-position map limited to alleles present in the subset."""
+        parent_pos_map = self._headerUtils.get_allele_positions()
+        if not parent_pos_map:
+            return {}
+
+        subset_pos_map = defaultdict(lambda: defaultdict(list))
+        for allele in alleles:
+            coord = parent_pos_map.get(allele)
+            if coord is None:
+                continue
+            chr_key, pos = coord
+            if chr_key is None or pos is None:
+                continue
+            subset_pos_map[str(chr_key)][int(pos)].append(allele)
+
+        return subset_pos_map
+
+
+    def _build_subset_child(self,
+                            sub_matrix: np.ndarray,
+                            headers_meta: dict,
+                            alleles: List[str],
+                            child_verbosity: str,
+                            child_quiet_init: bool,
+                            child_ardal_kwargs: Union[Dict[str, Any], None]) -> "Ardal":
+        """Construct a child Ardal instance for subset outputs."""
+        from ..Ardal import Ardal
+
+        if child_ardal_kwargs is not None and not isinstance(child_ardal_kwargs, dict):
+            raise ParameterError("child_ardal_kwargs must be a dictionary when provided.")
+
+        ardal_kwargs: Dict[str, Any] = {}
+        if child_ardal_kwargs:
+            ardal_kwargs.update(child_ardal_kwargs)
+
+        ardal_kwargs.setdefault("allele_id_format", self._headerUtils._allele_id_format)
+        ardal_kwargs.setdefault("allele_positions", self._subset_allele_posmap(alleles))
+
+        if child_verbosity != "silent" or "verbosity" not in ardal_kwargs:
+            ardal_kwargs["verbosity"] = child_verbosity
+        if child_quiet_init is not True or "quiet_init" not in ardal_kwargs:
+            ardal_kwargs["quiet_init"] = child_quiet_init
+
+        return Ardal(data_source=[sub_matrix, headers_meta], **ardal_kwargs)
+
+    
+    def _subset_chunk( self,
+                       guids: List[str],
+                       guid_indices: List[int],
+                       alleles: List[str],
+                       allele_indices: List[int],
+                       data_only: bool,
+                       threads: int,
+                       child_verbosity: str,
+                       child_quiet_init: bool,
+                       child_ardal_kwargs: Union[Dict[str, Any], None]
+                       ) -> Union[Tuple[np.ndarray, dict], "Ardal"]:
+        """Packed subset helper used for chunked extraction."""
+
+        ## rows-only fast path
+        rows_only_flag = len(allele_indices) == 0
+
+        if rows_only_flag:
+            sub_matrix = self._matrix.getSubsetPackedMatrix_rows(guid_indices, threads)
+        else:
+            sub_matrix = self._matrix.getSubsetPackedMatrix(guid_indices, allele_indices, threads)
+        if sub_matrix.dtype.byteorder not in ('<', '='):
+            sub_matrix = sub_matrix.byteswap().newbyteorder('<')
+        sub_matrix = np.asarray(sub_matrix, dtype=np.uint64, copy=False)
+        if sub_matrix.ndim == 1:
+            sub_matrix = sub_matrix.reshape(1, sub_matrix.shape[0])
+
+        headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
+
+        per_guid_masks = self._subset_missing_masks(
+            guids=guids,
+            allele_indices=allele_indices,
+            rows_only_flag=rows_only_flag,
+        )
+        if per_guid_masks is not None:
+            headers_meta["column_masks"] = per_guid_masks
+
+        headers_meta["meta"] = make_meta(sub_matrix,
+                                         headers_meta["headers"],
+                                         generated_by="ardal::subset",
+                                         format_name="ardal.bitpack.v1",
+                                         matrix_file=None)
+
+        if not data_only:
+            return self._build_subset_child(sub_matrix=sub_matrix,
+                                            headers_meta=headers_meta,
+                                            alleles=alleles,
+                                            child_verbosity=child_verbosity,
+                                            child_quiet_init=child_quiet_init,
+                                            child_ardal_kwargs=child_ardal_kwargs)
+        return [sub_matrix, headers_meta]
+
     
     @check_thread_count
     @check_guids_list
@@ -36,25 +159,49 @@ class ArdalGet:
     def subset( self,
                 guids : List[str] = [],
                 alleles : List[str] = [],
+                intervals : Union[list, None] = None,
+                intervals_bed : Union[str, None] = None,
+                allele_coords_bed : Union[str, None] = None,
+                allele_id_format : Union[str, None] = None,
+                drop_zero_cols : bool = True,
+                chunk_size : Union[int, None] = None,
+                yield_chunks : bool = False,
                 data_only : bool = False,
                 threads : int = 1,
                 child_verbosity : str = "silent",
-                child_quiet_init : bool = True
-                ) -> Union[Tuple[np.ndarray, dict], "Ardal"]:
+                child_quiet_init : bool = True,
+                child_ardal_kwargs : Union[Dict[str, Any], None] = None
+                ) -> Union[Tuple[np.ndarray, dict], "Ardal", List]:
         """ Take a list of GUIDs and subset the allele matrix to include only these GUIDs, allowing for standard operations.
+        drop_zero_cols removes alleles with zero frequency in the selected GUIDs.
+        chunk_size enables packed column chunking to reduce peak memory.
+        child_ardal_kwargs forwards additional keyword arguments to child Ardal() construction.
+        yield_chunks returns a generator over chunked outputs.
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
-        from ..Ardal import Ardal
+        has_interval_query = intervals is not None or intervals_bed is not None
 
         ## check input
-        if len(guids) == 0 and len(alleles) == 0:
-            raise ParameterError("guids and alleles cannot both be empty.")
+        if len(guids) == 0 and len(alleles) == 0 and intervals == None and intervals_bed == None:
+            raise ParameterError("Please provide alleles or guids or intervals to perform a subset.")
+        
+        if alleles and has_interval_query:
+            raise ParameterError("alleles argument is mutually exclusive with intervals/intervals_bed arguments.")
+        
+        if intervals and intervals_bed:
+            raise ParameterError("intervals and intervals_bed arguments are mutually exclusive.")
+        
+        if allele_coords_bed and not has_interval_query:
+            raise ParameterError("Either intervals or intervals_bed must be provided when allele_coords_bed is not None.")
 
         ## check GUIDs
         if guids:
             self._headerUtils.check_guids(guids)
         else:
             guids = list(self._headerUtils.headers["guids"])
+
+        ## keep caller order for row/header alignment
+        guid_indices = [self._headerUtils.encode_guid(guid) for guid in guids]
 
         ## check alleles
         if alleles:
@@ -65,11 +212,137 @@ class ArdalGet:
             alleles = list(self._headerUtils.headers["alleles"])
             rows_only_flag = True
             
+        ## get interval alleles
+        if has_interval_query:
+            if allele_id_format == None:
+                allele_id_format = self._headerUtils._allele_id_format
+            log.info("[PAIRWISE] Constructing intervals")
+            alleles = self._headerUtils.get_interval_alleles(
+                intervals=intervals,
+                intervals_bed=intervals_bed,
+                allele_coords_bed=allele_coords_bed,
+                allele_id_format=allele_id_format,
+            )
+            log.info("[PAIRWISE] Interval constructed.")
+            rows_only_flag = False
+            if len(alleles) == 0:
+                raise IntervalError("No alleles found within the requested genomic intervals.")
+        
+        ## remove columns which have zero mass in the subset matrix
+        if drop_zero_cols:
+            col_freqs = self._matrix.colFrequency(guid_indices)
+            if rows_only_flag:
+                alleles = [
+                    allele
+                    for allele, freq in zip(self._headerUtils.headers["alleles"], col_freqs)
+                    if freq > 0.0
+                ]
+                rows_only_flag = False
+            else:
+                allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
+                alleles = [
+                    allele
+                    for allele, idx in zip(alleles, allele_indices)
+                    if col_freqs[idx] > 0.0
+                ]
+        
+        if has_interval_query and len(alleles) == 0:
+            raise IntervalError("No alleles remain in the interval subset after filtering.")
+            
         log.info(f"Subsetting the {self._headerUtils.n_guids}x{self._headerUtils.n_alleles} matrix to {len(guids)}x{len(alleles)}")
-        
-        guid_indices = sorted([self._headerUtils.encode_guid(guid) for guid in guids], reverse=False)
-        allele_indices = sorted([self._headerUtils.encode_allele(allele) for allele in alleles], reverse=False) if not rows_only_flag else []
-        
+
+        if rows_only_flag:
+            allele_indices = []
+        else:
+            ## keep caller order for column/header alignment
+            allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
+
+        if chunk_size is not None and not rows_only_flag and allele_indices:
+            if chunk_size <= 0:
+                raise ParameterError("chunk_size must be a positive integer.")
+
+            def _iter_chunks():
+                for start in range(0, len(allele_indices), chunk_size):
+                    chunk_indices = allele_indices[start:start + chunk_size]
+                    chunk_alleles = alleles[start:start + chunk_size]
+                    yield self._subset_chunk(guids=guids,
+                                             guid_indices=guid_indices,
+                                             alleles=chunk_alleles,
+                                             allele_indices=chunk_indices,
+                                             data_only=data_only,
+                                             threads=threads,
+                                             child_verbosity=child_verbosity,
+                                             child_quiet_init=child_quiet_init,
+                                             child_ardal_kwargs=child_ardal_kwargs)
+
+            if yield_chunks:
+                return _iter_chunks()
+            n_rows = len(guid_indices)
+            n_cols = len(allele_indices)
+            wpr = (n_cols + 63) // 64
+            out_matrix = np.zeros((n_rows, wpr), dtype=np.uint64)
+            col_offset = 0
+
+            ## stitch packed chunks into full matrix
+            for start in range(0, len(allele_indices), chunk_size):
+                chunk_indices = allele_indices[start:start + chunk_size]
+                if not chunk_indices:
+                    continue
+                chunk_packed = self._matrix.getSubsetPackedMatrix(guid_indices, chunk_indices, threads)
+                if chunk_packed.dtype.byteorder not in ('<', '='):
+                    chunk_packed = chunk_packed.byteswap().newbyteorder('<')
+                chunk_packed = np.asarray(chunk_packed, dtype=np.uint64, copy=False)
+                if chunk_packed.ndim == 1:
+                    chunk_packed = chunk_packed.reshape(1, chunk_packed.shape[0])
+
+                word_offset = col_offset // 64
+                bit_offset = col_offset % 64
+                ## align chunk words into output buffer
+                if bit_offset == 0:
+                    out_matrix[:, word_offset:word_offset + chunk_packed.shape[1]] |= chunk_packed
+                else:
+                    lo = np.left_shift(chunk_packed, np.uint64(bit_offset))
+                    out_matrix[:, word_offset:word_offset + lo.shape[1]] |= lo
+                    carry = np.right_shift(chunk_packed, np.uint64(64 - bit_offset))
+                    dst_start = word_offset + 1
+                    dst_end = min(dst_start + carry.shape[1], out_matrix.shape[1])
+                    if dst_start < dst_end:
+                        out_matrix[:, dst_start:dst_end] |= carry[:, :dst_end - dst_start]
+
+                col_offset += len(chunk_indices)
+
+            if wpr > 0:
+                tail_bits = n_cols % 64
+                if tail_bits:
+                    tail_mask = (np.uint64(1) << np.uint64(tail_bits)) - np.uint64(1)
+                    out_matrix[:, -1] &= tail_mask
+
+            sub_matrix = out_matrix
+            headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
+
+            per_guid_masks = self._subset_missing_masks(
+                guids=guids,
+                allele_indices=allele_indices,
+                rows_only_flag=False,
+            )
+            if per_guid_masks is not None:
+                headers_meta["column_masks"] = per_guid_masks
+
+            headers_meta["meta"] = make_meta(sub_matrix,
+                                             headers_meta["headers"],
+                                             generated_by="ardal::subset",
+                                             format_name="ardal.bitpack.v1",
+                                             matrix_file=None)
+
+            if not data_only:
+                return self._build_subset_child(sub_matrix=sub_matrix,
+                                                headers_meta=headers_meta,
+                                                alleles=alleles,
+                                                child_verbosity=child_verbosity,
+                                                child_quiet_init=child_quiet_init,
+                                                child_ardal_kwargs=child_ardal_kwargs)
+            return [sub_matrix, headers_meta]
+
         sub_matrix = self._matrix.getSubsetPackedMatrix_rows(guid_indices, threads)
         if sub_matrix.dtype.byteorder not in ('<', '='):
             sub_matrix = sub_matrix.byteswap().newbyteorder('<')
@@ -77,6 +350,7 @@ class ArdalGet:
         if sub_matrix.ndim == 1:
             sub_matrix = sub_matrix.reshape(1, sub_matrix.shape[0])
 
+        ## unpack selected columns to dense bits
         if not rows_only_flag:
             allele_idx = np.asarray(allele_indices, dtype=np.uint64)
             word_idx = (allele_idx >> np.uint64(6)).astype(np.intp, copy=False)
@@ -85,25 +359,17 @@ class ArdalGet:
             shifted = np.right_shift(selected_words, bit_offsets[np.newaxis, :])
             sub_matrix = (shifted & np.uint64(1)).astype(np.uint8, copy=False)
 
-        # base headers/meta container
+        ## base headers/meta container
         headers_meta: dict = {"headers": {"guids": guids, "alleles": alleles}}
 
-        # propagate missing masks for subset
-        if self._headerUtils.has_missing_mask():
-            per_guid_masks = {}
-            if rows_only_flag:
-                for guid in guids:
-                    per_guid_masks[guid] = list(self._headerUtils.get_guid_missing_mask(guid))
-            else:
-                ## remap column indices to the subset
-                idx_map = {orig: new for new, orig in enumerate(allele_indices)}
-                for guid in guids:
-                    cols = self._headerUtils.get_guid_missing_mask(guid)
-                    remapped = []
-                    for c in cols:
-                        if c in idx_map:
-                            remapped.append(idx_map[c])
-                    per_guid_masks[guid] = remapped
+        ## propagate missing masks for subset
+        ## remap missing masks to subset indices
+        per_guid_masks = self._subset_missing_masks(
+            guids=guids,
+            allele_indices=allele_indices,
+            rows_only_flag=rows_only_flag,
+        )
+        if per_guid_masks is not None:
             headers_meta["column_masks"] = per_guid_masks
         
         if rows_only_flag and data_only:
@@ -111,7 +377,7 @@ class ArdalGet:
             dense_full = self._matrix.getBitMatrix()
             sub_matrix = dense_full[guid_indices, :].astype(np.uint8, copy=False)
 
-        # construct metadata for child instance
+        ## construct metadata for child instance
         headers_meta["meta"] = make_meta(sub_matrix,
                                          headers_meta["headers"],
                                          generated_by="ardal::subset",
@@ -120,11 +386,12 @@ class ArdalGet:
 
         if not data_only:
             ## return an ardal object initialised with the subset data
-            return Ardal(data_source=[sub_matrix, headers_meta],
-                         allele_id_format=self._headerUtils._allele_id_format,
-                         allele_positions=self._headerUtils.get_allele_positions(),
-                         verbosity=child_verbosity,
-                         quiet_init=child_quiet_init)
+            return self._build_subset_child(sub_matrix=sub_matrix,
+                                            headers_meta=headers_meta,
+                                            alleles=alleles,
+                                            child_verbosity=child_verbosity,
+                                            child_quiet_init=child_quiet_init,
+                                            child_ardal_kwargs=child_ardal_kwargs)
         else:
             ## return the new subset matrix/JSON pair
             return [sub_matrix, headers_meta]
@@ -243,22 +510,65 @@ class ArdalGet:
         return self._headerUtils.meta
     
     
-    def row_masses( self ) -> dict:
+    def row_masses( self,
+                    as_dict : bool = False ) -> dict:
         """ Return the row masses.
         """
-        return self._matrix.getRowMasses()
+        if as_dict:
+            return dict(zip(self._headerUtils.headers["guids"], self._matrix.getRowMasses()))
+        else:
+            return self._matrix.getRowMasses()
     
     
-    def column_masses( self ) -> dict:
+    def column_masses( self,
+                       as_dict : bool = False ) -> dict:
         """ Return the col masses.
         """
-        return self._matrix.getColumnMasses()
+        if as_dict:
+            return dict(zip(self._headerUtils.headers["alleles"], self._matrix.getColumnMasses()))
+        else:
+            return self._matrix.getColumnMasses()
     
     
-    # def missing_sites( self ) -> dict:
-    #     """ Returns a dictionary of missing sites.
-    #     """
-    #     missing_sites = defaultdict(list)
-    #     for guid, site_idxs in self._headerUtils._guid_missing_sites.items():
-    #         missing_sites[guid] = [self._headerUtils._missing_site_keys.get(str(idx)) for idx in site_idxs]
-    #     return missing_sites
+    def missing_sites( self ) -> dict:
+        """Return per-GUID missing genomic sites from stored column masks.
+
+        Output values are unique site keys. If allele positions are available, keys are
+        returned as ``"chr:start"``; otherwise allele IDs are returned.
+        """
+        result = defaultdict(list)
+
+        if not self._headerUtils.has_missing_mask():
+            return dict(result)
+
+        allele_headers = self._headerUtils.headers.get("alleles", [])
+        allele_pos = self._headerUtils.get_allele_positions()
+
+        for guid in self._headerUtils.headers.get("guids", []):
+            raw_idxs = self._headerUtils.get_guid_missing_mask(guid)
+            site_keys = []
+            seen = set()
+
+            for idx in raw_idxs:
+                try:
+                    col = int(idx)
+                except (TypeError, ValueError):
+                    continue
+                if col < 0 or col >= len(allele_headers):
+                    continue
+
+                allele_id = allele_headers[col]
+                pos = allele_pos.get(allele_id)
+                if pos:
+                    chr_key, start = pos
+                    site_key = f"{chr_key}:{start}"
+                else:
+                    site_key = allele_id
+
+                if site_key not in seen:
+                    seen.add(site_key)
+                    site_keys.append(site_key)
+
+            result[guid] = site_keys
+
+        return dict(result)

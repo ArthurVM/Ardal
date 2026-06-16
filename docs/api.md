@@ -120,9 +120,10 @@ Matrix subsetting, metadata inspection, and conversion helpers.
       threads: int = 1,
       child_verbosity: str = "silent",
       child_quiet_init: bool = True,
+      child_ardal_kwargs: Optional[Dict[str, Any]] = None,
   )
   ```
-  Subset by GUID and/or allele. Returns a new `Ardal` instance unless `data_only=True`, where it returns `[matrix, headers]`. Accepts packed backends and can materialise dense rows when only GUIDs are filtered.
+  Subset by GUID and/or allele. Returns a new `Ardal` instance unless `data_only=True`, where it returns `[matrix, headers]`. `child_ardal_kwargs` forwards additional constructor kwargs to the child `Ardal(...)` instance created for non-`data_only` subsets. Accepts packed backends and can materialise dense rows when only GUIDs are filtered.
 
 - `matrix_stats(print_table: bool = False) -> Dict[str, Any]`  
   Summary of counts, density, and byte sizes. Optionally prints a formatted table.
@@ -171,6 +172,9 @@ Statistical summaries and divergence metrics.
 
 - `allele_entropy() -> Dict[str, float]`  
   Shannon entropy for every allele.
+
+- `allele_missingness(guids: List[str] = [], alleles: List[str] = [], normalise: bool = False, window_size: Optional[int] = None, window_step: Optional[int] = None) -> np.ndarray`  
+  Per-allele missing counts across selected GUIDs. If `normalise=True`, returns proportions (count / n_guids). If `window_size` is provided, returns window-averaged missingness across the allele order.
 
 - `allele_cooc(alleles: List[str] = [], threshold: float = 0.95, threads: int = 1) -> Dict[str, List[str]]`  
   Allele co-occurrence above `threshold`. Subset to specific alleles or compute across the entire matrix.

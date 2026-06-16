@@ -12,6 +12,18 @@ def test_unique(allele_component_simdata):
     """
     unique = allele_component_simdata.unique(["GUID100"])
     assert unique == {"GUID100" : {'chr1.100.A.T'}}
+
+
+def test_unique_relative_to_input_set(allele_component):
+    """
+    Alleles returned for each GUID must be absent outside the queried GUID set.
+    """
+    unique = allele_component.unique(["GUID1", "GUID2", "GUID3", "GUID4", "GUID5"])
+    assert unique["GUID1"] == {"chr1.1.A.T", "chr1.8.A.T"}
+    assert unique["GUID2"] == {"chr1.1.A.T", "chr1.8.A.T"}
+    assert unique["GUID3"] == {"chr1.2.A.T", "chr1.8.A.T"}
+    assert unique["GUID4"] == {"chr1.2.A.T", "chr1.8.A.T"}
+    assert unique["GUID5"] == {"chr1.2.A.T", "chr1.8.A.T"}
     
 
 def test_unique_core(allele_component):

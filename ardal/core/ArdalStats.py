@@ -6,7 +6,7 @@ from collections import defaultdict
 from typing import Union, List, Dict
 
 from ..utils.exceptions import ParameterError, EmptySelectionError
-from ..utils.decorators import check_generic_threshold, check_thread_count, check_guids_list
+from ..utils.decorators import check_generic_threshold, check_thread_count, check_guids_list, check_alleles_list
 from ..utils.logger import get_logger
 from ..utils.misc import require_package
 
@@ -54,6 +54,95 @@ class ArdalStats:
         entropies_dict = dict(sorted(zip(self._headerUtils.headers["alleles"], allele_entropy), key=lambda x: x[1], reverse=True))
         return entropies_dict
 
+
+    @check_guids_list
+    @check_alleles_list
+    def allele_missingness( self,
+                            guids: List = [],
+                            alleles: List = [],
+                            *,
+                            normalise: bool = False,
+                            window_size: Union[int, None] = None,
+                            window_step: Union[int, None] = None ) -> np.ndarray:
+        """
+        Return per-allele missing counts across the selected GUIDs.
+
+        Missingness is defined as the number of GUIDs where an allele is masked as missing.
+        If normalise=True, returns proportions (count / n_guids).
+        If the dataset has no missing masks, this returns zeros.
+
+        Windowing:
+            If window_size is provided, missingness is averaged over windows along the
+            allele order (as provided in `alleles` or the header order if empty).
+            window_step controls the stride between windows (defaults to window_size).
+            The final window may be shorter than window_size.
+        """
+        if guids:
+            self._headerUtils.check_guids(guids)
+        else:
+            guids = self._headerUtils.headers["guids"]
+
+        if not guids:
+            raise ParameterError("guids list cannot be empty.")
+
+        if not isinstance(normalise, bool):
+            raise ParameterError("normalise must be a boolean.")
+
+        if alleles:
+            self._headerUtils.check_alleles(alleles)
+            allele_indices = [self._headerUtils.encode_allele(allele) for allele in alleles]
+        else:
+            alleles = self._headerUtils.headers["alleles"]
+            allele_indices = None
+
+        ## track missing over full allele set
+        n_alleles_total = len(self._headerUtils.headers["alleles"])
+        missing_counts = np.zeros(n_alleles_total, dtype=np.uint32)
+
+        ## count missing masks per guid
+        if self._headerUtils.has_missing_mask():
+            for guid in guids:
+                cols = self._headerUtils.get_guid_missing_mask(guid)
+                if cols:
+                    cols_arr = np.asarray(cols, dtype=np.intp)
+                    missing_counts[cols_arr] += 1
+
+        ## normalise by guid count if requested
+        if normalise:
+            missingness = missing_counts.astype(np.float64, copy=False) / float(len(guids))
+        else:
+            missingness = missing_counts.astype(np.float64, copy=False)
+
+        ## slice to requested allele order
+        if allele_indices is not None:
+            missingness = missingness[np.asarray(allele_indices, dtype=np.intp)]
+
+        ## no windowing requested
+        if window_size is None:
+            return missingness
+
+        if not isinstance(window_size, int) or window_size <= 0:
+            raise ParameterError("window_size must be a positive integer.")
+
+        if window_step is None:
+            window_step = window_size
+        if not isinstance(window_step, int) or window_step <= 0:
+            raise ParameterError("window_step must be a positive integer.")
+
+        n_vals = int(missingness.size)
+        if n_vals == 0:
+            return np.asarray([], dtype=np.float64)
+
+        ## rolling mean over allele order
+        windowed: List[float] = []
+        for start in range(0, n_vals, window_step):
+            end = min(start + window_size, n_vals)
+            if end <= start:
+                break
+            windowed.append(float(np.mean(missingness[start:end])))
+
+        return np.asarray(windowed, dtype=np.float64)
+
     
     @check_thread_count
     @check_generic_threshold
@@ -81,6 +170,7 @@ class ArdalStats:
             cooc_dict = self._matrix.bitCooccurrence_all(threshold=threshold,
                                                          threads=threads)
 
+        ## decode to allele ids
         decoded_dict = defaultdict(list)
         for ref, cooc_vec in cooc_dict.items():
             decoded_dict[self._headerUtils.decode_allele(ref)] = [self._headerUtils.decode_allele(allele) for allele in cooc_vec]

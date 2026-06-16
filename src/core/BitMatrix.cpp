@@ -2577,8 +2577,12 @@ py::array_t<int> BitMatrix::getColumnMasses( void ) const {
  *  py::array_t<uint64_t> : A 2D NumPy array representing the packed sub-matrix.
  ****************************************************************************************************/
 py::array_t<uint64_t> BitMatrix::getSubsetMatrix_rows( const std::vector<size_t>& row_indices,
-                                                       int threads) const {
-    ardal::utils::log_debug("BitMatrix::getSubsetMatrix_rows.");
+                                                       int threads,
+                                                       bool silence_log ) const {
+    // support silencing in functions which call this multiple times to prevent output clutter
+    if (!silence_log) {
+        ardal::utils::log_debug("BitMatrix::getSubsetMatrix_rows.");
+    }
     const size_t R = row_indices.size();
     const size_t W = wpr_;                 // 64-bit words per row
 

@@ -1,11 +1,33 @@
 # setup.py
 from setuptools import setup, Extension, find_packages
+from pathlib import Path
+import re
 import sys
 import os
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
     
+def read_version() -> str:
+    """Resolve the package version"""
+    env_version = os.environ.get("ARDAL_VERSION")
+    if env_version:
+        return env_version
+
+    version_pattern = re.compile(r'^__version__\s*=\s*[\'"]([^\'"]+)[\'"]', re.M)
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "src" / "_version.py",
+        here.parent / "src" / "_version.py",
+    ]
+    for path in candidates:
+        if path.is_file():
+            match = version_pattern.search(path.read_text())
+            if match:
+                return match.group(1)
+
+    return "0.4.0"
+
 ext_modules = [
     Extension(
         'ardal._ardal',
@@ -26,7 +48,7 @@ ext_modules = [
 
 setup(
     name='ardal',
-    version='0.3.0-alpha',
+    version=read_version(),
     author="A. V. Morris",
     long_description=long_description,
     packages=find_packages(),

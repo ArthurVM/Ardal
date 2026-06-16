@@ -1,6 +1,10 @@
 import pytest
 import numpy as np
 
+from ardal import Ardal
+from ardal.core.ArdalHeaderUtils import ArdalHeaderUtils
+from ardal.core.ArdalGet import ArdalGet
+from ardal.utils.make_meta import make_meta
 from ardal.utils.exceptions import InvalidGUIDQueryError, ParameterError, RoaringError
 
 
@@ -91,3 +95,112 @@ def test_roaring_matrix(get_component, get_component_no_roaring):
     with pytest.raises(RoaringError, match="Ardal object was instantialised with 'roaring=False'. Cannot retrieve roaring matrix."):
         get_component_no_roaring.roaring_matrix(decode=False)
 
+
+def test_missing_sites_with_positions(hybrid_matrix, headers, meta):
+    missing_masks = {"column_masks": {"GUID1": [0, 7], "GUID2": [0], "GUID10": []}}
+    header_utils = ArdalHeaderUtils(
+        headers=headers,
+        meta=meta,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+        missing_masks=missing_masks,
+    )
+    get_component = ArdalGet(header_utils, hybrid_matrix, hybrid_matrix.roaringEnabled())
+
+    out = get_component.missing_sites()
+    assert out["GUID1"] == ["chr1:1", "chr1:8"]
+    assert out["GUID2"] == ["chr1:1"]
+    assert out["GUID10"] == []
+
+
+def test_missing_sites_without_positions(hybrid_matrix, headers, meta):
+    missing_masks = {"column_masks": {"GUID1": [0, 7], "GUID2": [0], "GUID10": []}}
+    header_utils = ArdalHeaderUtils(
+        headers=headers,
+        meta=meta,
+        allele_id_format=None,
+        missing_masks=missing_masks,
+    )
+    get_component = ArdalGet(header_utils, hybrid_matrix, hybrid_matrix.roaringEnabled())
+
+    out = get_component.missing_sites()
+    assert out["GUID1"] == ["chr1.1.A.T", "chr1.8.A.T"]
+    assert out["GUID2"] == ["chr1.1.A.T"]
+    assert out["GUID10"] == []
+
+
+def test_subset_carries_missing_masks(hybrid_matrix, headers, meta):
+    missing_masks = {"column_masks": {"GUID1": [0, 7], "GUID2": [0], "GUID10": [7]}}
+    header_utils = ArdalHeaderUtils(
+        headers=headers,
+        meta=meta,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+        missing_masks=missing_masks,
+    )
+    get_component = ArdalGet(header_utils, hybrid_matrix, hybrid_matrix.roaringEnabled())
+
+    _, headers_meta = get_component.subset(
+        guids=["GUID1", "GUID2", "GUID10"],
+        alleles=["chr1.1.A.T", "chr1.10.A.T"],
+        drop_zero_cols=False,
+        data_only=True,
+    )
+
+    assert "column_masks" in headers_meta
+    assert headers_meta["column_masks"]["GUID1"] == [0]
+    assert headers_meta["column_masks"]["GUID2"] == [0]
+    assert headers_meta["column_masks"]["GUID10"] == []
+
+
+def test_subset_child_missing_sites_with_position_cache(test_data_mem):
+    matrix, headers = test_data_mem
+    missing = {"GUID1": [0], "GUID2": [1]}
+    headers_meta = {
+        "meta": make_meta(
+            matrix,
+            headers,
+            generated_by="test",
+            format_name="ardal.dense.v1",
+            matrix_file=None,
+        ),
+        "headers": headers,
+        "column_masks": missing,
+    }
+
+    ard = Ardal(
+        data_source=[matrix, headers_meta],
+        roaring=True,
+        quiet_init=True,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+    )
+    child = ard.get.subset(
+        guids=["GUID1", "GUID2"],
+        alleles=["chr1.1.A.T", "chr1.2.A.T"],
+        drop_zero_cols=False,
+    )
+    out = child.get.missing_sites()
+    assert out["GUID1"] == ["chr1:1"]
+    assert out["GUID2"] == ["chr1:2"]
+
+
+def test_subset_passes_child_ardal_kwargs(test_data_mem):
+    ard = Ardal(
+        data_source=test_data_mem,
+        roaring=True,
+        quiet_init=True,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+    )
+
+    child = ard.get.subset(
+        guids=["GUID1", "GUID2"],
+        alleles=["chr1.1.A.T", "chr1.2.A.T"],
+        drop_zero_cols=False,
+        child_ardal_kwargs={
+            "roaring": False,
+            "density_threshold": 0.75,
+            "allele_positions": {"custom": {123: ["chr1.1.A.T"]}},
+        },
+    )
+
+    assert child.build_roaring is False
+    assert child.density_threshold == 0.75
+    assert child._headerUtils.allele_positions == {"custom": {123: ["chr1.1.A.T"]}}

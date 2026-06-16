@@ -11,6 +11,7 @@ from .core.ArdalIO import ArdalIO
 from .core.ArdalGet import ArdalGet
 from .core.ArdalAllele import ArdalAllele
 from .core.ArdalDistance import ArdalDistance
+from .core.ArdalRecombination import ArdalRecombination
 from .core.ArdalStats import ArdalStats
 from .utils.decorators import check_density_threshold, check_Ardal_roaring_param, check_allele_id_format, check_bed_paths
 from .utils.exceptions import MatrixParseError
@@ -138,6 +139,10 @@ class Ardal(object):
         self.stats = ArdalStats(headerUtils = self._headerUtils,
                                 hybrid_matrix = self._hybrid_matrix,
                                 roaring_enabled = self.roaring)
+
+        self.recomb = ArdalRecombination(headerUtils = self._headerUtils,
+                                         hybrid_matrix = self._hybrid_matrix,
+                                         roaring_enabled = self.roaring)
         
         if not quiet_init and verbosity < SILENT:
             self.get.matrix_stats(print_table=True)

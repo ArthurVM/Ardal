@@ -156,6 +156,16 @@ def remove_file(
         pass
 
 
+def dense_work_path(
+    prefix: str,
+    keep_dense_output: bool,
+) -> str:
+    """Return the working dense path, using a hidden staging suffix unless .npy output is requested."""
+    if keep_dense_output:
+        return f"{prefix}.npy"
+    return f"{prefix}.working.npy"
+
+
 def derive_sample_id_from_path(
     json_path : Path,
 ) -> str:
@@ -1073,8 +1083,8 @@ def create_all_outputs(
     ref_prefix = f"{output_prefix}.ref"
     minor_prefix = f"{output_prefix}.agnostic"
 
-    ref_npy_path = f"{ref_prefix}.npy"
-    minor_npy_path = f"{minor_prefix}.npy"
+    ref_npy_path = dense_work_path(ref_prefix, emit_npy)
+    minor_npy_path = dense_work_path(minor_prefix, emit_npy)
 
     dense_ref, dense_minor = build_dense_matrices(
         json_files,
