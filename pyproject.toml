@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ardal"
-version = "0.3.0"
+dynamic = ["version"]
 description = "High-performance bitpacked and roaring backends for genomic matrices"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,10 @@ sdist.include = [
   "README.md",
   "LICENSE"
 ]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "ardal/_version.py"
 
 [tool.scikit-build.cmake.define]
 CMAKE_BUILD_TYPE = "Release"

@@ -1,10 +1,20 @@
 # setup.py
 from setuptools import setup, Extension, find_packages
+from pathlib import Path
+import re
 import sys
 import os
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
+
+
+def read_version() -> str:
+    version_file = Path(__file__).resolve().parent / "ardal" / "_version.py"
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', version_file.read_text(), re.M)
+    if not match:
+        raise RuntimeError("Could not find __version__ in ardal/_version.py")
+    return match.group(1)
     
 ext_modules = [
     Extension(
@@ -26,7 +36,7 @@ ext_modules = [
 
 setup(
     name='ardal',
-    version='0.4.0-alpha',
+    version=read_version(),
     author="A. V. Morris",
     long_description=long_description,
     packages=find_packages(),

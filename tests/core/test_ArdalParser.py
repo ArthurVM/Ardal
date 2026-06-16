@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import json
+import gzip
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
@@ -96,3 +97,74 @@ def test_valid_csv_db(test_data_matrix_csv):
     parser = ArdalParser(csv_file)
     assert (parser.matrix == matrix).all()
     assert parser.headers == headers
+
+
+def test_valid_npy_with_gzipped_meta(tmp_path, test_data_matrix_npy):
+    npy_file, header_file = test_data_matrix_npy
+    npy_array = np.load(npy_file)
+    with open(header_file, "r") as fin:
+        headers = json.load(fin)
+
+    meta_path = tmp_path / "sim_matrix.npy.meta.gz"
+    payload = {
+        "meta": {
+            "format": "ardal.npy.v1",
+            "dtype": str(npy_array.dtype),
+            "endianness": "little",
+            "row_major": True,
+            "n_rows": npy_array.shape[0],
+            "n_cols": npy_array.shape[1],
+            "matrix_file": os.path.basename(npy_file),
+            "data_nbytes": int(npy_array.nbytes),
+            "data_sha256": None,
+            "generated_by": "test",
+        },
+        "headers": headers,
+    }
+    with gzip.open(meta_path, "wt") as fout:
+        json.dump(payload, fout)
+
+    parser = ArdalParser([npy_file, str(meta_path)])
+    assert (parser.matrix == npy_array).all()
+    assert parser.headers == headers
+
+
+def test_valid_bin_zst_with_gzipped_meta(tmp_path, test_data_mem):
+    zstandard = pytest.importorskip("zstandard")
+
+    matrix, headers = test_data_mem
+    packed_bytes = np.packbits(matrix, axis=1, bitorder="little")
+    words_per_row = (matrix.shape[1] + 63) // 64
+    packed = np.zeros((matrix.shape[0], words_per_row), dtype="<u8")
+    packed.view(np.uint8).reshape(matrix.shape[0], words_per_row * 8)[:, :packed_bytes.shape[1]] = packed_bytes
+
+    bin_zst_path = tmp_path / "sim_matrix.bin.zst"
+    compressed = zstandard.ZstdCompressor().compress(packed.tobytes(order="C"))
+    bin_zst_path.write_bytes(compressed)
+
+    meta_path = tmp_path / "sim_matrix.bin.meta.gz"
+    payload = {
+        "meta": {
+            "format": "ardal.bitpack.v1",
+            "dtype": "<u8",
+            "endianness": "little",
+            "row_major": True,
+            "n_rows": matrix.shape[0],
+            "n_cols": matrix.shape[1],
+            "matrix_file": "sim_matrix.bin",
+            "data_nbytes": int(packed.nbytes),
+            "data_sha256": None,
+            "words_per_row": words_per_row,
+            "bits_per_word": 64,
+            "row_stride_bytes": words_per_row * 8,
+            "generated_by": "test",
+        },
+        "headers": headers,
+    }
+    with gzip.open(meta_path, "wt") as fout:
+        json.dump(payload, fout)
+
+    parser = ArdalParser([str(bin_zst_path), str(meta_path)])
+    np.testing.assert_array_equal(parser.matrix, packed)
+    assert parser.headers == headers
+    assert parser.is_bitpacked

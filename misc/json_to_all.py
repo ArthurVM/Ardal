@@ -14,6 +14,7 @@ _ALLELE_ID_FORMAT: str | None = None
 _ALLELE_ID_PATTERN: re.Pattern | None = None
 _ALLELE_ID_POS_KEY: str | None = None
 _ALLELE_ID_HAS_CHR: bool = True
+_ALLELE_ID_HAS_GENE: bool = False
 
 
 def build_matrix_metadata(
@@ -178,13 +179,25 @@ def derive_sample_id_from_path(
 
 
 def normalize_missing_entries(
-    entries : Iterable[str],
+    entries : Iterable[object],
 ) -> List[str]:
-    """Normalize missing site markers to strings."""
+    """Normalize missing site markers to strings.
+
+    Supports string site keys as well as [chrom, pos] and (chrom, pos) tuples.
+    """
     normalized = []
     for entry in entries or []:
-        ## keep chrom/pos pair as string, coerce other types via str()
-        entry_str = str(entry)
+        if isinstance(entry, (list, tuple)):
+            if len(entry) == 2:
+                chrom, pos = entry
+                entry_str = position_key(str(chrom), pos)
+            elif len(entry) == 1:
+                entry_str = str(entry[0])
+            else:
+                entry_str = str(entry)
+        else:
+            entry_str = str(entry)
+
         if ( not _ALLELE_ID_HAS_CHR ):
             if ( "." in entry_str ):
                 _, tail = entry_str.rsplit(".", 1)
@@ -280,6 +293,7 @@ def parse_allele_key(
     parts = match.groupdict()
     chrom = parts.get("chr") if _ALLELE_ID_HAS_CHR else None
     pos = parts.get(_ALLELE_ID_POS_KEY)
+    gene = parts.get("gene") if _ALLELE_ID_HAS_GENE else None
     ref = parts.get("ref")
     alt = parts.get("alt")
 
@@ -288,12 +302,15 @@ def parse_allele_key(
             "allele_id_format must include {pos}/{start}, {ref}, and {alt} placeholders."
         )
 
+    if ( gene is not None ):
+        pos = f"{gene}.{pos}"
+
     return chrom, pos, ref, alt
 
 
 def compile_allele_id_format(
     allele_id_format : str,
-) -> Tuple[re.Pattern, str, bool]:
+) -> Tuple[re.Pattern, str, bool, bool]:
     """Compile an allele_id_format string into a regex pattern and return the position placeholder key."""
     if ( not allele_id_format ):
         raise ValueError("allele_id_format cannot be empty.")
@@ -304,7 +321,7 @@ def compile_allele_id_format(
             "allele_id_format must include placeholders like {pos}, {ref}, {alt}."
         )
 
-    allowed = {"chr", "pos", "start", "end", "ref", "alt"}
+    allowed = {"chr", "gene", "pos", "start", "end", "ref", "alt"}
     invalid = sorted({p for p in placeholders if p not in allowed})
     if ( invalid ):
         raise ValueError(
@@ -348,6 +365,7 @@ def compile_allele_id_format(
         "ref": r"(?P<ref>.+)",
         "alt": r"(?P<alt>.+)",
         "chr": r"(?P<chr>.+)",
+        "gene": r"(?P<gene>.+)",
         "start": r"(?P<start>\d+)",
         "pos": r"(?P<pos>\d+)",
         "end": r"(?P<end>\d+)",
@@ -359,28 +377,30 @@ def compile_allele_id_format(
 
     pattern = f"^{pattern}$"
 
-    return re.compile(pattern), pos_key, ("chr" in placeholders)
+    return re.compile(pattern), pos_key, ("chr" in placeholders), ("gene" in placeholders)
 
 
 def configure_allele_id_format(
     allele_id_format : str | None,
 ):
     """Configure how allele identifiers are parsed within this module."""
-    global _ALLELE_ID_FORMAT, _ALLELE_ID_PATTERN, _ALLELE_ID_POS_KEY, _ALLELE_ID_HAS_CHR
+    global _ALLELE_ID_FORMAT, _ALLELE_ID_PATTERN, _ALLELE_ID_POS_KEY, _ALLELE_ID_HAS_CHR, _ALLELE_ID_HAS_GENE
 
     if ( allele_id_format is None ):
         _ALLELE_ID_FORMAT = None
         _ALLELE_ID_PATTERN = None
         _ALLELE_ID_POS_KEY = None
         _ALLELE_ID_HAS_CHR = True
+        _ALLELE_ID_HAS_GENE = False
         
         return
 
-    pattern, pos_key, has_chr = compile_allele_id_format(allele_id_format)
+    pattern, pos_key, has_chr, has_gene = compile_allele_id_format(allele_id_format)
     _ALLELE_ID_FORMAT = allele_id_format
     _ALLELE_ID_PATTERN = pattern
     _ALLELE_ID_POS_KEY = pos_key
     _ALLELE_ID_HAS_CHR = has_chr
+    _ALLELE_ID_HAS_GENE = has_gene
 
 
 def allele_sort_key(
@@ -1188,7 +1208,7 @@ def parse_args():
     ap.add_argument("--allele-id-format", type=str, default=None,
                     help=(
                         f"Allele ID format string (default: {DEFAULT_ALLELE_ID_FORMAT}; "
-                        "{chr} optional for single-chrom references)"
+                        "{chr} optional for single-chrom references; {gene} supported for gene-relative IDs)"
                     ))
     ap.add_argument("--indent", type=int, dest="json_indent",
                     help="Indentation level for JSON artifacts (default uses compact JSON)")

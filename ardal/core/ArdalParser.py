@@ -1,6 +1,7 @@
 # core/ArdalParser.py
 import os
 import csv
+import gzip
 import json
 import hashlib
 from sys import byteorder
@@ -61,8 +62,6 @@ class ArdalParser:
 
     def _parse( self ) -> Union[int, None]:
         
-        ACCEPTED_META_EXTENSIONS = [".meta", ".json"]
-        
         if self.input_data is None:
             raise MalformedInputError("Input data structure cannot be None.")
 
@@ -116,7 +115,7 @@ class ArdalParser:
                 a, b = Path(a), Path(b)
                 if not a.exists() or not b.exists():
                     raise FileNotFoundError(f"One or more file paths do not exist: {a}, {b}")
-                meta_path = a if a.suffix.lower() in ACCEPTED_META_EXTENSIONS else b
+                meta_path = a if self._is_meta_path(a) else b
                 mat_path  = b if meta_path == a else a
                 matrix_format = self._matrix_path_format(mat_path)
 
@@ -586,24 +585,17 @@ class ArdalParser:
                            header_meta_path: Path ) -> Tuple[Dict, Dict, Union[Dict, None]]:
         """ Load metadata headers JSON
         """
-        with open(header_meta_path, "r") as f:
+        with self._open_text_metadata(header_meta_path) as f:
             header_meta_data = json.load(f)
         
-        ## check headers and meta fields exist
-        ## super-legacy formats will fail here
-        if "meta" not in header_meta_data or "headers" not in header_meta_data:
-            raise LoadMatrixError("Bitpack metadata must contain 'meta' and 'headers' keys.")
-        else:
-            meta_raw = header_meta_data.get("meta")
-            headers_raw = header_meta_data.get("headers")
+        headers_raw, missing_raw, meta_raw = self._load_headers_dict(header_meta_data)
+        if meta_raw is None:
+            meta_raw = {}
         
         ## handle missing sites data
         ## this supports legacy formats where the headers-meta JSON does not contain missing sites data
-        if "column_masks" not in header_meta_data:
+        if missing_raw is None:
             log.debug("Legacy headers detected. No missing sites provided.")
-            missing_raw = None
-        else:
-            missing_raw = header_meta_data.get("column_masks")
         
         return headers_raw, meta_raw, missing_raw
 
@@ -612,11 +604,27 @@ class ArdalParser:
     def _is_bitpack_header( self,
                             meta_path: Path ) -> bool:
         try:
-            with open(meta_path, "r") as f:
+            with self._open_text_metadata(meta_path) as f:
                 obj = json.load(f)
             return isinstance(obj, Dict) and "meta" in obj and obj["meta"].get("format") == "ardal.bitpack.v1"
         except Exception:
             return False
+
+
+    @staticmethod
+    def _is_meta_path(path: Path) -> bool:
+        suffixes = [suffix.lower() for suffix in path.suffixes]
+        if suffixes[-2:] == [".meta", ".gz"]:
+            return True
+        return bool(suffixes and suffixes[-1] in {".meta", ".json"})
+
+
+    @staticmethod
+    def _open_text_metadata(path: Path):
+        suffixes = [suffix.lower() for suffix in path.suffixes]
+        if suffixes[-2:] == [".meta", ".gz"]:
+            return gzip.open(path, "rt")
+        return open(path, "r")
         
         
     def _normalise_missing_masks( self,
