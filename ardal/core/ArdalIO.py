@@ -23,6 +23,8 @@ class ArdalIO:
     """ Class for reading and writing allele matrices in the Ardal framework.
     """
 
+    _PACKED_WRITE_TARGET_BYTES = 128 * 1024 * 1024
+
     def __init__( self,
                   headerUtils,
                   hybrid_matrix,
@@ -65,6 +67,44 @@ class ArdalIO:
             "headers": self._headerUtils.headers,
             "column_masks": self._build_column_masks_payload(),
         }
+
+
+    def _build_packed_write_meta(self, matrix_out_path: str) -> dict:
+        n_rows = len(self._headerUtils.headers.get("guids", []))
+        n_cols = len(self._headerUtils.headers.get("alleles", []))
+        words_per_row = (n_cols + 63) // 64 if n_cols else 0
+        row_stride_bytes = words_per_row * np.dtype(np.uint64).itemsize
+
+        return {
+            "format": "ardal.bitpack.v1",
+            "dtype": "<u8",
+            "endianness": "little",
+            "row_major": True,
+            "n_rows": n_rows,
+            "n_cols": n_cols,
+            "words_per_row": int(words_per_row),
+            "bits_per_word": 64,
+            "row_stride_bytes": int(row_stride_bytes),
+            "data_file": matrix_out_path,
+            "data_file_resolved": None,
+            "data_nbytes": int(n_rows * row_stride_bytes),
+            "data_sha256": None,
+            "generated_by": self._generated_by_string(),
+        }
+
+
+    @classmethod
+    def _packed_rows_per_write_chunk(cls, row_stride_bytes: int) -> int:
+        if row_stride_bytes <= 0:
+            return 1
+        return max(1, cls._PACKED_WRITE_TARGET_BYTES // row_stride_bytes)
+
+
+    @staticmethod
+    def _ensure_little_endian_uint64(arr: np.ndarray) -> np.ndarray:
+        if arr.dtype.byteorder not in ('<', '='):
+            arr = arr.byteswap().newbyteorder('<')
+        return np.asarray(arr, dtype=np.uint64, order="C")
 
 
     def to_dataframe( self ) -> pd.DataFrame:
@@ -130,9 +170,9 @@ class ArdalIO:
         if os.path.exists(matrix_out_path):
             raise MatrixWriteError(f"File '{matrix_out_path}' already exists.")
 
-        matrix_to_save = self._matrix.getBitMatrix()
         if format == "npy":
             log.info("Writing dense matrix as .npy")
+            matrix_to_save = self._matrix.getBitMatrix()
             np.save(matrix_out_path, matrix_to_save)
             meta = make_meta(matrix_to_save,
                              self._headerUtils.headers,
@@ -140,8 +180,10 @@ class ArdalIO:
                              format_name="ardal.dense.v1",
                              matrix_file=matrix_out_path)
             headers_meta = self._build_headers_meta_payload(meta, matrix_out_path)
+            
         elif format == "npz":
             log.info("Writing dense matrix as .npz")
+            matrix_to_save = self._matrix.getBitMatrix()
             np.savez_compressed(matrix_out_path, matrix=matrix_to_save)
             meta = make_meta(matrix_to_save,
                              self._headerUtils.headers,
@@ -149,6 +191,7 @@ class ArdalIO:
                              format_name="ardal.dense.v1",
                              matrix_file=matrix_out_path)
             headers_meta = self._build_headers_meta_payload(meta, matrix_out_path)
+            
         elif format == "bin":
             log.info("Writing packed matrix as .bin")
             headers_meta = self._write_packed(matrix_out_path)
@@ -163,21 +206,21 @@ class ArdalIO:
         
     def _write_packed( self,
                        matrix_out_path : str ):
-        arr = self._matrix.getPackedMatrix()
-        
-        ## ensure little endian
-        if arr.dtype.byteorder not in ('<', '='):
-            arr = arr.byteswap().newbyteorder('<')
-        
-        ## write bin
         bin_path = pathlib.Path(matrix_out_path)
-        arr.tofile(bin_path)  ## raw little-endian uint64 words
+        meta = self._build_packed_write_meta(matrix_out_path)
+        n_rows = meta["n_rows"]
+        rows_per_chunk = self._packed_rows_per_write_chunk(meta["row_stride_bytes"])
 
-        meta = make_meta(arr,
-                         self._headerUtils.headers,
-                         generated_by="ardal::io::write",
-                         format_name="ardal.bitpack.v1",
-                         matrix_file=matrix_out_path)
+        with open(bin_path, "wb") as fout:
+            for start in range(0, n_rows, rows_per_chunk):
+                stop = min(start + rows_per_chunk, n_rows)
+                row_indices = list(range(start, stop))
+                packed_chunk = self._matrix.getSubsetPackedMatrix_rows(row_indices, 1, True)
+                packed_chunk = self._ensure_little_endian_uint64(packed_chunk)
+                if packed_chunk.ndim == 1:
+                    packed_chunk = packed_chunk.reshape(1, packed_chunk.shape[0])
+                packed_chunk.tofile(fout)
+
         headers_meta = self._build_headers_meta_payload(meta, matrix_out_path)
         
         return headers_meta

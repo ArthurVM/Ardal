@@ -4,7 +4,7 @@ This module provides functionality for retrieving and manipulating allele matric
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from typing import Union, Tuple, List, TYPE_CHECKING
+from typing import Any, Dict, Union, Tuple, List, TYPE_CHECKING
 
 from ..utils.misc import require_package
 from ..utils.decorators import check_thread_count, check_alleles_list, check_guids_list
@@ -72,6 +72,34 @@ class ArdalGet:
 
         return subset_pos_map
 
+
+    def _build_subset_child(self,
+                            sub_matrix: np.ndarray,
+                            headers_meta: dict,
+                            alleles: List[str],
+                            child_verbosity: str,
+                            child_quiet_init: bool,
+                            child_ardal_kwargs: Union[Dict[str, Any], None]) -> "Ardal":
+        """Construct a child Ardal instance for subset outputs."""
+        from ..Ardal import Ardal
+
+        if child_ardal_kwargs is not None and not isinstance(child_ardal_kwargs, dict):
+            raise ParameterError("child_ardal_kwargs must be a dictionary when provided.")
+
+        ardal_kwargs: Dict[str, Any] = {}
+        if child_ardal_kwargs:
+            ardal_kwargs.update(child_ardal_kwargs)
+
+        ardal_kwargs.setdefault("allele_id_format", self._headerUtils._allele_id_format)
+        ardal_kwargs.setdefault("allele_positions", self._subset_allele_posmap(alleles))
+
+        if child_verbosity != "silent" or "verbosity" not in ardal_kwargs:
+            ardal_kwargs["verbosity"] = child_verbosity
+        if child_quiet_init is not True or "quiet_init" not in ardal_kwargs:
+            ardal_kwargs["quiet_init"] = child_quiet_init
+
+        return Ardal(data_source=[sub_matrix, headers_meta], **ardal_kwargs)
+
     
     def _subset_chunk( self,
                        guids: List[str],
@@ -81,10 +109,10 @@ class ArdalGet:
                        data_only: bool,
                        threads: int,
                        child_verbosity: str,
-                       child_quiet_init: bool
+                       child_quiet_init: bool,
+                       child_ardal_kwargs: Union[Dict[str, Any], None]
                        ) -> Union[Tuple[np.ndarray, dict], "Ardal"]:
         """Packed subset helper used for chunked extraction."""
-        from ..Ardal import Ardal
 
         ## rows-only fast path
         rows_only_flag = len(allele_indices) == 0
@@ -116,11 +144,12 @@ class ArdalGet:
                                          matrix_file=None)
 
         if not data_only:
-            return Ardal(data_source=[sub_matrix, headers_meta],
-                         allele_id_format=self._headerUtils._allele_id_format,
-                         allele_positions=self._subset_allele_posmap(alleles),
-                         verbosity=child_verbosity,
-                         quiet_init=child_quiet_init)
+            return self._build_subset_child(sub_matrix=sub_matrix,
+                                            headers_meta=headers_meta,
+                                            alleles=alleles,
+                                            child_verbosity=child_verbosity,
+                                            child_quiet_init=child_quiet_init,
+                                            child_ardal_kwargs=child_ardal_kwargs)
         return [sub_matrix, headers_meta]
 
     
@@ -140,11 +169,13 @@ class ArdalGet:
                 data_only : bool = False,
                 threads : int = 1,
                 child_verbosity : str = "silent",
-                child_quiet_init : bool = True
+                child_quiet_init : bool = True,
+                child_ardal_kwargs : Union[Dict[str, Any], None] = None
                 ) -> Union[Tuple[np.ndarray, dict], "Ardal", List]:
         """ Take a list of GUIDs and subset the allele matrix to include only these GUIDs, allowing for standard operations.
         drop_zero_cols removes alleles with zero frequency in the selected GUIDs.
         chunk_size enables packed column chunking to reduce peak memory.
+        child_ardal_kwargs forwards additional keyword arguments to child Ardal() construction.
         yield_chunks returns a generator over chunked outputs.
         Returns a numpy matrix/JSON pair for feeding into Ardal.
         """
@@ -241,7 +272,8 @@ class ArdalGet:
                                              data_only=data_only,
                                              threads=threads,
                                              child_verbosity=child_verbosity,
-                                             child_quiet_init=child_quiet_init)
+                                             child_quiet_init=child_quiet_init,
+                                             child_ardal_kwargs=child_ardal_kwargs)
 
             if yield_chunks:
                 return _iter_chunks()
@@ -303,12 +335,12 @@ class ArdalGet:
                                              matrix_file=None)
 
             if not data_only:
-                from ..Ardal import Ardal
-                return Ardal(data_source=[sub_matrix, headers_meta],
-                             allele_id_format=self._headerUtils._allele_id_format,
-                             allele_positions=self._subset_allele_posmap(alleles),
-                             verbosity=child_verbosity,
-                             quiet_init=child_quiet_init)
+                return self._build_subset_child(sub_matrix=sub_matrix,
+                                                headers_meta=headers_meta,
+                                                alleles=alleles,
+                                                child_verbosity=child_verbosity,
+                                                child_quiet_init=child_quiet_init,
+                                                child_ardal_kwargs=child_ardal_kwargs)
             return [sub_matrix, headers_meta]
 
         sub_matrix = self._matrix.getSubsetPackedMatrix_rows(guid_indices, threads)
@@ -354,12 +386,12 @@ class ArdalGet:
 
         if not data_only:
             ## return an ardal object initialised with the subset data
-            from ..Ardal import Ardal
-            return Ardal(data_source=[sub_matrix, headers_meta],
-                         allele_id_format=self._headerUtils._allele_id_format,
-                         allele_positions=self._subset_allele_posmap(alleles),
-                         verbosity=child_verbosity,
-                         quiet_init=child_quiet_init)
+            return self._build_subset_child(sub_matrix=sub_matrix,
+                                            headers_meta=headers_meta,
+                                            alleles=alleles,
+                                            child_verbosity=child_verbosity,
+                                            child_quiet_init=child_quiet_init,
+                                            child_ardal_kwargs=child_ardal_kwargs)
         else:
             ## return the new subset matrix/JSON pair
             return [sub_matrix, headers_meta]

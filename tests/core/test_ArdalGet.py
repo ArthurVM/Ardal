@@ -180,3 +180,27 @@ def test_subset_child_missing_sites_with_position_cache(test_data_mem):
     out = child.get.missing_sites()
     assert out["GUID1"] == ["chr1:1"]
     assert out["GUID2"] == ["chr1:2"]
+
+
+def test_subset_passes_child_ardal_kwargs(test_data_mem):
+    ard = Ardal(
+        data_source=test_data_mem,
+        roaring=True,
+        quiet_init=True,
+        allele_id_format="{chr}.{start}.{ref}.{alt}",
+    )
+
+    child = ard.get.subset(
+        guids=["GUID1", "GUID2"],
+        alleles=["chr1.1.A.T", "chr1.2.A.T"],
+        drop_zero_cols=False,
+        child_ardal_kwargs={
+            "roaring": False,
+            "density_threshold": 0.75,
+            "allele_positions": {"custom": {123: ["chr1.1.A.T"]}},
+        },
+    )
+
+    assert child.build_roaring is False
+    assert child.density_threshold == 0.75
+    assert child._headerUtils.allele_positions == {"custom": {123: ["chr1.1.A.T"]}}

@@ -120,9 +120,10 @@ Matrix subsetting, metadata inspection, and conversion helpers.
       threads: int = 1,
       child_verbosity: str = "silent",
       child_quiet_init: bool = True,
+      child_ardal_kwargs: Optional[Dict[str, Any]] = None,
   )
   ```
-  Subset by GUID and/or allele. Returns a new `Ardal` instance unless `data_only=True`, where it returns `[matrix, headers]`. Accepts packed backends and can materialise dense rows when only GUIDs are filtered.
+  Subset by GUID and/or allele. Returns a new `Ardal` instance unless `data_only=True`, where it returns `[matrix, headers]`. `child_ardal_kwargs` forwards additional constructor kwargs to the child `Ardal(...)` instance created for non-`data_only` subsets. Accepts packed backends and can materialise dense rows when only GUIDs are filtered.
 
 - `matrix_stats(print_table: bool = False) -> Dict[str, Any]`  
   Summary of counts, density, and byte sizes. Optionally prints a formatted table.

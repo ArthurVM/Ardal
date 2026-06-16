@@ -6,6 +6,16 @@ import os
 from Bio import SeqIO
 
 from ardal import Ardal
+from ardal.core.ArdalIO import ArdalIO
+
+
+def _pack_dense_matrix_rows(matrix: np.ndarray) -> np.ndarray:
+    packed_bytes = np.packbits(matrix, axis=1, bitorder="little")
+    words_per_row = (matrix.shape[1] + 63) // 64
+    packed = np.zeros((matrix.shape[0], words_per_row), dtype="<u8")
+    if packed_bytes.size:
+        packed.view(np.uint8).reshape(matrix.shape[0], words_per_row * 8)[:, :packed_bytes.shape[1]] = packed_bytes
+    return packed
 
 
 def test_to_dataframe(io_component, test_data_mem):
@@ -45,15 +55,15 @@ def test_write_npy(io_component, test_data_mem, tmp_path):
     io_component.write("test_data", str(output_dir), format="npy")
 
     ## verify files were created
-    json_file = output_dir / "test_data.json"
+    json_file = output_dir / "test_data.npy.meta"
     npy_file = output_dir / "test_data.npy"
     assert json_file.exists()
     assert npy_file.exists()
 
     ## verify content
     with open(json_file, 'r') as f:
-        loaded_headers = json.load(f)
-    assert loaded_headers == headers
+        loaded_payload = json.load(f)
+    assert loaded_payload["headers"] == headers
 
     loaded_matrix = np.load(npy_file)
     np.testing.assert_array_equal(loaded_matrix, matrix)
@@ -88,7 +98,7 @@ def test_write_bin(io_component, test_data_mem, tmp_path):
     bin_file = output_dir / "test_data.bin"
     assert bin_file.exists()
     
-    json_file = output_dir / "test_data.json"
+    json_file = output_dir / "test_data.bin.meta"
     assert json_file.exists()
 
     loaded_json = json.load(open(json_file, 'r'))
@@ -131,7 +141,6 @@ def test_write_metadata_shape(io_component, tmp_path):
 
 def test_write_metadata_column_masks_format(hybrid_matrix, headers, meta, tmp_path):
     from ardal.core.ArdalHeaderUtils import ArdalHeaderUtils
-    from ardal.core.ArdalIO import ArdalIO
 
     masks = {"column_masks": {"GUID1": [0, 7], "GUID2": [0], "GUID10": []}}
     header_utils = ArdalHeaderUtils(
@@ -153,6 +162,56 @@ def test_write_metadata_column_masks_format(hybrid_matrix, headers, meta, tmp_pa
     assert payload["column_masks"]["GUID1"] == [0, 7]
     assert payload["column_masks"]["GUID2"] == [0]
     assert payload["column_masks"]["GUID10"] == []
+
+
+def test_write_bin_streams_packed_rows_without_dense_materialisation(tmp_path, monkeypatch):
+    class DummyHeaderUtils:
+        def __init__(self, headers):
+            self.headers = headers
+
+        def get_guid_missing_mask(self, guid):
+            return []
+
+    class StreamingOnlyMatrix:
+        def __init__(self, packed):
+            self._packed = packed
+            self.calls = []
+
+        def getBitMatrix(self):
+            raise AssertionError("bin write should not materialise a dense matrix")
+
+        def getPackedMatrix(self):
+            raise AssertionError("bin write should not materialise the full packed matrix")
+
+        def getSubsetPackedMatrix_rows(self, row_indices, threads=1, silence_log=False):
+            self.calls.append(tuple(row_indices))
+            return self._packed[np.asarray(row_indices, dtype=int)]
+
+    matrix = np.zeros((5, 130), dtype=np.uint8)
+    matrix[0, [0, 64, 129]] = 1
+    matrix[1, [1, 65]] = 1
+    matrix[2, [2, 66, 127]] = 1
+    matrix[3, [3, 67]] = 1
+    matrix[4, [4, 68, 128]] = 1
+
+    headers = {
+        "guids": [f"GUID{i}" for i in range(matrix.shape[0])],
+        "alleles": [f"chr1.{i}.A.T" for i in range(matrix.shape[1])],
+    }
+    packed = _pack_dense_matrix_rows(matrix)
+
+    io_component = ArdalIO(DummyHeaderUtils(headers), StreamingOnlyMatrix(packed), False)
+    monkeypatch.setattr(ArdalIO, "_PACKED_WRITE_TARGET_BYTES", packed.shape[1] * 8 * 2)
+
+    output_dir = tmp_path / "test_output_streaming_bin"
+    output_dir.mkdir()
+    io_component.write("test_data", str(output_dir), format="bin")
+
+    bin_file = output_dir / "test_data.bin"
+    loaded = np.fromfile(bin_file, dtype="<u8").reshape(packed.shape)
+    np.testing.assert_array_equal(loaded, packed)
+    assert len(io_component._matrix.calls) == 3
+    assert io_component._matrix.calls == [(0, 1), (2, 3), (4,)]
 
 
 def test_make_alignment_non_snp_uses_reference_sequence(tmp_path):
