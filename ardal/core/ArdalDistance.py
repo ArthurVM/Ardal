@@ -401,9 +401,25 @@ class ArdalDistance:
             allele_id_format=allele_id_format,
             force=force_lookup,
         )
+        invalid = np.iinfo(np.uint32).max
+        eligible_alleles = int(np.count_nonzero(allele_to_locus != invalid))
+        total_alleles = int(allele_to_locus.size)
 
         if n_loci == 0:
-            raise ParameterError("No eligible SNV loci were found. Cannot compute SNV distances.")
+            raise ParameterError(
+                "No eligible nucleotide SNV loci were found. "
+                "SNV distance only supports single-base A/C/G/T ref/alt alleles; "
+                "amino-acid/protein allele matrices should use a non-SNV metric."
+            )
+
+        if total_alleles and eligible_alleles / total_alleles < 0.05:
+            log.warning(
+                "SNV lookup retained only "
+                f"{eligible_alleles}/{total_alleles} allele columns across {n_loci} loci. "
+                "SNV distance only supports single-base A/C/G/T ref/alt alleles; "
+                "if this is an amino-acid/protein matrix, SNV distances, KNN, and neighbourhoods "
+                "may collapse toward zero."
+            )
 
         self._matrix.prepareSnvView(allele_to_locus, allele_to_base)
         self._snv_prepared = True

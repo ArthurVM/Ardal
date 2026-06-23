@@ -4,6 +4,7 @@ Copyright 2025 Arthur V. Morris
 #include "HybridMatrix.hpp"
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <utility>
 #include "SnvFallbackBackend.hpp"
 #include "utils/bitops.hpp"
@@ -78,40 +79,93 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
 
     if (!missing_mask.is_none()) {
         try {
-            py::sequence rows_seq = py::cast<py::sequence>(missing_mask);
-            if (py::len(rows_seq) != static_cast<py::ssize_t>(n_rows_)) {
-                throw std::runtime_error("missing_mask rows length mismatch");
-            }
-            mask_columns_.resize(n_rows_);
-            bool any = false;
-            for (size_t i = 0; i < n_rows_; ++i) {
-                py::object row_obj = rows_seq[i];
-                if (row_obj.is_none()) {
-                    continue;
+            if (py::isinstance<py::dict>(missing_mask)) {
+                py::dict payload = py::cast<py::dict>(missing_mask);
+                const std::string encoding = py::cast<std::string>(payload["encoding"]);
+                if (encoding != "range_sections") {
+                    throw std::runtime_error("unsupported missing_mask dict encoding");
                 }
-                py::sequence cols_seq = py::cast<py::sequence>(row_obj);
-                auto& out = mask_columns_[i];
-                out.reserve(static_cast<size_t>(py::len(cols_seq)));
-                for (py::handle item : cols_seq) {
-                    int col = py::cast<int>(item);
-                    if (col < 0 || static_cast<size_t>(col) >= n_cols_bits_) {
+
+                py::array_t<uint64_t, py::array::c_style | py::array::forcecast> offsets_arr =
+                    py::cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(payload["offsets"]);
+                if (offsets_arr.ndim() != 1 || offsets_arr.shape(0) != static_cast<py::ssize_t>(n_rows_ + 1)) {
+                    throw std::runtime_error("missing range offsets length mismatch");
+                }
+                const uint64_t* offsets_ptr = offsets_arr.data();
+                missing_ranges_.offsets.assign(offsets_ptr, offsets_ptr + offsets_arr.shape(0));
+
+                py::array ranges_any = py::cast<py::array>(payload["ranges"]);
+                if (ranges_any.ndim() != 2 || ranges_any.shape(1) != 2) {
+                    throw std::runtime_error("missing ranges must have shape [n_ranges, 2]");
+                }
+
+                const size_t n_ranges = static_cast<size_t>(ranges_any.shape(0));
+                missing_ranges_.ranges.reserve(n_ranges);
+                if (ranges_any.dtype().itemsize() <= 4) {
+                    py::array_t<uint32_t, py::array::c_style | py::array::forcecast> ranges_arr =
+                        py::cast<py::array_t<uint32_t, py::array::c_style | py::array::forcecast>>(payload["ranges"]);
+                    const uint32_t* ptr = ranges_arr.data();
+                    for (size_t i = 0; i < n_ranges; ++i) {
+                        missing_ranges_.ranges.emplace_back(ptr[i * 2], ptr[i * 2 + 1]);
+                    }
+                } else {
+                    py::array_t<uint64_t, py::array::c_style | py::array::forcecast> ranges_arr =
+                        py::cast<py::array_t<uint64_t, py::array::c_style | py::array::forcecast>>(payload["ranges"]);
+                    const uint64_t* ptr = ranges_arr.data();
+                    for (size_t i = 0; i < n_ranges; ++i) {
+                        const uint64_t left = ptr[i * 2];
+                        const uint64_t right = ptr[i * 2 + 1];
+                        if (left > std::numeric_limits<uint32_t>::max() || right > std::numeric_limits<uint32_t>::max()) {
+                            throw std::runtime_error("missing range column exceeds uint32 limit");
+                        }
+                        missing_ranges_.ranges.emplace_back(static_cast<uint32_t>(left), static_cast<uint32_t>(right));
+                    }
+                }
+
+                has_missing_ranges_ = !missing_ranges_.ranges.empty();
+                has_missing_mask_ = has_missing_ranges_;
+                std::stringstream ss;
+                ss << "HybridMatrix loaded compact missing ranges: rows=" << n_rows_
+                   << " ranges=" << missing_ranges_.ranges.size();
+                ardal::utils::log_debug(static_cast<string>(ss.str()));
+            } else {
+                py::sequence rows_seq = py::cast<py::sequence>(missing_mask);
+                if (py::len(rows_seq) != static_cast<py::ssize_t>(n_rows_)) {
+                    throw std::runtime_error("missing_mask rows length mismatch");
+                }
+                mask_columns_.resize(n_rows_);
+                bool any = false;
+                for (size_t i = 0; i < n_rows_; ++i) {
+                    py::object row_obj = rows_seq[i];
+                    if (row_obj.is_none()) {
                         continue;
                     }
-                    out.push_back(static_cast<uint32_t>(col));
+                    py::sequence cols_seq = py::cast<py::sequence>(row_obj);
+                    auto& out = mask_columns_[i];
+                    out.reserve(static_cast<size_t>(py::len(cols_seq)));
+                    for (py::handle item : cols_seq) {
+                        int col = py::cast<int>(item);
+                        if (col < 0 || static_cast<size_t>(col) >= n_cols_bits_) {
+                            continue;
+                        }
+                        out.push_back(static_cast<uint32_t>(col));
+                    }
+                    if (!out.empty()) {
+                        std::sort(out.begin(), out.end());
+                        out.erase(std::unique(out.begin(), out.end()), out.end());
+                        any = true;
+                    }
                 }
-                if (!out.empty()) {
-                    std::sort(out.begin(), out.end());
-                    out.erase(std::unique(out.begin(), out.end()), out.end());
-                    any = true;
-                }
+                has_missing_mask_ = any;
             }
-            has_missing_mask_ = any;
         } catch (const std::exception& exc) {
             throw std::runtime_error(std::string("HybridMatrix: invalid missing_mask payload: ") + exc.what());
         }
     }
 
-    const std::vector<std::vector<uint32_t>>* mask_ptr = has_missing_mask_ ? &mask_columns_ : nullptr;
+    const std::vector<std::vector<uint32_t>>* mask_ptr =
+        (has_missing_mask_ && !has_missing_ranges_) ? &mask_columns_ : nullptr;
+    const MissingRanges* range_ptr = has_missing_ranges_ ? &missing_ranges_ : nullptr;
 
     // ----------- INIT BACKENDS -----------
     // handle roaring backend
@@ -121,7 +175,8 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
         roaring_backend = std::make_unique<RoaringMatrix>( flat_,
                                                            rows_sp,
                                                            cols_sp,
-                                                           mask_ptr );
+                                                           mask_ptr,
+                                                           range_ptr );
     } else {
         roaring_enabled = false;
         std::stringstream ss;
@@ -133,7 +188,8 @@ HybridMatrix::HybridMatrix( py::array packed_or_dense_matrix,
     bit_backend = std::make_unique<BitMatrix>( flat_,
                                                rows_sp,
                                                cols_sp,
-                                               mask_ptr );
+                                               mask_ptr,
+                                               range_ptr );
     
     // run SIMD diagnostics
     simd_dispatchers::simd_diag();
@@ -547,8 +603,33 @@ void HybridMatrix::prepareSnvView( py::array_t<uint32_t> allele_to_locus,
     if (roaring_enabled) {
         roaring_backend->prepareSnvView(std::move(locus_for_roaring), std::move(base_for_roaring));
     }
+    if (has_missing_ranges_ && mask_columns_.empty()) {
+        ardal::utils::log_debug("Inflating compact missing ranges for SNV fallback backend.");
+        mask_columns_.resize(n_rows_);
+        for (size_t r = 0; r < n_rows_; ++r) {
+            const uint64_t start_idx = missing_ranges_.offsets[r];
+            const uint64_t end_idx = missing_ranges_.offsets[r + 1];
+            auto& out = mask_columns_[r];
+            for (uint64_t k = start_idx; k < end_idx; ++k) {
+                uint32_t left = missing_ranges_.ranges[k].first;
+                uint32_t right = missing_ranges_.ranges[k].second;
+                if (right <= left || left >= n_cols_bits_) {
+                    continue;
+                }
+                if (right > n_cols_bits_) {
+                    right = static_cast<uint32_t>(n_cols_bits_);
+                }
+                out.reserve(out.size() + static_cast<size_t>(right - left));
+                for (uint32_t col = left; col < right; ++col) {
+                    out.push_back(col);
+                }
+            }
+        }
+    }
     if (!snv_fallback_backend_) {
-        snv_fallback_backend_ = std::make_unique<SnvFallbackBackend>(flat_, n_cols_bits_, has_missing_mask_ ? &mask_columns_ : nullptr);
+        const std::vector<std::vector<uint32_t>>* snv_mask_ptr =
+            has_missing_mask_ ? &mask_columns_ : nullptr;
+        snv_fallback_backend_ = std::make_unique<SnvFallbackBackend>(flat_, n_cols_bits_, snv_mask_ptr);
     }
     snv_fallback_backend_->prepare(std::move(allele_to_locus), std::move(allele_to_base));
 }

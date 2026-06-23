@@ -37,7 +37,8 @@ namespace ardal {
 RoaringMatrix::RoaringMatrix( ardal::detail::FlatMatrix matrix_,
                               std::shared_ptr<const std::vector<int>> row_masses,
                               std::shared_ptr<const std::vector<int>> col_masses,
-                              const std::vector<std::vector<uint32_t>>* missing_mask )
+                              const std::vector<std::vector<uint32_t>>* missing_mask,
+                              const MissingRanges* missing_ranges )
   : row_masses_(std::move(row_masses)),
     col_masses_(std::move(col_masses)),
     base_(matrix_.base),
@@ -99,6 +100,36 @@ RoaringMatrix::RoaringMatrix( ardal::detail::FlatMatrix matrix_,
                 missing_mask_empty_[i] = false;
             } else {
                 missing_mask_empty_[i] = true;
+            }
+        }
+    } else if (missing_ranges && !missing_ranges->empty()) {
+        if (missing_ranges->offsets.size() != n_rows_ + 1) {
+            throw std::runtime_error("RoaringMatrix: missing range offsets row count mismatch");
+        }
+        missing_masks_.resize(n_rows_);
+        missing_mask_empty_.resize(n_rows_, true);
+        for (size_t i = 0; i < n_rows_; ++i) {
+            const uint64_t start_idx = missing_ranges->offsets[i];
+            const uint64_t end_idx = missing_ranges->offsets[i + 1];
+            if (end_idx < start_idx || end_idx > missing_ranges->ranges.size()) {
+                throw std::runtime_error("RoaringMatrix: malformed missing range offsets");
+            }
+            roaring::Roaring mask;
+            for (uint64_t k = start_idx; k < end_idx; ++k) {
+                uint32_t left = missing_ranges->ranges[k].first;
+                uint32_t right = missing_ranges->ranges[k].second;
+                if (right <= left || left >= n_cols_bits_) {
+                    continue;
+                }
+                if (right > n_cols_bits_) {
+                    right = static_cast<uint32_t>(n_cols_bits_);
+                }
+                mask.addRange(left, right);
+            }
+            if (!mask.isEmpty()) {
+                missing_masks_[i] = std::move(mask);
+                has_missing_mask_ = true;
+                missing_mask_empty_[i] = false;
             }
         }
     } else {

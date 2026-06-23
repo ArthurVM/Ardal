@@ -35,6 +35,7 @@ class ArdalHeaderUtils:
         self._snv_lookup_format = None
         self._site_lookup_cache = None
         self._missing_masks: Dict[str, List] = {}
+        self._missing_mask_store = None
         self._missing_mask_rows: Union[List[List[int]], None] = None
         self._allele_position_map_cache: Union[Dict, None] = None
         self._site_count_all_cache: Union[int, None] = None
@@ -140,10 +141,6 @@ class ArdalHeaderUtils:
             locus_to_alts[locus_key].add(alt_base)
             parsed_entries.append((idx, locus_key, alt_base))
 
-        for locus_key, alt_set in locus_to_alts.items():
-            if len(alt_set) > 1:
-                bad_loci.add(locus_key)
-
         valid_loci = [lk for lk in locus_to_alts.keys() if lk not in bad_loci]
         valid_loci.sort(key=lambda item: (item[0], item[1]))
         locus_id_map: Dict[Tuple[str, int], int] = {
@@ -162,7 +159,7 @@ class ArdalHeaderUtils:
         self._snv_lookup_format = allele_id_format
         log.info(
             f"Constructed SNV lookup with {snv_loci} loci. "
-            f"Skipped {len(bad_loci)} loci due to non-SNP, multi-allelic, or ambiguous bases."
+            f"Skipped {len(bad_loci)} loci due to non-SNP or ambiguous bases."
         )
         return self._snv_lookup_cache
 
@@ -298,7 +295,8 @@ class ArdalHeaderUtils:
 
         parts = match.groupdict()
 
-        start = int(parts['start'])   ## exists or will raise error in previous checks
+        start_raw = parts.get('start', parts.get('pos'))
+        start = int(start_raw)   ## exists or will raise error in previous checks
         end = int(parts['end']) if 'end' in parts else None
 
         return (
@@ -318,7 +316,7 @@ class ArdalHeaderUtils:
         
         re = require_package("re", "re")
         
-        accepted_placeholder_patterns = ["chr", "start", "end", "ref", "alt"]
+        accepted_placeholder_patterns = ["chr", "start", "pos", "end", "ref", "alt"]
         
         if not allele_id_format:
             raise AllelePatternError("allele_id_format cannot be empty.")
@@ -330,8 +328,10 @@ class ArdalHeaderUtils:
                 raise AllelePatternError(f"{p} not a valid placeholder for allele_id_format pattern. Accepted placeholders : {accepted_placeholder_patterns}")
             
         ## check minimum required format
-        if "start" not in pattern_placeholders:
-            raise AllelePatternError(f"{p} not a valid placeholder for allele_id_format pattern. Must have at least 'chr' and 'start' placeholders.")
+        if "start" in pattern_placeholders and "pos" in pattern_placeholders:
+            raise AllelePatternError("allele_id_format must use either 'start' or 'pos', not both.")
+        if "start" not in pattern_placeholders and "pos" not in pattern_placeholders:
+            raise AllelePatternError(f"{p} not a valid placeholder for allele_id_format pattern. Must have at least 'chr' and 'start' or 'pos' placeholders.")
         
         if "alt" not in pattern_placeholders and "ref" in pattern_placeholders:
             log.warning("allele_id_format : 'ref' provided but 'alt' absent. This may be a mistake.")
@@ -346,6 +346,7 @@ class ArdalHeaderUtils:
             'ref': r'(?P<ref>.+)',
             'chr': r'(?P<chr>.+)',
             'start': r'(?P<start>\d+)',
+            'pos': r'(?P<pos>\d+)',
             'end': r'(?P<end>\d+)',
             'alt': r'(?P<alt>.+)'
         }
@@ -655,6 +656,12 @@ class ArdalHeaderUtils:
     def _init_missing_masks(self, missing_masks: Union[Dict, None]) -> None:
         guid_list = self.headers.get("guids", []) if isinstance(self.headers, dict) else []
         per_guid = {guid: [] for guid in guid_list}
+        self._missing_mask_store = None
+
+        if hasattr(missing_masks, "get_guid_missing_mask") and hasattr(missing_masks, "has_missing_mask"):
+            self._missing_mask_store = missing_masks
+            self._missing_masks = per_guid
+            return
 
         if not missing_masks or not isinstance(missing_masks, dict):
             self._missing_masks = per_guid
@@ -676,10 +683,14 @@ class ArdalHeaderUtils:
 
 
     def has_missing_mask(self) -> bool:
+        if self._missing_mask_store is not None:
+            return bool(self._missing_mask_store.has_missing_mask())
         return any(self._missing_masks.values())
 
 
     def get_guid_missing_mask(self, guid: str) -> List:
+        if self._missing_mask_store is not None:
+            return self._missing_mask_store.get_guid_missing_mask(guid)
         return self._missing_masks.get(guid, [])
 
 
@@ -690,6 +701,10 @@ class ArdalHeaderUtils:
         if not self.has_missing_mask():
             return None
         if self._missing_mask_rows is not None:
+            return self._missing_mask_rows
+
+        if self._missing_mask_store is not None:
+            self._missing_mask_rows = self._missing_mask_store.get_missing_mask_rows()
             return self._missing_mask_rows
 
         rows: List[List[int]] = []

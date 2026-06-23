@@ -24,6 +24,7 @@ Copyright 2025 Arthur V. Morris
 #include <cstring>
 #include <iostream>
 #include "detail/flat_matrix.hpp"
+#include "MissingRanges.hpp"
 
 
 namespace py = pybind11;
@@ -47,7 +48,8 @@ public:
     BitMatrix( ardal::detail::FlatMatrix matrix_,
                std::shared_ptr<const std::vector<int>> row_masses,
                std::shared_ptr<const std::vector<int>> col_masses,
-               const std::vector<std::vector<uint32_t>>* missing_mask = nullptr );
+               const std::vector<std::vector<uint32_t>>* missing_mask = nullptr,
+               const MissingRanges* missing_ranges = nullptr );
 
     // distance functions
     py::array_t<uint32_t> hamming( bool fill_cache = false,

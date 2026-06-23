@@ -7,8 +7,8 @@ and write JSON payloads containing both allele calls and non-callable (missing)
 positions inferred from `samtools depth -aa` BED/BED.GZ files. Sample IDs are
 taken from the VCF header; merged VCFs emit one JSON per sample.
 
-If a matching reference FASTA and GFF are supplied, each sample also gets
-separate JSON outputs for genic SNP calls and non-synonymous amino-acid changes.
+If a matching reference FASTA and GFF are supplied, each sample also gets genic
+SNP indexes and non-synonymous amino-acid changes in the same JSON payload.
 
 Defaults:
   - QUAL >= 30
@@ -29,15 +29,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 
+from ardal.builder.schemas import (
+    ALLELE_RECORD_FIELDS,
+    MISSING_BLOCK_FIELDS,
+    NONSYNONYMOUS_RECORD_FIELDS,
+    SAMPLE_SCHEMA_VERSION,
+)
+
 DNA4 = {"A", "C", "G", "T"}
 VCF_SUFFIXES: Tuple[str, ...] = (".raw.vcf", ".raw.vcf.gz", ".vcf.gz", ".vcf", ".filt.vcf", ".filt.vcf.gz")
 DEPTH_SUFFIXES: Tuple[str, ...] = (".depth.bed.gz", ".depth.bed", ".bed.gz", ".bed", ".depth")
 READ_EXCEPTIONS = (gzip.BadGzipFile, EOFError, OSError)
-ALLELE_OUTPUTS: Tuple[Tuple[str, str], ...] = (
-    ("alleles", "snps"),
-    ("genic_snps", "genic_snps"),
-    ("nonsynonymous", "nonsynonymous"),
-)
+AlleleRecord = Tuple[str, int, int, str, str]
+NonsynonymousRecord = Tuple[AlleleRecord, str, int, str, str]
 GENIC_FEATURES = {
     "gene",
     "pseudogene",
@@ -455,9 +459,9 @@ def sample_alleles_from_vcf(
     sample_regex: str | None,
     sample_regex_group: int,
     annotator: VariantAnnotator | None = None,
-) -> Dict[str, Dict[str, Set[str]]]:
+) -> Dict[str, Dict[str, Set]]:
     sample_ids: List[str] | None = None
-    allele_map: Dict[str, Dict[str, Set[str]]] = {}
+    allele_map: Dict[str, Dict[str, Set]] = {}
     with open_maybe_gzip(vcf_path) as fh:
         for line in fh:
             if not line:
@@ -475,7 +479,7 @@ def sample_alleles_from_vcf(
                     allele_map = {
                         sample: {
                             "alleles": set(),
-                            "genic_snps": set(),
+                            "genic": set(),
                             "nonsynonymous": set(),
                         }
                         for sample in sample_ids
@@ -515,18 +519,18 @@ def sample_alleles_from_vcf(
                 pos_int = int(pos)
             except ValueError:
                 continue
-            annotations_by_alt: Dict[int, Tuple[str, Set[str], Set[str]]] = {}
+            annotations_by_alt: Dict[int, Tuple[AlleleRecord, bool, Set[NonsynonymousRecord]]] = {}
             for alt_idx, alt in enumerate(alt_alleles):
                 if not is_simple_snp(ref, alt):
                     continue
-                snp_id = f"{chrom}.{pos}.{ref.upper()}.{alt.upper()}"
-                genic_ids: Set[str] = set()
-                nonsynonymous_ids: Set[str] = set()
+                allele_record: AlleleRecord = (chrom, pos_int, pos_int, ref.upper(), alt.upper())
+                is_genic = False
+                nonsynonymous_records: Set[NonsynonymousRecord] = set()
                 if annotator is not None and annotator.is_genic(chrom, pos_int):
-                    genic_ids.add(snp_id)
+                    is_genic = True
                     for gene_id, aa_pos, ref_aa, alt_aa in annotator.nonsynonymous_aa_changes(chrom, pos_int, ref, alt):
-                        nonsynonymous_ids.add(f"{chrom}.{gene_id}.{aa_pos}.{ref_aa}.{alt_aa}")
-                annotations_by_alt[alt_idx] = (snp_id, genic_ids, nonsynonymous_ids)
+                        nonsynonymous_records.add((allele_record, gene_id, aa_pos, ref_aa, alt_aa))
+                annotations_by_alt[alt_idx] = (allele_record, is_genic, nonsynonymous_records)
 
             for sample_offset, sample_id in enumerate(sample_ids):
                 sample_col_idx = 9 + sample_offset
@@ -552,12 +556,91 @@ def sample_alleles_from_vcf(
                     annotations = annotations_by_alt.get(alt_idx)
                     if annotations is None:
                         continue
-                    snp_id, genic_ids, nonsynonymous_ids = annotations
-                    allele_map[sample_id]["alleles"].add(snp_id)
-                    allele_map[sample_id]["genic_snps"].update(genic_ids)
-                    allele_map[sample_id]["nonsynonymous"].update(nonsynonymous_ids)
+                    allele_record, is_genic, nonsynonymous_records = annotations
+                    allele_map[sample_id]["alleles"].add(allele_record)
+                    if is_genic:
+                        allele_map[sample_id]["genic"].add(allele_record)
+                    allele_map[sample_id]["nonsynonymous"].update(nonsynonymous_records)
 
     return allele_map
+
+def samples_with_candidate_alleles_from_vcf(
+    vcf_path: Path,
+    min_qual: float,
+    allow_filtered: bool,
+    accept_missing_qual: bool,
+    min_dp: int | None,
+    sample_regex: str | None,
+    sample_regex_group: int,
+) -> Set[str]:
+    """Fast preflight: return samples with at least one passing SNP genotype."""
+    sample_ids: List[str] | None = None
+    samples_with_alleles: Set[str] = set()
+    with open_maybe_gzip(vcf_path) as fh:
+        for line in fh:
+            if not line:
+                continue
+            if line[0] == "#":
+                if line.startswith("#CHROM"):
+                    header_parts = line.rstrip("\n").split("\t")
+                    if len(header_parts) <= 9:
+                        raise SystemExit(f"No sample columns found in {vcf_path}")
+                    sample_ids = [
+                        apply_sample_regex(sample, sample_regex, sample_regex_group)
+                        for sample in header_parts[9:]
+                    ]
+                continue
+
+            if sample_ids is None:
+                raise SystemExit(f"Missing #CHROM header in {vcf_path}")
+
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 9:
+                continue
+            _chrom, _pos, _id, ref, alt_field, qual, filt, info, fmt = parts[:9]
+            if not (len(ref) == 1 and ref.upper() in DNA4):
+                continue
+            if not passes_filters(qual, filt, min_qual, allow_filtered, accept_missing_qual, min_dp, info):
+                continue
+
+            callable_alt_indices = {
+                alt_idx
+                for alt_idx, alt in enumerate(alt_field.split(","))
+                if is_simple_snp(ref, alt)
+            }
+            if not callable_alt_indices:
+                continue
+
+            format_fields = fmt.split(":")
+            try:
+                gt_index = format_fields.index("GT")
+            except ValueError:
+                continue
+
+            for sample_offset, sample_id in enumerate(sample_ids):
+                if sample_id in samples_with_alleles:
+                    continue
+                sample_col_idx = 9 + sample_offset
+                if sample_col_idx >= len(parts):
+                    continue
+                sample_fields = parts[sample_col_idx].split(":")
+                if len(sample_fields) <= gt_index:
+                    continue
+                for allele_token in re.split(r"[|/]", sample_fields[gt_index]):
+                    if not allele_token or allele_token == ".":
+                        continue
+                    try:
+                        allele_idx = int(allele_token)
+                    except ValueError:
+                        continue
+                    if allele_idx > 0 and allele_idx - 1 in callable_alt_indices:
+                        samples_with_alleles.add(sample_id)
+                        break
+
+            if len(samples_with_alleles) == len(set(sample_ids)):
+                break
+
+    return samples_with_alleles
 
 def strip_suffix(name: str, suffixes: Tuple[str, ...]) -> str:
     for suffix in sorted(suffixes, key=len, reverse=True):
@@ -607,9 +690,20 @@ def pair_files(vcf_path: Path, depth_path: Path | None) -> List[Tuple[Path, Path
     # print(pairs)
     return sorted(pairs, key=lambda pair: str(pair[0]))
 
-def missing_positions_from_bed(depth_path: Path, min_depth: int) -> List[List]:
+def missing_blocks_from_bed(depth_path: Path, min_depth: int) -> List[List]:
     missing: List[List] = []
-    seen: Set[str] = set()
+    current_chrom: str | None = None
+    current_start: int | None = None
+    current_end: int | None = None
+
+    def flush_current() -> None:
+        nonlocal current_chrom, current_start, current_end
+        if current_chrom is not None and current_start is not None and current_end is not None:
+            missing.append([current_chrom, current_start, current_end])
+        current_chrom = None
+        current_start = None
+        current_end = None
+
     with open_maybe_gzip(depth_path) as fh:
         for line in fh:
             if not line or line.startswith("#"):
@@ -623,75 +717,247 @@ def missing_positions_from_bed(depth_path: Path, min_depth: int) -> List[List]:
             except ValueError:
                 continue
             if depth_val >= min_depth:
+                flush_current()
                 continue
-            key = f"{chrom}.{pos}"
-            if key not in seen:
-                seen.add(key)
-                missing.append([chrom, pos])
+            try:
+                pos_int = int(pos)
+            except ValueError:
+                continue
+            if current_chrom == chrom and current_end is not None and pos_int == current_end + 1:
+                current_end = pos_int
+                continue
+            flush_current()
+            current_chrom = chrom
+            current_start = pos_int
+            current_end = pos_int
+    flush_current()
     return missing
 
-def genic_missing_positions(missing: List[List], annotator: VariantAnnotator | None) -> List[List]:
-    if annotator is None:
-        return []
-    genic_missing: List[List] = []
-    for chrom, pos in missing:
-        try:
-            pos_int = int(pos)
-        except ValueError:
-            continue
-        if annotator.is_genic(str(chrom), pos_int):
-            genic_missing.append([chrom, pos])
-    return genic_missing
+def sample_output_path(outdir: Path, sample_id: str) -> Path:
+    return outdir / f"{sample_id}.json"
 
-def aa_missing_positions(
-    missing: List[List],
-    annotator: VariantAnnotator | None,
-    threshold: int,
-) -> List[List]:
-    if annotator is None:
-        return []
-    return annotator.aa_missing_positions(missing, threshold)
+def missing_sample_outputs(outdir: Path, sample_ids: List[str], overwrite: bool) -> Set[str]:
+    if overwrite:
+        return set(sample_ids)
+    return {
+        sample_id
+        for sample_id in sample_ids
+        if not sample_output_path(outdir, sample_id).exists()
+    }
 
-def active_allele_outputs(annotator: VariantAnnotator | None) -> Tuple[Tuple[str, str], ...]:
-    if annotator is None:
-        return ALLELE_OUTPUTS[:1]
-    return ALLELE_OUTPUTS
-
-def sample_output_path(outdir: Path, sample_id: str, suffix: str) -> Path:
-    return outdir / f"{sample_id}_{suffix}.json"
-
-def missing_sample_outputs(
-    outdir: Path,
-    sample_ids: List[str],
-    allele_outputs: Tuple[Tuple[str, str], ...],
-) -> Dict[str, Set[str]]:
-    missing: Dict[str, Set[str]] = {}
-    for sample_id in sample_ids:
-        for allele_key, suffix in allele_outputs:
-            if not sample_output_path(outdir, sample_id, suffix).exists():
-                missing.setdefault(sample_id, set()).add(allele_key)
-    return missing
-
-def write_sample_payload(out_path: Path, alleles: Set[str], missing: List[List]) -> None:
+def sample_payload(sample_id: str, allele_sets: Dict[str, Set], missing: List[List]) -> Dict:
+    alleles = sorted(allele_sets["alleles"])
+    allele_to_idx = {allele: idx for idx, allele in enumerate(alleles)}
+    genic = sorted(allele_to_idx[allele] for allele in allele_sets["genic"] if allele in allele_to_idx)
+    nonsynonymous = sorted(
+        [
+            allele_to_idx[allele],
+            gene_id,
+            aa_pos,
+            ref_aa,
+            alt_aa,
+        ]
+        for allele, gene_id, aa_pos, ref_aa, alt_aa in allele_sets["nonsynonymous"]
+        if allele in allele_to_idx
+    )
     payload = {
-        "alleles": sorted(alleles),
+        "schema_version": SAMPLE_SCHEMA_VERSION,
+        "sample_id": sample_id,
+        "coordinate_system": "1-based inclusive",
+        "allele_record_fields": ALLELE_RECORD_FIELDS,
+        "nonsynonymous_record_fields": NONSYNONYMOUS_RECORD_FIELDS,
+        "missing_block_fields": MISSING_BLOCK_FIELDS,
+        "alleles": [list(allele) for allele in alleles],
+        "genic": genic,
+        "nonsynonymous": nonsynonymous,
         "missing": missing,
     }
+    return payload
+
+def write_sample_payload(
+    out_path: Path,
+    sample_id: str,
+    allele_sets: Dict[str, Set],
+    missing: List[List],
+    overwrite: bool,
+) -> None:
+    payload = sample_payload(sample_id, allele_sets, missing)
     try:
-        with open(out_path, "x") as outfh:
+        open_mode = "w" if overwrite else "x"
+        with open(out_path, open_mode) as outfh:
             json.dump(payload, outfh, indent=2)
     except FileExistsError as exc:
         raise RuntimeError(f"Refusing to overwrite existing output file: {out_path}") from exc
     except Exception as exc:
         raise RuntimeError(
             f"Failed to write {out_path} "
-            f"({len(payload['alleles'])} alleles, {len(payload['missing'])} missing positions): "
+            f"({len(payload['alleles'])} alleles, {len(payload['missing'])} missing blocks): "
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
-def main():
+def vcf_to_sample_json(
+    *,
+    vcf_in : Path | str,
+    depth_in : Path | str | None = None,
+    outdir : Path | str = Path("./"),
+    min_qual : float = 30.0,
+    allow_filtered : bool = False,
+    accept_missing_qual : bool = False,
+    min_dp : int | None = None,
+    overwrite : bool = False,
+    sample_regex : str | None = None,
+    sample_regex_group : int = 1,
+    min_missing_depth : int = 10,
+    ref_fasta : Path | str | None = None,
+    gff : Path | str | None = None,
+    gene_id_attribute : str = "gene_id",
+) -> None:
+    """
+    Description:
+        Convert VCF and optional depth BED inputs into per-sample Ardal JSON payloads.
+
+    Inputs:
+        vcf_in: VCF file or directory containing VCF/VCF.GZ files.
+        depth_in: Optional depth BED/BED.GZ file or directory.
+        outdir: Destination directory for per-sample JSON payloads.
+        min_qual / allow_filtered / accept_missing_qual / min_dp:
+            Variant-level filtering controls.
+        overwrite: Whether existing JSON outputs may be replaced.
+        sample_regex / sample_regex_group: Optional sample ID rewrite rule.
+        min_missing_depth: Coverage threshold below which depth positions are missing.
+        ref_fasta / gff / gene_id_attribute:
+            Optional reference annotation inputs for genic and nonsynonymous projections.
+
+    Outputs:
+        None; per-sample JSON files are written to `outdir`.
+
+    Exceptions:
+        Raises ValueError when reference annotation inputs are incomplete.
+        Propagates RuntimeError from failed output writes.
+    """
+    vcf_in = Path(vcf_in)
+    depth_in = Path(depth_in) if depth_in is not None else None
+    outdir = Path(outdir)
+    ref_fasta = Path(ref_fasta) if ref_fasta is not None else None
+    gff = Path(gff) if gff is not None else None
+
+    if ( ref_fasta is None ) != ( gff is None ):
+        raise ValueError("--ref-fasta and --gff must be provided together")
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    annotator = None
+    if ref_fasta is not None and gff is not None:
+        annotator = VariantAnnotator(ref_fasta, gff, gene_id_attribute)
+
+    inputs = pair_files(vcf_in, depth_in)
+    total = len(inputs)
+    for idx, (vcf, depth) in enumerate(inputs, start=1):
+        try:
+            sample_ids = sample_ids_from_vcf_header(
+                vcf,
+                sample_regex=sample_regex,
+                sample_regex_group=sample_regex_group,
+            )
+        except READ_EXCEPTIONS as exc:
+            print(f"Warning: skipping unreadable VCF {vcf}: {exc}", file=sys.stderr)
+            continue
+
+        outputs_to_write = missing_sample_outputs(outdir, sample_ids, overwrite)
+        expected_file_count = len(sample_ids)
+        if not outputs_to_write:
+            print(f"\r {idx}/{total} : {vcf.name} ({len(sample_ids)} samples; outputs exist, skipping)", end="             ", flush=True)
+            continue
+
+        try:
+            candidate_samples = samples_with_candidate_alleles_from_vcf(
+                vcf_path=vcf,
+                min_qual=min_qual,
+                allow_filtered=allow_filtered,
+                accept_missing_qual=accept_missing_qual,
+                min_dp=min_dp,
+                sample_regex=sample_regex,
+                sample_regex_group=sample_regex_group,
+            )
+        except READ_EXCEPTIONS as exc:
+            print(f"Warning: skipping unreadable VCF {vcf}: {exc}", file=sys.stderr)
+            continue
+
+        outputs_to_write = {
+            sample_id
+            for sample_id in outputs_to_write
+            if sample_id in candidate_samples
+        }
+        if not outputs_to_write:
+            print(
+                f"\r {idx}/{total} : {vcf.name} "
+                f"({len(sample_ids)} samples; no passing SNP alleles, skipping)",
+                end="             ",
+                flush=True,
+            )
+            continue
+
+        try:
+            allele_map = sample_alleles_from_vcf(
+                vcf_path=vcf,
+                min_qual=min_qual,
+                allow_filtered=allow_filtered,
+                accept_missing_qual=accept_missing_qual,
+                min_dp=min_dp,
+                sample_regex=sample_regex,
+                sample_regex_group=sample_regex_group,
+                annotator=annotator,
+            )
+        except READ_EXCEPTIONS as exc:
+            print(f"Warning: skipping unreadable VCF {vcf}: {exc}", file=sys.stderr)
+            continue
+
+        outputs_to_write = {
+            sample_id
+            for sample_id in outputs_to_write
+            if allele_map.get(sample_id, {}).get("alleles")
+        }
+        missing_file_count = len(outputs_to_write)
+        if not outputs_to_write:
+            print(
+                f"\r {idx}/{total} : {vcf.name} "
+                f"({len(allele_map)} samples; no alleles to write, skipping)",
+                end="             ",
+                flush=True,
+            )
+            continue
+
+        print(
+            f"\r {idx}/{total} : {vcf.name} "
+            f"({len(allele_map)} samples; writing {missing_file_count}/{expected_file_count} outputs)",
+            end="             ",
+            flush=True,
+        )
+
+        if depth is None:
+            print(f"Warning: no depth BED file found for {vcf.name}; missing blocks will be empty", file=sys.stderr, end="")
+            missing: List[List] = []
+        else:
+            try:
+                missing = missing_blocks_from_bed(depth, min_missing_depth)
+            except READ_EXCEPTIONS as exc:
+                print(f"Warning: skipping unreadable depth BED {depth}: {exc}", file=sys.stderr)
+                missing = []
+
+        for sample_id, allele_sets in allele_map.items():
+            if sample_id not in outputs_to_write:
+                continue
+            write_sample_payload(
+                sample_output_path(outdir, sample_id),
+                sample_id,
+                allele_sets,
+                missing,
+                overwrite,
+            )
+
+def parse_args():
+    """Parse command-line arguments for the compatibility wrapper."""
     ap = argparse.ArgumentParser(
-        description="Collect SNP IDs and missing coverage positions into JSON payloads."
+        description="Collect structured SNP calls and missing coverage blocks into JSON payloads."
     )
     ap.add_argument("-v", "--vcf_in", type=Path, required=True,
                     help="VCF file or directory containing VCF/VCF.GZ files")
@@ -705,100 +971,47 @@ def main():
                     help="Treat missing QUAL '.' as passing (default: fail)")
     ap.add_argument("--min-dp", type=int, default=None,
                     help="Require INFO/DP >= this value if present; if absent, variant fails this check")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="Overwrite existing per-sample JSON outputs instead of skipping them")
     ap.add_argument("--sample-regex", type=str, default=None,
                     help="Optional regex to transform sample IDs from the VCF header")
     ap.add_argument("--sample-regex-group", type=int, default=1,
                     help="Capture group index to take from --sample-regex (default: 1)")
     ap.add_argument("--min-missing-depth", type=int, default=10,
-                    help="Positions with coverage < this value are marked as missing (default: 10)")
+                    help="Contiguous positions with coverage < this value are written as missing blocks (default: 10)")
     ap.add_argument("--aa-missing-codon-threshold", type=int, choices=(1, 2, 3), default=1,
-                    help="For non-synonymous AA outputs, mark an AA site missing when at least this many codon nucleotides are missing (default: 1)")
+                    help="Deprecated; retained for CLI compatibility and ignored by schema v2 output")
     ap.add_argument("--ref-fasta", type=Path, default=None,
                     help="Reference FASTA used with --gff to annotate genic and non-synonymous SNPs")
     ap.add_argument("--gff", type=Path, default=None,
                     help="Reference GFF/GFF3 used with --ref-fasta to annotate genic and non-synonymous SNPs")
     ap.add_argument("--gene-id-attribute", type=str, default="gene_id",
                     help="GFF attribute to use as gene ID in non-synonymous allele IDs (default: gene_id)")
-    args = ap.parse_args()
+    
+    return ap.parse_args()
 
-    if (args.ref_fasta is None) != (args.gff is None):
-        raise SystemExit("--ref-fasta and --gff must be provided together")
-
-    args.outdir.mkdir(parents=True, exist_ok=True)
-    annotator = None
-    if args.ref_fasta is not None and args.gff is not None:
-        annotator = VariantAnnotator(args.ref_fasta, args.gff, args.gene_id_attribute)
-
-    inputs = pair_files(args.vcf_in, args.depth_in)
-    total = len(inputs)
-    allele_outputs = active_allele_outputs(annotator)
-    for idx, (vcf, depth) in enumerate(inputs, start=1):
-        try:
-            sample_ids = sample_ids_from_vcf_header(
-                vcf,
-                sample_regex=args.sample_regex,
-                sample_regex_group=args.sample_regex_group,
-            )
-        except READ_EXCEPTIONS as exc:
-            print(f"Warning: skipping unreadable VCF {vcf}: {exc}", file=sys.stderr)
-            continue
-
-        outputs_to_write = missing_sample_outputs(args.outdir, sample_ids, allele_outputs)
-        missing_file_count = sum(len(output_keys) for output_keys in outputs_to_write.values())
-        expected_file_count = len(sample_ids) * len(allele_outputs)
-        if not outputs_to_write:
-            print(f"\r {idx}/{total} : {vcf.name} ({len(sample_ids)} samples; outputs exist, skipping)", end="             ", flush=True)
-            continue
-
-        try:
-            allele_map = sample_alleles_from_vcf(
-                vcf_path=vcf,
-                min_qual=args.min_qual,
-                allow_filtered=args.allow_filtered,
-                accept_missing_qual=args.accept_missing_qual,
-                min_dp=args.min_dp,
-                sample_regex=args.sample_regex,
-                sample_regex_group=args.sample_regex_group,
-                annotator=annotator,
-            )
-        except READ_EXCEPTIONS as exc:
-            print(f"Warning: skipping unreadable VCF {vcf}: {exc}", file=sys.stderr)
-            continue
-        print(
-            f"\r {idx}/{total} : {vcf.name} "
-            f"({len(allele_map)} samples; writing {missing_file_count}/{expected_file_count} outputs)",
-            end="             ",
-            flush=True,
+def main():
+    """Entry point for invoking the VCF-to-JSON compatibility workflow."""
+    args = parse_args()
+    try:
+        vcf_to_sample_json(
+            vcf_in=args.vcf_in,
+            depth_in=args.depth_in,
+            outdir=args.outdir,
+            min_qual=args.min_qual,
+            allow_filtered=args.allow_filtered,
+            accept_missing_qual=args.accept_missing_qual,
+            min_dp=args.min_dp,
+            overwrite=args.overwrite,
+            sample_regex=args.sample_regex,
+            sample_regex_group=args.sample_regex_group,
+            min_missing_depth=args.min_missing_depth,
+            ref_fasta=args.ref_fasta,
+            gff=args.gff,
+            gene_id_attribute=args.gene_id_attribute,
         )
-
-        if depth is None:
-            print(f"Warning: no depth BED file found for {vcf.name}; missing positions will be empty", file=sys.stderr)
-            missing: List[List] = []
-        else:
-            try:
-                missing = missing_positions_from_bed(depth, args.min_missing_depth)
-            except READ_EXCEPTIONS as exc:
-                print(f"Warning: skipping unreadable depth BED {depth}: {exc}", file=sys.stderr)
-                missing = []
-
-        missing_by_output = {
-            "alleles": missing,
-            "genic_snps": genic_missing_positions(missing, annotator),
-            "nonsynonymous": aa_missing_positions(missing, annotator, args.aa_missing_codon_threshold),
-        }
-
-        for sample_id, allele_sets in allele_map.items():
-            sample_missing_outputs = outputs_to_write.get(sample_id)
-            if not sample_missing_outputs:
-                continue
-            for allele_key, suffix in allele_outputs:
-                if allele_key not in sample_missing_outputs:
-                    continue
-                write_sample_payload(
-                    sample_output_path(args.outdir, sample_id, suffix),
-                    allele_sets[allele_key],
-                    missing_by_output[allele_key],
-                )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 if __name__ == "__main__":
     main()

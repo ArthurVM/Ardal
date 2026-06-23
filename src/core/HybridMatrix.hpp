@@ -10,6 +10,7 @@ Copyright 2025 Arthur V. Morris
 #include <vector>
 #include "BitMatrix.hpp"
 #include "RoaringMatrix.hpp"
+#include "MissingRanges.hpp"
 #include "detail/flat_matrix.hpp"
 
 
@@ -188,6 +189,8 @@ private:
     std::vector<uint64_t> storage_;
     bool has_missing_mask_ = false;
     std::vector<std::vector<uint32_t>> mask_columns_;
+    MissingRanges missing_ranges_;
+    bool has_missing_ranges_ = false;
     
     // backends
     std::unique_ptr<BitMatrix> bit_backend;

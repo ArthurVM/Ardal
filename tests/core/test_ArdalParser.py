@@ -168,3 +168,178 @@ def test_valid_bin_zst_with_gzipped_meta(tmp_path, test_data_mem):
     np.testing.assert_array_equal(parser.matrix, packed)
     assert parser.headers == headers
     assert parser.is_bitpacked
+
+
+def test_valid_bin_v2_with_binary_missing_sections(tmp_path):
+    headers = {
+        "guids": ["s0", "s1"],
+        "alleles": [f"chr1.{i}.A.T" for i in range(10)],
+    }
+    packed = np.array([[0b10101], [0b01010]], dtype="<u8")
+    bin_path = tmp_path / "matrix.bin"
+    bin_path.write_bytes(packed.tobytes(order="C"))
+
+    offsets_offset = bin_path.stat().st_size
+    offsets = np.array([0, 2, 2], dtype="<u8")
+    ranges_offset = offsets_offset + offsets.nbytes
+    ranges = np.array([[1, 3], [7, 8]], dtype="<u4")
+    with bin_path.open("ab") as fout:
+        fout.write(offsets.tobytes(order="C"))
+        fout.write(ranges.tobytes(order="C"))
+
+    meta_path = tmp_path / "matrix.bin.meta"
+    payload = {
+        "meta": {
+            "format": "ardal.bin.v2",
+            "dtype": "<u8",
+            "endianness": "little",
+            "row_major": True,
+            "n_rows": 2,
+            "n_cols": 10,
+            "matrix_file": "matrix.bin",
+            "data_nbytes": int(bin_path.stat().st_size),
+            "data_sha256": None,
+            "words_per_row": 1,
+            "bits_per_word": 64,
+            "row_stride_bytes": 8,
+            "sections": {
+                "allele_matrix": {
+                    "offset": 0,
+                    "nbytes": int(packed.nbytes),
+                    "dtype": "<u8",
+                    "shape": [2, 1],
+                    "words_per_row": 1,
+                    "bits_per_word": 64,
+                    "row_stride_bytes": 8,
+                },
+                "missing_offsets": {
+                    "offset": int(offsets_offset),
+                    "nbytes": int(offsets.nbytes),
+                    "dtype": "<u8",
+                    "length": 3,
+                    "units": "range_rows",
+                },
+                "missing_ranges": {
+                    "offset": int(ranges_offset),
+                    "nbytes": int(ranges.nbytes),
+                    "dtype": "<u4",
+                    "shape": [2, 2],
+                    "coordinate_system": "matrix_columns_0_based",
+                    "range_semantics": "start_inclusive_end_exclusive",
+                },
+            },
+        },
+        "headers": headers,
+        "missing": {
+            "schema": "ardal.missing_column_ranges.v1",
+            "encoding": "binary_sections",
+            "coordinate_system": "matrix_columns_0_based",
+            "range_semantics": "start_inclusive_end_exclusive",
+            "offsets_section": "missing_offsets",
+            "ranges_section": "missing_ranges",
+        },
+    }
+    meta_path.write_text(json.dumps(payload))
+
+    parser = ArdalParser([str(bin_path), str(meta_path)])
+
+    np.testing.assert_array_equal(parser.matrix, packed)
+    assert parser.headers == headers
+    assert parser.is_bitpacked
+    assert parser.missing_masks.has_missing_mask()
+    assert parser.missing_masks.get_guid_missing_mask("s0") == [1, 2, 7]
+    assert parser.missing_masks.get_guid_missing_mask("s1") == []
+    assert parser.missing_masks.get_missing_mask_rows() == [[1, 2, 7], []]
+    backend_payload = parser.missing_masks.to_backend_payload()
+    assert backend_payload["encoding"] == "range_sections"
+    np.testing.assert_array_equal(backend_payload["offsets"], offsets)
+    np.testing.assert_array_equal(backend_payload["ranges"], ranges)
+
+
+def test_valid_bin_v3_with_compressed_allele_section_and_uncompressed_missing_sections(tmp_path):
+    zstandard = pytest.importorskip("zstandard")
+
+    headers = {
+        "guids": ["s0", "s1"],
+        "alleles": [f"chr1.{i}.A.T" for i in range(10)],
+    }
+    packed = np.array([[0b10101], [0b01010]], dtype="<u8")
+    compressed_alleles = zstandard.ZstdCompressor().compress(packed.tobytes(order="C"))
+
+    bin_path = tmp_path / "matrix.bin"
+    bin_path.write_bytes(compressed_alleles)
+
+    offsets_offset = bin_path.stat().st_size
+    offsets = np.array([0, 1, 2], dtype="<u8")
+    ranges_offset = offsets_offset + offsets.nbytes
+    ranges = np.array([[1, 3], [7, 8]], dtype="<u4")
+    with bin_path.open("ab") as fout:
+        fout.write(offsets.tobytes(order="C"))
+        fout.write(ranges.tobytes(order="C"))
+
+    meta_path = tmp_path / "matrix.bin.meta"
+    payload = {
+        "meta": {
+            "format": "ardal.bin.v3",
+            "dtype": "<u8",
+            "endianness": "little",
+            "row_major": True,
+            "n_rows": 2,
+            "n_cols": 10,
+            "matrix_file": "matrix.bin",
+            "data_nbytes": int(bin_path.stat().st_size),
+            "data_sha256": None,
+            "words_per_row": 1,
+            "bits_per_word": 64,
+            "row_stride_bytes": 8,
+            "sections": {
+                "allele_matrix": {
+                    "offset": 0,
+                    "nbytes": int(len(compressed_alleles)),
+                    "compression": "zstd",
+                    "uncompressed_nbytes": int(packed.nbytes),
+                    "dtype": "<u8",
+                    "shape": [2, 1],
+                    "words_per_row": 1,
+                    "bits_per_word": 64,
+                    "row_stride_bytes": 8,
+                },
+                "missing_offsets": {
+                    "offset": int(offsets_offset),
+                    "nbytes": int(offsets.nbytes),
+                    "compression": None,
+                    "dtype": "<u8",
+                    "length": 3,
+                    "units": "range_rows",
+                },
+                "missing_ranges": {
+                    "offset": int(ranges_offset),
+                    "nbytes": int(ranges.nbytes),
+                    "compression": None,
+                    "dtype": "<u4",
+                    "shape": [2, 2],
+                    "coordinate_system": "matrix_columns_0_based",
+                    "range_semantics": "start_inclusive_end_exclusive",
+                },
+            },
+        },
+        "headers": headers,
+        "missing": {
+            "schema": "ardal.missing_column_ranges.v1",
+            "encoding": "binary_sections",
+            "coordinate_system": "matrix_columns_0_based",
+            "range_semantics": "start_inclusive_end_exclusive",
+            "offsets_section": "missing_offsets",
+            "ranges_section": "missing_ranges",
+        },
+    }
+    meta_path.write_text(json.dumps(payload))
+
+    parser = ArdalParser([str(bin_path), str(meta_path)])
+
+    np.testing.assert_array_equal(parser.matrix, packed)
+    assert parser.headers == headers
+    assert parser.is_bitpacked
+    assert parser.missing_masks.has_missing_mask()
+    assert parser.missing_masks.get_guid_missing_mask("s0") == [1, 2]
+    assert parser.missing_masks.get_guid_missing_mask("s1") == [7]

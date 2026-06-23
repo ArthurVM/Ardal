@@ -2,8 +2,10 @@
 import os
 import csv
 import gzip
+import io
 import json
 import hashlib
+import tempfile
 from sys import byteorder
 from pathlib import Path
 from typing import Union, Tuple, Dict
@@ -24,6 +26,44 @@ except Exception:
     
     
 log = get_logger()
+
+
+class BinaryMissingMaskStore:
+    """Lazy view over v2 binary missing-column range sections."""
+
+    def __init__(self, guids, offsets, ranges):
+        self.guids = list(guids)
+        self._guid_to_idx = {guid: idx for idx, guid in enumerate(self.guids)}
+        self.offsets = offsets
+        self.ranges = ranges
+        self._cache = {}
+
+    def has_missing_mask(self) -> bool:
+        return bool(self.ranges.shape[0])
+
+    def get_guid_missing_mask(self, guid: str) -> list:
+        if guid in self._cache:
+            return self._cache[guid]
+        row_idx = self._guid_to_idx.get(guid)
+        if row_idx is None:
+            return []
+        start = int(self.offsets[row_idx])
+        end = int(self.offsets[row_idx + 1])
+        cols = []
+        for range_start, range_end in self.ranges[start:end]:
+            cols.extend(range(int(range_start), int(range_end)))
+        self._cache[guid] = cols
+        return cols
+
+    def get_missing_mask_rows(self) -> list:
+        return [self.get_guid_missing_mask(guid) for guid in self.guids]
+
+    def to_backend_payload(self) -> dict:
+        return {
+            "encoding": "range_sections",
+            "offsets": self.offsets,
+            "ranges": self.ranges,
+        }
 
 
 class ArdalParser:
@@ -54,7 +94,15 @@ class ArdalParser:
         self.is_bitpacked: bool = False
         self.verify_hash = verify_hash
         self.is_packed_mem = is_packed_mem
+        self._temporary_matrix_files: list[str] = []
         self._parse()
+
+    def __del__( self ):
+        for path in getattr(self, "_temporary_matrix_files", []):
+            try:
+                Path(path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 
@@ -213,11 +261,17 @@ class ArdalParser:
         # detect payload layout
         if "headers" in headers_meta_raw and isinstance(headers_meta_raw["headers"], Dict):
             headers_raw = headers_meta_raw["headers"]
-            missing_raw = headers_meta_raw.get("column_masks")
+            if "column_masks" in headers_meta_raw:
+                missing_raw = {"column_masks": headers_meta_raw.get("column_masks")}
+            else:
+                missing_raw = headers_meta_raw.get("missing")
             meta_raw = headers_meta_raw.get("meta")
         else:
             headers_raw = headers_meta_raw
-            missing_raw = headers_meta_raw.get("column_masks")
+            if "column_masks" in headers_meta_raw:
+                missing_raw = {"column_masks": headers_meta_raw.get("column_masks")}
+            else:
+                missing_raw = headers_meta_raw.get("missing")
             meta_raw = headers_meta_raw.get("meta")
 
         if "guids" not in headers_raw or "alleles" not in headers_raw:
@@ -282,7 +336,7 @@ class ArdalParser:
                            mmap_arr : np.memmap,
                            headers_raw : Dict,
                            meta_raw : Dict ) -> None:
-        supported_formats = ["ardal.dense.v1", "ardal.bitpack.v1", "ardal.bin.v1", "ardal.npy.v1", "ardal.npz.v1"]
+        supported_formats = ["ardal.dense.v1", "ardal.bitpack.v1", "ardal.bin.v1", "ardal.bin.v2", "ardal.bin.v3", "ardal.npy.v1", "ardal.npz.v1"]
         
         if not isinstance(mmap_arr, np.ndarray):
             raise LoadMatrixError("Bitpack matrix must be a NumPy array.")
@@ -312,13 +366,16 @@ class ArdalParser:
         if words != expected_words:
             raise LoadMatrixError(f"words_per_row mismatch: header {expected_words}, file {words}")
 
-        ## file size check if loaded from an uncompressed .bin
+        ## file size check if loaded from an uncompressed .bin. v2 files can
+        ## contain appended binary sections after the allele matrix.
         bin_resolved = meta_raw.get("data_file_resolved")
         if bin_resolved:
             bin_path = Path(bin_resolved)
             expected_bytes = n_rows * expected_words * 8
             size = bin_path.stat().st_size
-            if size != expected_bytes:
+            if meta_raw.get("format") in ("ardal.bin.v2", "ardal.bin.v3"):
+                self._validate_binary_sections(meta_raw, size, expected_bytes)
+            elif size != expected_bytes:
                 raise LoadMatrixError(f"Binary size mismatch: expected {expected_bytes}, got {size}")
         else:
             expected_bytes = n_rows * expected_words * 8
@@ -431,17 +488,34 @@ class ArdalParser:
 
         n_rows = int(meta_raw["n_rows"])
         words  = int(meta_raw["words_per_row"])
+        allele_section = self._get_allele_matrix_section(meta_raw, n_rows, words)
 
         if matrix_format == ".bin":
             meta_raw["data_file_resolved"] = str(bin_path.resolve())
-            ## memmap the array
-            try:
-                mmap_arr = np.memmap(bin_path, mode="r", dtype=np.dtype("<u8"), shape=(n_rows, words), order="C")
-            except Exception as e:
-                raise LoadMatrixError(f"Failed to load packed matrix: {e}")
+            compression = allele_section.get("compression")
+            if compression in (None, "", "none"):
+                ## memmap the array
+                try:
+                    mmap_arr = np.memmap(
+                        bin_path,
+                        mode="r",
+                        dtype=np.dtype(allele_section["dtype"]),
+                        offset=int(allele_section["offset"]),
+                        shape=tuple(allele_section["shape"]),
+                        order="C",
+                    )
+                except Exception as e:
+                    raise LoadMatrixError(f"Failed to load packed matrix: {e}")
+            elif compression == "zstd":
+                mmap_arr = self._load_compressed_allele_section(bin_path, allele_section)
+            else:
+                raise UnsupportedFormatError(f"Unsupported allele_matrix compression: {compression}")
+            missing_raw = self._load_binary_missing_masks(meta_raw, headers_raw, bin_path, missing_raw)
             return mmap_arr, headers_raw, meta_raw, missing_raw
 
         if matrix_format == ".bin.zst":
+            if meta_raw.get("format") in ("ardal.bin.v2", "ardal.bin.v3"):
+                raise UnsupportedFormatError("Sectioned Ardal binary formats are not supported for whole-file .bin.zst inputs.")
             meta_raw["compressed_data_file_resolved"] = str(bin_path.resolve())
             meta_raw["data_file_resolved"] = None
             return self._load_bitpack_zstd(bin_path, n_rows, words), headers_raw, meta_raw, missing_raw
@@ -571,6 +645,169 @@ class ArdalParser:
         matrix = np.ascontiguousarray(matrix)
         headers = {"guids": guids, "alleles": alleles}
         return matrix, headers
+
+
+    def _get_allele_matrix_section( self,
+                                    meta_raw: Dict,
+                                    n_rows: int,
+                                    words: int ) -> Dict:
+        sections = meta_raw.get("sections")
+        if not isinstance(sections, Dict) or "allele_matrix" not in sections:
+            return {
+                "offset": 0,
+                "dtype": "<u8",
+                "shape": [n_rows, words],
+                "nbytes": n_rows * words * 8,
+            }
+
+        section = sections["allele_matrix"]
+        if not isinstance(section, Dict):
+            raise LoadMatrixError("ardal.bin.v2 metadata has malformed allele_matrix section.")
+
+        shape = section.get("shape")
+        if not isinstance(shape, list) or len(shape) != 2:
+            raise LoadMatrixError("ardal.bin.v2 allele_matrix section must define shape [n_rows, words_per_row].")
+        if int(shape[0]) != n_rows or int(shape[1]) != words:
+            raise LoadMatrixError(
+                f"ardal.bin.v2 allele_matrix shape mismatch: section {shape}, meta {[n_rows, words]}"
+            )
+
+        dtype = np.dtype(section.get("dtype", "<u8"))
+        if dtype != np.dtype("<u8"):
+            raise LoadMatrixError(f"ardal.bin.v2 allele_matrix dtype must be '<u8', got {dtype}.")
+
+        return {
+            "offset": int(section.get("offset", 0)),
+            "dtype": dtype,
+            "shape": [n_rows, words],
+            "nbytes": int(section.get("nbytes", n_rows * words * dtype.itemsize)),
+            "compression": section.get("compression"),
+            "uncompressed_nbytes": int(section.get("uncompressed_nbytes", n_rows * words * dtype.itemsize)),
+        }
+
+
+    def _validate_binary_sections( self,
+                                   meta_raw: Dict,
+                                   file_size: int,
+                                   expected_matrix_bytes: int ) -> None:
+        sections = meta_raw.get("sections")
+        if not isinstance(sections, Dict):
+            raise LoadMatrixError("ardal.bin.v2 metadata missing 'sections'.")
+
+        required = ("allele_matrix",)
+        for name in required:
+            if name not in sections:
+                raise LoadMatrixError(f"ardal.bin.v2 metadata missing section '{name}'.")
+
+        for name, section in sections.items():
+            if not isinstance(section, Dict):
+                raise LoadMatrixError(f"ardal.bin.v2 section '{name}' is malformed.")
+            try:
+                offset = int(section.get("offset", 0))
+                nbytes = int(section.get("nbytes", 0))
+            except (TypeError, ValueError) as exc:
+                raise LoadMatrixError(f"ardal.bin.v2 section '{name}' has invalid offset/nbytes.") from exc
+            if offset < 0 or nbytes < 0 or offset + nbytes > file_size:
+                raise LoadMatrixError(
+                    f"ardal.bin.v2 section '{name}' exceeds file bounds: offset={offset}, nbytes={nbytes}, file={file_size}."
+                )
+
+        allele_section = sections["allele_matrix"]
+        compression = allele_section.get("compression")
+        if compression in (None, "", "none"):
+            allele_nbytes = int(allele_section.get("nbytes", expected_matrix_bytes))
+            if allele_nbytes != expected_matrix_bytes:
+                raise LoadMatrixError(
+                    f"ardal.bin.v2 allele_matrix byte size mismatch: expected {expected_matrix_bytes}, got {allele_nbytes}."
+                )
+        elif compression == "zstd":
+            uncompressed_nbytes = int(allele_section.get("uncompressed_nbytes", 0))
+            if uncompressed_nbytes != expected_matrix_bytes:
+                raise LoadMatrixError(
+                    f"Compressed allele_matrix uncompressed byte size mismatch: expected {expected_matrix_bytes}, got {uncompressed_nbytes}."
+                )
+        else:
+            raise UnsupportedFormatError(f"Unsupported allele_matrix compression: {compression}")
+
+
+    def _load_binary_missing_masks( self,
+                                    meta_raw: Dict,
+                                    headers_raw: Dict,
+                                    bin_path: Path,
+                                    missing_raw: Union[Dict, None] ) -> Union[Dict, None]:
+        if not isinstance(missing_raw, Dict):
+            return missing_raw
+
+        descriptor = missing_raw.get("missing") if "missing" in missing_raw else missing_raw
+        if not isinstance(descriptor, Dict):
+            return missing_raw
+        if descriptor.get("encoding") != "binary_sections":
+            return missing_raw
+
+        sections = meta_raw.get("sections")
+        if not isinstance(sections, Dict):
+            raise LoadMatrixError("Binary missing masks require metadata sections.")
+
+        offsets_name = descriptor.get("offsets_section", "missing_offsets")
+        ranges_name = descriptor.get("ranges_section", "missing_ranges")
+        offsets_section = sections.get(offsets_name)
+        ranges_section = sections.get(ranges_name)
+        
+        if not isinstance(offsets_section, Dict) or not isinstance(ranges_section, Dict):
+            raise LoadMatrixError("Binary missing masks require missing_offsets and missing_ranges sections.")
+
+        guids = headers_raw.get("guids", []) if isinstance(headers_raw, Dict) else []
+        n_rows = len(guids)
+        
+        offsets = np.memmap(
+            bin_path,
+            mode="r",
+            dtype=np.dtype(offsets_section.get("dtype", "<u8")),
+            offset=int(offsets_section["offset"]),
+            shape=(int(offsets_section.get("length", n_rows + 1)),),
+        )
+        
+        if offsets.shape[0] != n_rows + 1:
+            raise LoadMatrixError(
+                f"Binary missing offsets length mismatch: expected {n_rows + 1}, got {offsets.shape[0]}."
+            )
+
+        ranges_shape = ranges_section.get("shape", [0, 2])
+        if not isinstance(ranges_shape, list) or len(ranges_shape) != 2 or int(ranges_shape[1]) != 2:
+            raise LoadMatrixError("Binary missing ranges section must define shape [n_ranges, 2].")
+        
+        ranges = np.memmap(
+            bin_path,
+            mode="r",
+            dtype=np.dtype(ranges_section.get("dtype", "<u4")),
+            offset=int(ranges_section["offset"]),
+            shape=(int(ranges_shape[0]), 2),
+        )
+        log.debug(
+            "Binary missing interval sections mapped for lazy inflation: "
+            f"offsets_len={offsets.shape[0]}, ranges_shape={ranges.shape}, "
+            f"ranges_dtype={ranges.dtype}."
+        )
+
+        for row_idx, guid in enumerate(guids):
+            start = int(offsets[row_idx])
+            end = int(offsets[row_idx + 1])
+            
+            if start < 0 or end < start or end > ranges.shape[0]:
+                raise LoadMatrixError(f"Binary missing range offsets malformed for GUID '{guid}'.")
+            
+            for range_start, range_end in ranges[start:end]:
+                left = int(range_start)
+                right = int(range_end)
+                
+                if right < left:
+                    raise LoadMatrixError(f"Binary missing range malformed for GUID '{guid}': [{left}, {right}).")
+        log.debug(
+            "Prepared lazy binary missing interval store during matrix load: "
+            f"rows={n_rows}, ranges={ranges.shape[0]}."
+        )
+
+        return BinaryMissingMaskStore(guids, offsets, ranges)
         
 
     def _load_parquet( self,
@@ -639,11 +876,22 @@ class ArdalParser:
         else:
             raise LoadMatrixError(f"headers should be <dict>, not <{type(headers)}>.")
 
+        if isinstance(missing_obj, BinaryMissingMaskStore):
+            return missing_obj
+
         per_guid = {guid: [] for guid in guids}
 
         if not missing_obj or not isinstance(missing_obj, Dict):
             return {"column_masks": per_guid}
-                
+
+        if isinstance(missing_obj.get("missing"), Dict):
+            missing_obj = missing_obj["missing"]
+
+        if isinstance(missing_obj.get("column_masks"), Dict):
+            missing_obj = missing_obj["column_masks"]
+        elif isinstance(missing_obj.get("missing_masks"), Dict):
+            missing_obj = missing_obj["missing_masks"]
+
         if isinstance(missing_obj, Dict):
             iterable = missing_obj.items()
             for guid, sites in iterable:
@@ -718,6 +966,75 @@ class ArdalParser:
 
         arr = np.frombuffer(data, dtype=np.dtype("<u8")).reshape((n_rows, words))
         return np.ascontiguousarray(arr)
+
+
+    def _load_compressed_allele_section( self,
+                                         bin_path: Path,
+                                         section: Dict ) -> np.memmap:
+        """Decompress a compressed allele_matrix section to a temporary memmap file."""
+        compression = section.get("compression")
+        if compression != "zstd":
+            raise UnsupportedFormatError(f"Unsupported allele_matrix compression: {compression}")
+
+        zstandard = require_package(
+            "zstandard",
+            error_message="The package 'zstandard' is required to load zstd-compressed allele matrix sections. Install it with `pip install zstandard`."
+        )
+        offset = int(section["offset"])
+        nbytes = int(section["nbytes"])
+        expected_bytes = int(section["uncompressed_nbytes"])
+        dtype = np.dtype(section.get("dtype", "<u8"))
+        shape = tuple(section["shape"])
+
+        try:
+            with open(bin_path, "rb") as fin:
+                fin.seek(offset)
+                compressed = fin.read(nbytes)
+        except Exception as exc:
+            raise LoadMatrixError(f"Failed to read compressed allele_matrix section: {exc}") from exc
+
+        try:
+            dctx = zstandard.ZstdDecompressor()
+            tmp_path = None
+            with tempfile.NamedTemporaryFile(prefix="ardal_allele_matrix_", suffix=".bin", delete=False) as tmp:
+                tmp_path = tmp.name
+                with dctx.stream_reader(io.BytesIO(compressed)) as reader:
+                    total = 0
+                    while True:
+                        chunk = reader.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        tmp.write(chunk)
+                if total != expected_bytes:
+                    raise LoadMatrixError(
+                        f"Decompressed allele_matrix size mismatch: expected {expected_bytes}, got {total}."
+                    )
+        except LoadMatrixError:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise LoadMatrixError(f"Failed to decompress allele_matrix section: {exc}") from exc
+
+        self._temporary_matrix_files.append(tmp_path)
+        try:
+            return np.memmap(
+                tmp_path,
+                mode="r",
+                dtype=dtype,
+                offset=0,
+                shape=shape,
+                order="C",
+            )
+        except Exception as exc:
+            raise LoadMatrixError(f"Failed to memmap decompressed allele_matrix section: {exc}") from exc
 
 
     @staticmethod

@@ -9,53 +9,22 @@ from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Sequence, Tuple
 import numpy as np
 from numpy.lib.format import open_memmap
+from ardal.builder.schemas import (
+    DATA_TYPES,
+    DEFAULT_ALLELE_ID_FORMAT,
+    DEFAULT_NONSYN_ALLELE_ID_FORMAT,
+    V2_SAMPLE_SCHEMA_VERSION,
+    binary_missing_ranges_payload,
+    build_allele_model,
+    build_matrix_metadata,
+    column_masks_payload,
+)
 
-DEFAULT_ALLELE_ID_FORMAT = "{chr}.{pos}.{ref}.{alt}"
-DEFAULT_NONSYN_ALLELE_ID_FORMAT = "{chr}.{gene}.{pos}.{ref}.{alt}"
-V2_SAMPLE_SCHEMA_VERSION = "ardal.sample_variants.v2"
-DATA_TYPES = ("snps", "genic_snps", "nonsyns")
 _ALLELE_ID_FORMAT: str | None = None
 _ALLELE_ID_PATTERN: re.Pattern | None = None
 _ALLELE_ID_POS_KEY: str | None = None
 _ALLELE_ID_HAS_CHR: bool = True
 _ALLELE_ID_HAS_GENE: bool = False
-
-
-def build_matrix_metadata(
-    *,
-    format_name : str,
-    dtype : str,
-    n_rows : int,
-    n_cols : int,
-    matrix_file : str,
-    row_major : bool = True,
-    data_nbytes : int | None = None,
-    data_sha256 : str | None = None,
-    words_per_row : int | None = None,
-    bits_per_word : int | None = None,
-    row_stride_bytes : int | None = None,
-    endianness : str | None = None,
-) -> Dict[str, object]:
-    """Create a compact metadata dict for any serialized matrix artifact."""
-    def _as_int( value ):
-        
-        return None if value is None else int(value)
-
-    return {
-        "format": format_name,
-        "dtype": dtype,
-        "endianness": endianness,
-        "row_major": bool(row_major),
-        "n_rows": int(n_rows),
-        "n_cols": int(n_cols),
-        "matrix_file": matrix_file,
-        "data_nbytes": _as_int(data_nbytes),
-        "data_sha256": data_sha256,
-        "words_per_row": _as_int(words_per_row),
-        "bits_per_word": _as_int(bits_per_word),
-        "row_stride_bytes": _as_int(row_stride_bytes),
-        "generated_by": "ardal::json_to_all.py",
-    }
 
 
 def dump_json(
@@ -83,6 +52,9 @@ def write_matrix_meta(
     bits_per_word : int | None = None,
     row_stride_bytes : int | None = None,
     endianness : str | None = None,
+    matrix_kind : str | None = None,
+    allele_model : Dict[str, object] | None = None,
+    sections : Dict[str, object] | None = None,
 ) -> str:
     """
     Description:
@@ -121,6 +93,9 @@ def write_matrix_meta(
         bits_per_word=bits_per_word,
         row_stride_bytes=row_stride_bytes,
         endianness=endianness,
+        matrix_kind=matrix_kind,
+        allele_model=allele_model,
+        sections=sections,
     )
 
     payload = {"meta": meta, "headers": headers}
@@ -827,6 +802,144 @@ def column_masks_from_missing_blocks(
     return column_masks
 
 
+def append_column_range(
+    ranges : List[List[int]],
+    start : int,
+    end : int,
+):
+    """Append a [start, end) column range, merging with the previous range when adjacent."""
+    if ( end <= start ):
+        return
+    if ( ranges and start <= ranges[-1][1] ):
+        if ( end > ranges[-1][1] ):
+            ranges[-1][1] = end
+        return
+    ranges.append([int(start), int(end)])
+
+
+def missing_column_ranges_from_entries(
+    entries : Iterable[object],
+    columns_by_site : Dict[str, Tuple[List[int], List[List[int]]]],
+) -> List[List[int]]:
+    """Project one sample's missing genomic entries to compact matrix-column [start, end) ranges."""
+    ranges: List[List[int]] = []
+    for entry in entries or []:
+        if isinstance(entry, (list, tuple)) and len(entry) == 3:
+            chrom, start, end = entry
+            site_index = columns_by_site.get(str(chrom))
+            if site_index is None:
+                continue
+            positions, columns = site_index
+            left = bisect.bisect_left(positions, int(start))
+            right = bisect.bisect_right(positions, int(end))
+            for cols_at_pos in columns[left:right]:
+                if ( not cols_at_pos ):
+                    continue
+                append_column_range(ranges, min(cols_at_pos), max(cols_at_pos) + 1)
+            continue
+
+        if ( "." not in str(entry) ):
+            continue
+        chrom, pos = str(entry).rsplit(".", 1)
+        site_index = columns_by_site.get(chrom)
+        if site_index is None:
+            continue
+        positions, columns = site_index
+        try:
+            pos_i = int(pos)
+        except ValueError:
+            continue
+        idx = bisect.bisect_left(positions, pos_i)
+        if idx < len(positions) and positions[idx] == pos_i:
+            cols_at_pos = columns[idx]
+            if ( cols_at_pos ):
+                append_column_range(ranges, min(cols_at_pos), max(cols_at_pos) + 1)
+
+    return ranges
+
+
+def file_sha256(
+    path : Path | str,
+) -> str:
+    """Compute sha256 for a binary artifact."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8*1024*1024), b""):
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+def append_missing_range_sections(
+    *,
+    binpath : str,
+    guids : Sequence[str],
+    sample_missing_positions : Dict[str, list],
+    columns_by_site : Dict[str, Tuple[List[int], List[List[int]]]],
+    n_cols : int,
+) -> Dict[str, object]:
+    """Append per-sample missing column ranges to the allele matrix .bin file."""
+    range_dtype = np.dtype("<u4") if n_cols <= np.iinfo(np.uint32).max else np.dtype("<u8")
+    offset_dtype = np.dtype("<u8")
+    n_samples = len(guids)
+    offsets_offset = Path(binpath).stat().st_size
+    offsets_nbytes = (n_samples + 1) * offset_dtype.itemsize
+
+    print(
+        f"[Append missing ranges] offsets={n_samples + 1:,} dtype={offset_dtype.str} "
+        f"ranges dtype={range_dtype.str}",
+        flush=True,
+    )
+    with open(binpath, "ab") as fh:
+        fh.write(b"\0" * offsets_nbytes)
+    offsets = np.memmap(
+        binpath,
+        mode="r+",
+        dtype=offset_dtype,
+        offset=offsets_offset,
+        shape=(n_samples + 1,),
+    )
+    offsets[0] = 0
+
+    ranges_offset = offsets_offset + offsets_nbytes
+    total_ranges = 0
+    with open(binpath, "ab") as ranges_fh:
+        for i, sample_id in enumerate(guids, 1):
+            if ( i == 1 or i % 25 == 0 or i == n_samples ):
+                print(f"\r[Append missing ranges] {i}/{n_samples}: {sample_id}\x1b[K", end="", flush=True)
+            sample_ranges = missing_column_ranges_from_entries(
+                sample_missing_positions.get(sample_id, []),
+                columns_by_site,
+            )
+            if ( sample_ranges ):
+                arr = np.asarray(sample_ranges, dtype=range_dtype)
+                ranges_fh.write(arr.tobytes(order="C"))
+                total_ranges += int(arr.shape[0])
+            offsets[i] = total_ranges
+    print(flush=True)
+    offsets.flush()
+    close_memmap(offsets)
+
+    ranges_nbytes = total_ranges * 2 * range_dtype.itemsize
+    return {
+        "missing_offsets": {
+            "offset": int(offsets_offset),
+            "nbytes": int(offsets_nbytes),
+            "dtype": offset_dtype.str,
+            "length": int(n_samples + 1),
+            "units": "range_rows",
+        },
+        "missing_ranges": {
+            "offset": int(ranges_offset),
+            "nbytes": int(ranges_nbytes),
+            "dtype": range_dtype.str,
+            "shape": [int(total_ranges), 2],
+            "coordinate_system": "matrix_columns_0_based",
+            "range_semantics": "start_inclusive_end_exclusive",
+        },
+    }
+
+
 def site_sort_key(
     site_id : str,
 ) -> Tuple[str, int, object, str]:
@@ -1170,6 +1283,7 @@ def write_dense_artifacts(
     emit_npz: bool,
     emit_csv: bool,
     missing_sites=None,
+    allele_model=None,
     json_indent: int | None = None,
 ):
     """
@@ -1217,6 +1331,7 @@ def write_dense_artifacts(
             n_cols=n_cols,
             headers=headers,
             missing_sites=missing_sites,
+            allele_model=allele_model,
             json_indent=json_indent,
         )
 
@@ -1239,6 +1354,7 @@ def write_dense_artifacts(
             n_cols=n_cols,
             headers=headers,
             missing_sites=missing_sites,
+            allele_model=allele_model,
             json_indent=json_indent,
         )
 
@@ -1343,9 +1459,8 @@ def write_bitpacked_from_json(
     print(f"[Plan] Direct bitpack: rows={n_rows:,} cols={n_cols:,} words/row={words}, file≈{n_rows*words*8/2**30:.2f} GiB")
     if ( words == 0 ):
         Path(binpath).write_bytes(b"")
-        sha256 = hashlib.sha256(b"").hexdigest() if compute_sha256 else None
-        
-        return binpath, sha256, words
+        allele_nbytes = 0
+        return binpath, None, words, allele_nbytes
 
     mm_bin = np.memmap(binpath, mode="w+", dtype=dtype, shape=(n_rows, words), order="C")
 
@@ -1380,34 +1495,29 @@ def write_bitpacked_from_json(
     mm_bin.flush()
     close_memmap(mm_bin)
 
-    sha256 = None
-    if ( compute_sha256 ):
-        print("[Hash] sha256 of .bin …")
-        h = hashlib.sha256()
-        with open(binpath, "rb") as f:
-            for chunk in iter(lambda: f.read(8*1024*1024), b""):
-                h.update(chunk)
-        sha256 = h.hexdigest()
+    allele_nbytes = n_rows * words * dtype.itemsize
 
-    return binpath, sha256, words
+    return binpath, None, words, allele_nbytes
 
 
 def emit_direct_bitpack_artifacts(
     json_files,
     sample_to_idx,
     allele_to_idx,
+    sample_missing_positions,
+    columns_by_site,
     prefix,
     guids,
     alleles,
-    missing_sites,
     compute_sha256,
     json_indent : int | None,
+    allele_model : Dict[str, object] | None = None,
     data_type : str = "snps",
     allele_id_format : str | None = None,
     nonsyn_allele_id_format : str | None = None,
 ):
     """Write direct bitpacked output and matching metadata."""
-    binpath, sha256, words = write_bitpacked_from_json(
+    binpath, _sha256, words, allele_nbytes = write_bitpacked_from_json(
         json_files,
         sample_to_idx,
         allele_to_idx,
@@ -1419,9 +1529,30 @@ def emit_direct_bitpack_artifacts(
         allele_id_format=allele_id_format,
         nonsyn_allele_id_format=nonsyn_allele_id_format,
     )
+    missing_sections = append_missing_range_sections(
+        binpath=binpath,
+        guids=guids,
+        sample_missing_positions=sample_missing_positions,
+        columns_by_site=columns_by_site,
+        n_cols=len(alleles),
+    )
+    sections = {
+        "allele_matrix": {
+            "offset": 0,
+            "nbytes": int(allele_nbytes),
+            "dtype": "<u8",
+            "shape": [int(len(sample_to_idx)), int(words)],
+            "words_per_row": int(words),
+            "bits_per_word": 64,
+            "row_stride_bytes": int(words * 8),
+        },
+        **missing_sections,
+    }
+    sha256 = file_sha256(binpath) if compute_sha256 else None
+    missing_sites = binary_missing_ranges_payload()
     write_matrix_meta(
         matrix_path=binpath,
-        format_name="ardal.bin.v1",
+        format_name="ardal.bin.v2",
         dtype="<u8",
         n_rows=len(sample_to_idx),
         n_cols=len(alleles),
@@ -1433,6 +1564,9 @@ def emit_direct_bitpack_artifacts(
         bits_per_word=64,
         row_stride_bytes=words * 8,
         endianness="little",
+        matrix_kind="allele_presence",
+        allele_model=allele_model,
+        sections=sections,
     )
 
     return None
@@ -1450,6 +1584,7 @@ def emit_bitpack_artifacts(
     json_indent : int | None,
     keep_dense_file : bool,
     npy_path : str,
+    allele_model : Dict[str, object] | None = None,
 ):
     """
     Description:
@@ -1489,6 +1624,8 @@ def emit_bitpack_artifacts(
         bits_per_word=64,
         row_stride_bytes=words * 8,
         endianness="little",
+        matrix_kind="allele_presence",
+        allele_model=allele_model,
     )
     close_memmap(dense_mm)
     gc.collect()
@@ -1613,22 +1750,47 @@ def create_all_outputs(
     for s, i in sample_to_idx.items():
         guids[i] = s
     alleles = ordered_alleles[:]
+    ref_allele_model = build_allele_model(
+        data_type=data_type,
+        allele_id_format=allele_id_format,
+        nonsyn_allele_id_format=nonsyn_allele_id_format,
+        matrix_projection="allele_presence",
+    )
+    agnostic_allele_model = build_allele_model(
+        data_type=data_type,
+        allele_id_format=allele_id_format,
+        nonsyn_allele_id_format=nonsyn_allele_id_format,
+        matrix_projection="reference_agnostic_minor",
+    )
 
     ref_prefix = f"{output_prefix}.ref"
     minor_prefix = f"{output_prefix}.agnostic"
 
     emit_dense_artifacts = emit_npy or emit_npz or emit_csv
     if ( not emit_dense_artifacts and not emit_agnostic ):
+        allele_genomic_sites = allele_genomic_sites_from_json(
+            json_files,
+            data_type,
+            allele_id_format,
+            nonsyn_allele_id_format,
+        )
+        columns_by_site = build_columns_by_genomic_site(
+            ordered_alleles,
+            allele_to_idx,
+            allele_genomic_sites,
+        )
         emit_direct_bitpack_artifacts(
             json_files,
             sample_to_idx,
             allele_to_idx,
+            sample_missing_positions,
+            columns_by_site,
             ref_prefix,
             guids,
             alleles,
-            None,
             compute_sha256,
             json_indent,
+            allele_model=ref_allele_model,
             data_type=data_type,
             allele_id_format=allele_id_format,
             nonsyn_allele_id_format=nonsyn_allele_id_format,
@@ -1662,15 +1824,10 @@ def create_all_outputs(
         columns_by_site,
     )
     
-    missing_sites_payload = {
-        "missing": {
-            "schema": "ardal.column_masks.v1",
-            "data_type": data_type,
-            "encoding": "column_index_ranges",
-            "coordinate_system": "matrix_columns_0_based_inclusive",
-            "column_masks": column_masks,
-        }
-    }
+    missing_sites_payload = column_masks_payload(
+        data_type=data_type,
+        column_masks=column_masks,
+    )
 
     sample_masked_columns_by_idx = [
         expand_index_ranges(column_masks.get(guid, [])) for guid in guids
@@ -1707,6 +1864,7 @@ def create_all_outputs(
             emit_npz,
             emit_csv,
             missing_sites=missing_sites_payload,
+            allele_model=ref_allele_model,
             json_indent=json_indent,
         )
         if ( dense_minor is not None ):
@@ -1719,6 +1877,7 @@ def create_all_outputs(
                 emit_npz,
                 emit_csv,
                 missing_sites=missing_sites_payload,
+                allele_model=agnostic_allele_model,
                 json_indent=json_indent,
             )
 
@@ -1735,6 +1894,7 @@ def create_all_outputs(
         json_indent,
         keep_dense_file=emit_npy,
         npy_path=ref_npy_path,
+        allele_model=ref_allele_model,
     )
 
     ## bitpack from dense (reference-agnostic)
@@ -1750,6 +1910,7 @@ def create_all_outputs(
         json_indent,
         keep_dense_file=emit_npy,
         npy_path=minor_npy_path,
+        allele_model=agnostic_allele_model,
     )
 
     ## site metadata summarising major/minor alleles
@@ -1799,25 +1960,92 @@ def parse_args():
     
     return ap.parse_args()
 
-def main():
-    """Entry point for invoking the JSON-to-matrix conversion workflow."""
-    args = parse_args()
-    json_dir = args.json_directory
+def json_directory_to_matrices(
+    json_directory : Path | str,
+    output_prefix : str,
+    *,
+    compute_sha256 : bool = False,
+    emit_npy : bool = False,
+    emit_npz : bool = False,
+    emit_csv : bool = False,
+    emit_agnostic : bool = False,
+    allele_id_format : str | None = None,
+    nonsyn_allele_id_format : str | None = DEFAULT_NONSYN_ALLELE_ID_FORMAT,
+    data_types : Sequence[str] = ("snps",),
+    json_indent : int | None = None,
+):
+    """
+    Description:
+        Convert a directory of per-sample JSON payloads into Ardal matrix artifacts.
+
+    Inputs:
+        json_directory: Directory containing sample JSON payloads.
+        output_prefix: Prefix/path used for emitted matrix artifacts.
+        compute_sha256 / emit_npy / emit_npz / emit_csv / emit_agnostic:
+            Serialization options matching the compatibility script.
+        allele_id_format / nonsyn_allele_id_format:
+            Identifier formats used for nucleotide and amino-acid projections.
+        data_types: One or more projections to build.
+        json_indent: Optional indentation for emitted JSON metadata.
+
+    Outputs:
+        None; matrix artifacts are written to disk.
+
+    Exceptions:
+        Raises ValueError when inputs are invalid and propagates downstream IO/parsing errors.
+    """
+    json_dir = Path(json_directory)
     if ( not json_dir.is_dir() ):
-        print(f"{json_dir} is not a directory", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"{json_dir} is not a directory")
 
     json_files = sorted(p for p in json_dir.iterdir() if p.is_file() and p.suffix == ".json")
     if ( not json_files ):
-        print(f"No JSON files found in {json_dir}")
-        sys.exit(1)
+        raise ValueError(f"No JSON files found in {json_dir}")
 
-    for data_type in args.data_types:
-        typed_prefix = f"{args.output_prefix}.{data_type}"
+    for data_type in data_types:
+        if ( data_type not in DATA_TYPES ):
+            raise ValueError(
+                f"Unsupported data type: {data_type}. Expected one of: {', '.join(DATA_TYPES)}"
+            )
+
+    if ( emit_npy or emit_npz ):
+        requested = []
+        if ( emit_npy ):
+            requested.append(".npy")
+        if ( emit_npz ):
+            requested.append(".npz")
+        print(
+            "[Warning] "
+            + " and ".join(requested)
+            + " dense outputs are redundant with the default .bin v2 output for Ardal loading. "
+            + "They are still written because you requested them, but .bin v2 should be preferred.",
+            file=sys.stderr,
+        )
+
+    for data_type in data_types:
+        typed_prefix = f"{output_prefix}.{data_type}"
         print(f"[Projection] {data_type} -> {typed_prefix}")
         create_all_outputs(
             json_files,
             typed_prefix,
+            compute_sha256=compute_sha256,
+            emit_npy=emit_npy,
+            emit_npz=emit_npz,
+            emit_csv=emit_csv,
+            emit_agnostic=emit_agnostic,
+            allele_id_format=allele_id_format,
+            nonsyn_allele_id_format=nonsyn_allele_id_format,
+            data_type=data_type,
+            json_indent=json_indent,
+        )
+
+def main():
+    """Entry point for invoking the JSON-to-matrix conversion workflow."""
+    args = parse_args()
+    try:
+        json_directory_to_matrices(
+            args.json_directory,
+            args.output_prefix,
             compute_sha256=args.compute_sha256,
             emit_npy=args.emit_npy,
             emit_npz=args.emit_npz,
@@ -1825,9 +2053,12 @@ def main():
             emit_agnostic=args.agnostic and not args.no_agnostic,
             allele_id_format=args.allele_id_format,
             nonsyn_allele_id_format=args.nonsyn_allele_id_format,
-            data_type=data_type,
+            data_types=args.data_types,
             json_indent=args.json_indent,
         )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
 if ( __name__ == "__main__" ) :
     main()

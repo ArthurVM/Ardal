@@ -4,6 +4,7 @@ Copyright 2025 Arthur V. Morris
 #ifdef __BMI2__
   #include <immintrin.h>
 #endif
+#include <map>
 #include "BitMatrix.hpp"
 #include "utils/simd_utils.hpp"
 #include "utils/bitops.hpp"
@@ -42,7 +43,8 @@ namespace ardal {
 BitMatrix::BitMatrix( ardal::detail::FlatMatrix matrix_,
                       std::shared_ptr<const std::vector<int>> row_masses,
                       std::shared_ptr<const std::vector<int>> col_masses,
-                      const std::vector<std::vector<uint32_t>>* missing_mask )
+                      const std::vector<std::vector<uint32_t>>* missing_mask,
+                      const MissingRanges* missing_ranges )
   : matrix_(std::move(matrix_)),
     row_masses_(std::move(row_masses)),
     col_masses_(std::move(col_masses)),
@@ -108,6 +110,63 @@ BitMatrix::BitMatrix( ardal::detail::FlatMatrix matrix_,
                     val &= tail_mask_;
                 }
                 sparse.emplace_back(kv.first, val);
+            }
+            if (!sparse.empty()) {
+                row_masks_sparse_[r] = std::move(sparse);
+                has_missing_mask_ = true;
+            }
+        }
+    } else if (missing_ranges && !missing_ranges->empty()) {
+        if (missing_ranges->offsets.size() != n_rows_ + 1) {
+            throw std::runtime_error("BitMatrix: missing range offsets row count mismatch");
+        }
+        for (size_t r = 0; r < n_rows_; ++r) {
+            const uint64_t start_idx = missing_ranges->offsets[r];
+            const uint64_t end_idx = missing_ranges->offsets[r + 1];
+            if (end_idx < start_idx || end_idx > missing_ranges->ranges.size()) {
+                throw std::runtime_error("BitMatrix: malformed missing range offsets");
+            }
+            std::map<size_t, uint64_t> accum;
+            for (uint64_t k = start_idx; k < end_idx; ++k) {
+                uint32_t left = missing_ranges->ranges[k].first;
+                uint32_t right = missing_ranges->ranges[k].second;
+                if (right <= left || left >= n_cols_bits_) {
+                    continue;
+                }
+                if (right > n_cols_bits_) {
+                    right = static_cast<uint32_t>(n_cols_bits_);
+                }
+                size_t first_word = static_cast<size_t>(left) >> 6;
+                size_t last_word = static_cast<size_t>(right - 1) >> 6;
+                for (size_t word = first_word; word <= last_word; ++word) {
+                    const uint32_t word_start = static_cast<uint32_t>(word << 6);
+                    const uint32_t seg_left = std::max(left, word_start);
+                    const uint32_t seg_right = std::min(right, word_start + 64u);
+                    const unsigned bit_left = static_cast<unsigned>(seg_left - word_start);
+                    const unsigned bit_right = static_cast<unsigned>(seg_right - word_start);
+                    uint64_t mask;
+                    if (bit_left == 0 && bit_right == 64) {
+                        mask = ~uint64_t{0};
+                    } else {
+                        mask = ((uint64_t{1} << bit_right) - uint64_t{1}) ^
+                               ((uint64_t{1} << bit_left) - uint64_t{1});
+                    }
+                    accum[word] |= mask;
+                }
+            }
+            if (accum.empty()) {
+                continue;
+            }
+            SparseMask sparse;
+            sparse.reserve(accum.size());
+            for (auto& kv : accum) {
+                uint64_t val = kv.second;
+                if (kv.first + 1 == wpr_) {
+                    val &= tail_mask_;
+                }
+                if (val != 0) {
+                    sparse.emplace_back(kv.first, val);
+                }
             }
             if (!sparse.empty()) {
                 row_masks_sparse_[r] = std::move(sparse);

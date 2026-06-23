@@ -25,6 +25,7 @@ Copyright 2025 Arthur V. Morris
 #include "roaring/roaring.hh"
 #include "detail/flat_matrix.hpp"
 #include "utils/bitops.hpp"
+#include "MissingRanges.hpp"
 
 
 namespace py = pybind11;
@@ -42,7 +43,8 @@ public:
     RoaringMatrix( ardal::detail::FlatMatrix flat_matrix,
                    std::shared_ptr<const std::vector<int>> row_masses,
                    std::shared_ptr<const std::vector<int>> col_masses,
-                   const std::vector<std::vector<uint32_t>>* missing_mask = nullptr );
+                   const std::vector<std::vector<uint32_t>>* missing_mask = nullptr,
+                   const MissingRanges* missing_ranges = nullptr );
 
     // distance functions
     py::array_t<uint32_t> hamming( int threads = 1, bool mask_missing = false ) const;

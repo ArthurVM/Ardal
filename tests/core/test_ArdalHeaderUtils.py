@@ -1,7 +1,9 @@
 import os
 import pytest
 
-from ardal.utils.exceptions import InvalidAlleleQueryError, InvalidGUIDQueryError
+from ardal.core.ArdalDistance import ArdalDistance
+from ardal.core.ArdalHeaderUtils import ArdalHeaderUtils
+from ardal.utils.exceptions import InvalidAlleleQueryError, InvalidGUIDQueryError, ParameterError
 
 
 def test_decode_headers(headerUtils_component):
@@ -50,6 +52,39 @@ def test_decode_allele_position(headerUtils_component):
     assert start == 100
     assert ref == "A"
     assert alt == "T"
+
+
+def test_snv_lookup_keeps_multi_alt_sites(meta):
+    headers = {
+        "guids": ["s1", "s2"],
+        "alleles": ["chr1.100.A.T", "chr1.100.A.C", "chr1.200.G.A"],
+    }
+    header_utils = ArdalHeaderUtils(headers=headers, meta=meta)
+
+    allele_to_locus, allele_to_base, n_loci = header_utils.get_snv_lookup(
+        allele_id_format="{chr}.{pos}.{ref}.{alt}"
+    )
+
+    assert n_loci == 2
+    assert allele_to_locus.tolist() == [0, 0, 1]
+    assert allele_to_base.tolist() == [4, 2, 1]
+
+
+def test_snv_view_errors_for_protein_alleles(meta):
+    headers = {
+        "guids": ["s1", "s2"],
+        "alleles": ["chr1.100.K.N", "chr1.200.M.I"],
+    }
+    header_utils = ArdalHeaderUtils(headers=headers, meta=meta)
+
+    class FakeMatrix:
+        def prepareSnvView(self, allele_to_locus, allele_to_base):
+            raise AssertionError("prepareSnvView should not be called without eligible SNV loci")
+
+    dist = ArdalDistance(header_utils, FakeMatrix(), roaring_enabled=False)
+
+    with pytest.raises(ParameterError, match="amino-acid/protein allele matrices"):
+        dist._ensure_snv_view("{chr}.{pos}.{ref}.{alt}")
 
 
 def test_get_allele_positions(headerUtils_component):

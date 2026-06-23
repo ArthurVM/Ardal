@@ -101,8 +101,11 @@ class Ardal(object):
                                              allele_positions = allele_positions,
                                              missing_masks = self._missing_masks)
 
-        mask_rows = self._headerUtils.get_missing_mask_rows()
-        mask_arg = mask_rows if mask_rows else None
+        if hasattr(self._missing_masks, "to_backend_payload"):
+            mask_arg = self._missing_masks.to_backend_payload()
+        else:
+            mask_rows = self._headerUtils.get_missing_mask_rows()
+            mask_arg = mask_rows if mask_rows else None
 
         log.info(f"""Initialising ardal::HybridMatrix backend with:
                                 matrix = {parser.matrix.shape} {type(parser.matrix)}
